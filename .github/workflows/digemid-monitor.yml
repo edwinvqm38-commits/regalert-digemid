@@ -1,0 +1,41 @@
+name: DIGEMID Monitor
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Hora Perú = UTC-5
+    # 09:17 a. m. Perú = 14:17 UTC
+    # 01:17 p. m. Perú = 18:17 UTC
+    # 06:17 p. m. Perú = 23:17 UTC
+    - cron: "17 14,18,23 * * 1-5"
+
+concurrency:
+  group: digemid-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar monitor DIGEMID
+        run: python main.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 PRODUCT_TABLE = "digemid_alerta_productos"
 PAGE_TABLE = "digemid_documento_paginas"
 EXTRACTION_METHOD = "rule_based_v1"
+DEFAULT_STATUSES = [
+    "text_extracted",
+    "text_extracted_no_products",
+]
+FORCE_EXTRA_STATUSES = [
+    "structured_extracted",
+    "structured_extraction_error",
+]
 
 HEADER_ALIASES = {
     "product_name": [
@@ -92,6 +100,77 @@ SECTION_BREAK_PATTERNS = [
     "NOTA",
 ]
 
+CONTROL_QUALITY_BREAK_PATTERNS = [
+    "EXISTIENDO LA POSIBILIDAD",
+    "PARA MAYOR INFORMACION",
+    "PARA MAYOR INFORMACIÓN",
+    "LIMA,",
+    "DEBIDO AL RIESGO",
+]
+
+FALSIFIED_BREAK_PATTERNS = CONTROL_QUALITY_BREAK_PATTERNS + [
+    "ACCIONES REALIZADAS",
+    "SE EXHORTA",
+]
+
+COUNTRY_NAMES = {
+    "ALEMANIA",
+    "ARGENTINA",
+    "BRASIL",
+    "CANADA",
+    "CANADÁ",
+    "CHILE",
+    "CHINA",
+    "COLOMBIA",
+    "ECUADOR",
+    "ESPANA",
+    "ESPAÑA",
+    "ESTADOS UNIDOS",
+    "FRANCIA",
+    "INDIA",
+    "ITALIA",
+    "JAPON",
+    "JAPÓN",
+    "MEXICO",
+    "MÉXICO",
+    "PANAMA",
+    "PANAMÁ",
+    "PERU",
+    "PERÚ",
+    "REINO UNIDO",
+    "SUIZA",
+    "URUGUAY",
+    "VENEZUELA",
+}
+
+CONTROL_QUALITY_HEADER_PATTERNS = [
+    "NOMBRE DEL PRODUCTO",
+    "Nº DE LOTE",
+    "N° DE LOTE",
+    "LOTE",
+    "REGISTRO",
+    "SANITARIO",
+    "FABRICANTE",
+    "PAIS",
+    "PAÍS",
+    "RESULTADOS ANALITICOS",
+    "RESULTADOS ANALÍTICOS",
+]
+
+FALSIFIED_HEADER_LABELS = {
+    "product_name": ["NOMBRE", "NOMBRE DEL PRODUCTO"],
+    "lot_number": ["LOTE", "Nº DE LOTE", "N° DE LOTE"],
+    "expiry_date": ["FECHA DE VENCIMIENTO", "VENCIMIENTO"],
+    "manufacturer_country": ["FABRICANTE/PAIS", "FABRICANTE/PAÍS"],
+    "intervention_address": [
+        "DIRECCION DE INCAUTACION / INTERVENCION",
+        "DIRECCIÓN DE INCAUTACIÓN / INTERVENCIÓN",
+        "DIRECCION DE INCAUTACION",
+        "DIRECCIÓN DE INCAUTACIÓN",
+    ],
+    "department": ["DEPARTAMENTO"],
+}
+
 
 def load_env():
     load_dotenv()
@@ -131,13 +210,14 @@ def normalize_header(value: str) -> str:
     return upper
 
 
-def get_documents_to_process(supabase, limit: int) -> list[dict]:
+def get_documents_to_process(supabase, limit: int, force: bool) -> list[dict]:
+    statuses = DEFAULT_STATUSES + (FORCE_EXTRA_STATUSES if force else [])
     response = (
         supabase
         .table("digemid_documentos")
         .select("id, document_key, title, process_status")
         .eq("source_type", "alerta")
-        .eq("process_status", "text_extracted")
+        .in_("process_status", statuses)
         .order("published_date", desc=True)
         .limit(limit)
         .execute()
@@ -204,10 +284,10 @@ def detect_alert_type(title: str | None) -> str:
 
     if "RETIRO DEL MERCADO" in normalized_title:
         return "retiro_mercado_control_calidad"
-    if "PRODUCTO FARMACEUTICO FALSIFICADO" in normalized_title:
-        return "producto_falsificado"
     if "PRODUCTOS FARMACEUTICOS FALSIFICADOS" in normalized_title:
         return "productos_falsificados"
+    if "PRODUCTO FARMACEUTICO FALSIFICADO" in normalized_title:
+        return "producto_falsificado"
     if "RECOMENDACIONES" in normalized_title:
         return "recomendacion_seguridad"
     return "otro"
@@ -257,6 +337,164 @@ def detect_header_map(lines: list[str], start_index: int) -> tuple[dict[int, str
 def is_section_break(line: str) -> bool:
     normalized_line = normalize_header(line)
     return any(pattern in normalized_line for pattern in SECTION_BREAK_PATTERNS)
+
+
+def is_country_line(line: str) -> bool:
+    normalized_line = normalize_header(line)
+    if normalized_line in COUNTRY_NAMES:
+        return True
+    if re.fullmatch(r"[A-ZÁÉÍÓÚÑ ]{4,}", line.strip()) and normalized_line in COUNTRY_NAMES:
+        return True
+    return False
+
+
+def looks_like_lot(line: str) -> bool:
+    normalized_line = normalize_text(line)
+    if len(normalized_line) < 3 or len(normalized_line) > 40:
+        return False
+    if not re.search(r"\d", normalized_line):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9./()\-]+", normalized_line))
+
+
+def looks_like_sanitary_registration(line: str) -> bool:
+    normalized_line = normalize_text(line).upper()
+    if len(normalized_line) < 4 or len(normalized_line) > 40:
+        return False
+    return bool(re.fullmatch(r"[A-Z]{1,4}-[A-Z0-9\-]+", normalized_line))
+
+
+def normalize_lines(full_text: str) -> list[str]:
+    return [
+        normalize_text(line)
+        for line in full_text.splitlines()
+        if normalize_text(line)
+    ]
+
+
+def find_control_quality_header_start(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        normalized_line = normalize_header(line)
+        if "NOMBRE DEL PRODUCTO" not in normalized_line:
+            continue
+
+        window = lines[index:index + 12]
+        normalized_window = [normalize_header(item) for item in window]
+        score = sum(
+            1 for pattern in CONTROL_QUALITY_HEADER_PATTERNS
+            if any(pattern in candidate for candidate in normalized_window)
+        )
+        if score >= 7:
+            return index
+
+    return None
+
+
+def find_falsified_header_start(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        normalized_line = normalize_header(line)
+        if (
+            "DATOS DEL PRODUCTO FARMACEUTICO FALSIFICADO" in normalized_line
+            or "DATOS DE PRODUCTOS FARMACEUTICOS FALSIFICADOS" in normalized_line
+        ):
+            return index
+
+    for index, line in enumerate(lines):
+        normalized_line = normalize_header(line)
+        if normalized_line == "NOMBRE":
+            window = lines[index:index + 10]
+            normalized_window = [normalize_header(item) for item in window]
+            if any("LOTE" == candidate or "Nº DE LOTE" in candidate or "N° DE LOTE" in candidate for candidate in normalized_window):
+                return index
+
+    return None
+
+
+def get_preview_lines(lines: list[str], start_index: int | None, limit: int = 20) -> list[str]:
+    if start_index is None:
+        return lines[:limit]
+    return lines[start_index:start_index + limit]
+
+
+def collect_until(lines: list[str], start_index: int, stop_predicate) -> tuple[list[str], int]:
+    collected: list[str] = []
+    index = start_index
+
+    while index < len(lines):
+        line = lines[index]
+        if stop_predicate(line):
+            break
+        collected.append(line)
+        index += 1
+
+    return collected, index
+
+
+def join_lines(lines: list[str]) -> str | None:
+    filtered_lines = [normalize_text(line) for line in lines if normalize_text(line)]
+    value = normalize_text(" ".join(filtered_lines))
+    return value or None
+
+
+def split_manufacturer_country(value: str | None) -> tuple[str | None, str | None]:
+    if not value:
+        return None, None
+
+    parts = [normalize_text(part) for part in re.split(r"\s*/\s*", value) if normalize_text(part)]
+    if len(parts) >= 2 and is_country_line(parts[-1]):
+        return join_lines(parts[:-1]), parts[-1]
+
+    if is_country_line(value):
+        return None, value
+
+    return value, None
+
+
+def looks_like_registration_holder_line(line: str) -> bool:
+    normalized_line = normalize_header(line)
+    if is_country_line(line):
+        return False
+    if any(token in normalized_line for token in ["S.A.C", "S.A.", "E.I.R.L", "LABORATORIO", "DROGUERIA", "DROGUERÍA"]):
+        return True
+    return normalized_line == line.upper() and len(normalized_line.split()) <= 8
+
+
+def build_partial_product(
+    document: dict,
+    alert_number: str | None,
+    alert_type: str,
+    raw_block_lines: list[str],
+    extra_values: dict | None = None,
+    confidence: float = 0.6,
+) -> dict:
+    product = {
+        "document_id": document["id"],
+        "document_key": document.get("document_key"),
+        "alert_number": alert_number,
+        "alert_type": alert_type,
+        "product_name": None,
+        "lot_number": None,
+        "sanitary_registration": None,
+        "manufacturer": None,
+        "manufacturer_country": None,
+        "registration_holder": None,
+        "analytical_result": None,
+        "expiry_date": None,
+        "department": None,
+        "intervention_address": None,
+        "raw_block": "\n".join(raw_block_lines).strip(),
+        "extraction_method": EXTRACTION_METHOD,
+        "confidence": confidence,
+        "metadata": {
+            "source": "page_text_concat",
+            "line_count": len(raw_block_lines),
+        },
+    }
+
+    if extra_values:
+        product.update(extra_values)
+
+    return product
 
 
 def looks_like_new_row(cells: list[str], header_map: dict[int, str]) -> bool:
@@ -350,63 +588,308 @@ def is_valid_product(product: dict) -> bool:
     return bool(product.get("product_name")) and len(populated) >= 2
 
 
+def extract_control_quality_products(
+    document: dict,
+    lines: list[str],
+    alert_number: str | None,
+    alert_type: str,
+) -> tuple[list[dict], dict]:
+    header_start = find_control_quality_header_start(lines)
+    preview_lines = get_preview_lines(lines, header_start)
+
+    if header_start is None:
+        return [], {
+            "table_detected": False,
+            "reason": "No se detecto encabezado de tabla de control de calidad",
+            "preview_lines": preview_lines,
+        }
+
+    data_start = header_start
+    while data_start < len(lines):
+        if "RESULTADOS ANALITICOS" in normalize_header(lines[data_start]) or "RESULTADOS ANALÍTICOS" in normalize_header(lines[data_start]):
+            data_start += 1
+            break
+        data_start += 1
+
+    if data_start >= len(lines):
+        return [], {
+            "table_detected": True,
+            "reason": "Se detecto encabezado pero no se encontraron lineas de datos",
+            "preview_lines": preview_lines,
+        }
+
+    analysis_stop = lambda value: any(pattern in normalize_header(value) for pattern in CONTROL_QUALITY_BREAK_PATTERNS)
+
+    product_name_lines, index = collect_until(lines, data_start, looks_like_lot)
+    if index >= len(lines):
+        partial_product = build_partial_product(
+            document,
+            alert_number,
+            alert_type,
+            lines[data_start:data_start + 12],
+            {"product_name": join_lines(product_name_lines)},
+            confidence=0.55,
+        )
+        return ([partial_product] if partial_product["product_name"] else []), {
+            "table_detected": True,
+            "reason": "No se detecto lote despues del nombre del producto",
+            "preview_lines": preview_lines,
+        }
+
+    lot_number = lines[index]
+    index += 1
+
+    sanitary_registration = None
+    if index < len(lines) and looks_like_sanitary_registration(lines[index]):
+        sanitary_registration = lines[index]
+        index += 1
+
+    manufacturer_lines, index = collect_until(lines, index, is_country_line)
+    manufacturer_country = None
+    if index < len(lines) and is_country_line(lines[index]):
+        manufacturer_country = lines[index]
+        index += 1
+
+    registration_holder_lines, index = collect_until(
+        lines,
+        index,
+        lambda value: (not looks_like_registration_holder_line(value)) or analysis_stop(value),
+    )
+    analytical_result_lines, index = collect_until(
+        lines,
+        index,
+        lambda value: analysis_stop(value),
+    )
+
+    product_name = join_lines(product_name_lines)
+    manufacturer = join_lines(manufacturer_lines)
+    registration_holder = join_lines(registration_holder_lines)
+    analytical_result = join_lines(analytical_result_lines)
+
+    if not analytical_result and registration_holder:
+        pieces = registration_holder.split()
+        if len(pieces) > 8:
+            cut = max(3, len(pieces) // 2)
+            registration_holder = " ".join(pieces[:cut])
+            analytical_result = " ".join(pieces[cut:])
+
+    product = build_partial_product(
+        document,
+        alert_number,
+        alert_type,
+        lines[data_start:index],
+        {
+            "product_name": product_name,
+            "lot_number": lot_number,
+            "sanitary_registration": sanitary_registration,
+            "manufacturer": manufacturer,
+            "manufacturer_country": manufacturer_country,
+            "registration_holder": registration_holder,
+            "analytical_result": analytical_result,
+        },
+        confidence=0.86 if product_name and lot_number else 0.62,
+    )
+
+    if product_name and lot_number:
+        return [product], {
+            "table_detected": True,
+            "reason": "Extraccion secuencial de control de calidad",
+            "preview_lines": preview_lines,
+        }
+
+    return ([product] if product_name or lot_number else []), {
+        "table_detected": True,
+        "reason": "Se detecto tabla pero solo se pudo extraer parcialmente",
+        "preview_lines": preview_lines,
+    }
+
+
+def match_falsified_label(line: str) -> str | None:
+    normalized_line = normalize_header(line)
+    for field, aliases in FALSIFIED_HEADER_LABELS.items():
+        if any(normalized_line == alias for alias in aliases):
+            return field
+    return None
+
+
+def extract_falsified_products(
+    document: dict,
+    lines: list[str],
+    alert_number: str | None,
+    alert_type: str,
+) -> tuple[list[dict], dict]:
+    header_start = find_falsified_header_start(lines)
+    preview_lines = get_preview_lines(lines, header_start)
+
+    if header_start is None:
+        return [], {
+            "table_detected": False,
+            "reason": "No se detecto encabezado de bloque de falsificados",
+            "preview_lines": preview_lines,
+        }
+
+    products: list[dict] = []
+    current_values: dict = {}
+    raw_block_lines: list[str] = []
+    current_field: str | None = None
+
+    for index in range(header_start + 1, len(lines)):
+        line = lines[index]
+        normalized_line = normalize_header(line)
+
+        if any(pattern in normalized_line for pattern in FALSIFIED_BREAK_PATTERNS):
+            break
+
+        matched_field = match_falsified_label(line)
+        if matched_field:
+            if matched_field == "product_name" and current_values.get("product_name"):
+                manufacturer, manufacturer_country = split_manufacturer_country(
+                    current_values.get("manufacturer_country")
+                )
+                current_values["manufacturer"] = manufacturer or current_values.get("manufacturer")
+                current_values["manufacturer_country"] = manufacturer_country or current_values.get("manufacturer_country")
+                products.append(
+                    build_partial_product(
+                        document,
+                        alert_number,
+                        alert_type,
+                        raw_block_lines,
+                        current_values,
+                        confidence=0.84 if current_values.get("product_name") and current_values.get("lot_number") else 0.6,
+                    )
+                )
+                current_values = {}
+                raw_block_lines = []
+
+            current_field = matched_field
+            raw_block_lines.append(line)
+            continue
+
+        if current_field:
+            current_values[current_field] = join_lines([
+                current_values.get(current_field),
+                line,
+            ])
+            raw_block_lines.append(line)
+
+    if current_values.get("product_name") or current_values.get("lot_number"):
+        manufacturer, manufacturer_country = split_manufacturer_country(
+            current_values.get("manufacturer_country")
+        )
+        current_values["manufacturer"] = manufacturer or current_values.get("manufacturer")
+        current_values["manufacturer_country"] = manufacturer_country or current_values.get("manufacturer_country")
+        products.append(
+            build_partial_product(
+                document,
+                alert_number,
+                alert_type,
+                raw_block_lines,
+                current_values,
+                confidence=0.84 if current_values.get("product_name") and current_values.get("lot_number") else 0.6,
+            )
+        )
+
+    valid_products = [
+        product for product in products
+        if product.get("product_name") or product.get("lot_number") or product.get("raw_block")
+    ]
+
+    return valid_products, {
+        "table_detected": True,
+        "reason": (
+            "Extraccion por etiquetas de falsificados"
+            if valid_products else
+            "Se detecto bloque de falsificados pero no hubo campos suficientes"
+        ),
+        "preview_lines": preview_lines,
+    }
+
+
 def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dict], dict]:
-    lines = [line.rstrip() for line in full_text.splitlines()]
+    lines = normalize_lines(full_text)
     title = document.get("title")
     alert_number = detect_alert_number(title, full_text, document.get("document_key"))
     alert_type = detect_alert_type(title)
 
-    header_map, header_index = detect_header_map(lines, 0)
-    if not header_map or header_index is None:
-        return [], {
-            "alert_number": alert_number,
-            "alert_type": alert_type,
-            "table_detected": False,
+    if alert_type == "retiro_mercado_control_calidad":
+        products, diagnostics = extract_control_quality_products(
+            document,
+            lines,
+            alert_number,
+            alert_type,
+        )
+    elif alert_type in {"producto_falsificado", "productos_falsificados"}:
+        products, diagnostics = extract_falsified_products(
+            document,
+            lines,
+            alert_number,
+            alert_type,
+        )
+    else:
+        header_map, header_index = detect_header_map(lines, 0)
+        preview_lines = get_preview_lines(lines, header_index)
+
+        products = []
+        diagnostics = {
+            "table_detected": bool(header_map and header_index is not None),
+            "reason": "Tipo de alerta sin extractor especializado",
+            "preview_lines": preview_lines,
         }
 
-    products: list[dict] = []
-    current_product: dict | None = None
+        if header_map and header_index is not None:
+            current_product: dict | None = None
 
-    for index in range(header_index + 1, len(lines)):
-        raw_line = lines[index]
-        line = normalize_text(raw_line)
+            for index in range(header_index + 1, len(lines)):
+                raw_line = lines[index]
+                line = normalize_text(raw_line)
 
-        if not line:
-            continue
+                if not line:
+                    continue
 
-        if is_section_break(line):
-            break
+                if is_section_break(line):
+                    break
 
-        cells = split_table_cells(raw_line)
-        resolved_headers = [resolve_header_field(cell) for cell in cells]
-        if "product_name" in resolved_headers:
-            continue
+                cells = split_table_cells(raw_line)
+                resolved_headers = [resolve_header_field(cell) for cell in cells]
+                if "product_name" in resolved_headers:
+                    continue
 
-        if looks_like_new_row(cells, header_map):
+                if looks_like_new_row(cells, header_map):
+                    if current_product and is_valid_product(current_product):
+                        products.append(current_product)
+
+                    current_product = row_to_product(
+                        document=document,
+                        alert_number=alert_number,
+                        alert_type=alert_type,
+                        header_map=header_map,
+                        cells=cells,
+                        raw_line=raw_line,
+                        row_index=index,
+                    )
+                    continue
+
+                if current_product:
+                    append_continuation(current_product, raw_line)
+
             if current_product and is_valid_product(current_product):
                 products.append(current_product)
 
-            current_product = row_to_product(
-                document=document,
-                alert_number=alert_number,
-                alert_type=alert_type,
-                header_map=header_map,
-                cells=cells,
-                raw_line=raw_line,
-                row_index=index,
-            )
-            continue
-
-        if current_product:
-            append_continuation(current_product, raw_line)
-
-    if current_product and is_valid_product(current_product):
-        products.append(current_product)
+            if not products and diagnostics["table_detected"] and preview_lines:
+                partial_product = build_partial_product(
+                    document,
+                    alert_number,
+                    alert_type,
+                    preview_lines,
+                    confidence=0.5,
+                )
+                products = [partial_product]
+                diagnostics["reason"] = "Se detecto bloque de tabla, se guarda registro parcial"
 
     return products, {
         "alert_number": alert_number,
         "alert_type": alert_type,
-        "table_detected": True,
+        **diagnostics,
     }
 
 
@@ -454,12 +937,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
     load_env()
 
     supabase = get_supabase()
-    documents = get_documents_to_process(supabase, args.limit)
+    documents = get_documents_to_process(supabase, args.limit, args.force)
 
     logger.info("Documentos encontrados para extraer productos: %s", len(documents))
 
@@ -479,6 +963,15 @@ def main():
             full_text = build_full_text(pages, page_storage_mode)
 
             products, summary = extract_products_from_text(document, full_text)
+            preview_lines = summary.get("preview_lines") or []
+
+            logger.info("Documento %s | alert_type detectado: %s", document_key, summary["alert_type"])
+            if preview_lines:
+                logger.info(
+                    "Documento %s | primeras lineas utiles: %s",
+                    document_key,
+                    " | ".join(preview_lines[:20]),
+                )
 
             logger.info(
                 "Documento %s | modo paginas: %s | productos extraidos: %s",
@@ -492,6 +985,11 @@ def main():
                 total_products += len(products)
                 if not products:
                     docs_without_products += 1
+                    logger.info(
+                        "Documento %s | sin productos | razon: %s",
+                        document_key,
+                        summary.get("reason"),
+                    )
                 logger.info("DRY RUN %s: no se escribira en Supabase", document_key)
                 continue
 
@@ -509,6 +1007,11 @@ def main():
                     ),
                 )
             else:
+                logger.info(
+                    "Documento %s | sin productos | razon: %s",
+                    document_key,
+                    summary.get("reason"),
+                )
                 update_document_status(
                     supabase,
                     document_id,

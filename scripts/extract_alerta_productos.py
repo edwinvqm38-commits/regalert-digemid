@@ -855,6 +855,13 @@ def select_layout_department(values: list[str]) -> str | None:
     return None
 
 
+def is_valid_peru_department(value: str | None) -> bool:
+    normalized = normalize_for_matching(value)
+    if not normalized or normalized in {"EN", "/", "DE", "LA", "EL", "NULL"}:
+        return False
+    return normalized in PERU_DEPARTMENTS
+
+
 def cleanup_manufacturer_fragment(value: str | None) -> str | None:
     candidate = normalize_text(value)
     if not candidate:
@@ -956,6 +963,25 @@ def select_lot_and_expiry_from_segment(segment: list[dict], table_profile: str) 
         )
 
     return selected_lot, selected_expiry, lot_candidates
+
+
+def find_with_expiry_row_match(segment: list[dict]) -> dict | None:
+    for line in segment:
+        col_producto = normalize_text(line.get("col_producto"))
+        col_lote = normalize_text(line.get("col_lote"))
+        col_departamento = normalize_text(line.get("col_departamento"))
+
+        if is_expiry_date_candidate(col_lote) and is_valid_lot_candidate(col_producto):
+            logger.info(
+                "with_expiry row match: y_group=%s, col_producto=%s, col_lote=%s, col_departamento=%s",
+                line.get("y_group"),
+                col_producto,
+                col_lote,
+                col_departamento,
+            )
+            return line
+
+    return None
 
 
 def extract_lot_from_product_column(segment: list[dict], expiry_date: str | None) -> str | None:
@@ -1120,9 +1146,20 @@ def extract_falsified_products_from_layout(
         product_name = join_lines(product_lines)
         lot_number, expiry_date, lot_candidates = select_lot_and_expiry_from_segment(segment, table_profile)
         lot_from_product_column = None
-        if table_profile == "with_expiry" and expiry_date and not lot_number:
-            lot_from_product_column = extract_lot_from_product_column(segment, expiry_date)
-            lot_number = lot_from_product_column or lot_number
+        expiry_from_lote_column = None
+        department_from_same_row = None
+
+        if table_profile == "with_expiry":
+            matched_row = find_with_expiry_row_match(segment)
+            if matched_row:
+                lot_from_product_column = normalize_text(matched_row.get("col_producto"))
+                expiry_from_lote_column = normalize_text(matched_row.get("col_lote"))
+                raw_department = normalize_text(matched_row.get("col_departamento"))
+                if is_valid_peru_department(raw_department):
+                    department_from_same_row = raw_department
+
+                lot_number = lot_from_product_column or lot_number
+                expiry_date = expiry_from_lote_column or expiry_date
         logger.info(
             "Documento %s | lot candidates from layout col_lote: %s",
             document.get("document_key"),
@@ -1139,10 +1176,11 @@ def extract_falsified_products_from_layout(
             expiry_date,
         )
         logger.info(
-            "Documento %s | lot_from_product_column detectado: %s",
-            document.get("document_key"),
+            "lot_from_product_column=%s",
             lot_from_product_column,
         )
+        logger.info("expiry_from_lote_column=%s", expiry_from_lote_column)
+        logger.info("department_from_same_row=%s", department_from_same_row)
         product_name_before_cleanup, product_name = cleanup_product_name(
             product_name,
             lot_number,
@@ -1163,7 +1201,7 @@ def extract_falsified_products_from_layout(
             manufacturer_country_lines,
         )
         intervention_address = join_lines(intervention_lines)
-        department = select_layout_department(department_values)
+        department = department_from_same_row or select_layout_department(department_values)
         raw_block = "\n".join(line["full_text"] for line in segment if line.get("full_text"))
 
         if not (product_name or lot_number or intervention_address):
@@ -1180,6 +1218,7 @@ def extract_falsified_products_from_layout(
             document.get("document_key"),
             department,
         )
+        logger.info("final product_name=%s", product_name)
 
         product = build_partial_product(
             document,

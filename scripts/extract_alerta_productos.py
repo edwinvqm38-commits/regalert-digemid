@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -210,6 +211,17 @@ def normalize_header(value: str) -> str:
     return upper
 
 
+def normalize_for_matching(value: str | None) -> str:
+    if value is None:
+        return ""
+
+    normalized = unicodedata.normalize("NFKD", value)
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    normalized = normalized.upper()
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
 def get_documents_to_process(supabase, limit: int, force: bool) -> list[dict]:
     statuses = DEFAULT_STATUSES + (FORCE_EXTRA_STATUSES if force else [])
     response = (
@@ -279,16 +291,21 @@ def detect_alert_number(title: str | None, full_text: str, document_key: str | N
     return document_key
 
 
-def detect_alert_type(title: str | None) -> str:
-    normalized_title = normalize_header(title or "")
+def detect_alert_type(title: str | None, full_text: str) -> str:
+    combined_text = normalize_for_matching(f"{title or ''} {full_text or ''}")
 
-    if "RETIRO DEL MERCADO" in normalized_title:
+    if "RETIRO DEL MERCADO" in combined_text and "CONTROL DE CALIDAD" in combined_text:
         return "retiro_mercado_control_calidad"
-    if "PRODUCTOS FARMACEUTICOS FALSIFICADOS" in normalized_title:
-        return "productos_falsificados"
-    if "PRODUCTO FARMACEUTICO FALSIFICADO" in normalized_title:
+    if (
+        "PRODUCTO FARMACEUTICO FALSIFICADO" in combined_text
+        or "PRODUCTOS FARMACEUTICOS FALSIFICADOS" in combined_text
+    ):
         return "producto_falsificado"
-    if "RECOMENDACIONES" in normalized_title:
+    if "PRODUCTOS SANITARIOS" in combined_text and "FALSIFICADOS" in combined_text:
+        return "producto_sanitario_falsificado"
+    if "PRODUCTOS COSMETICOS FALSIFICADOS" in combined_text:
+        return "producto_cosmetico_falsificado"
+    if "RECOMENDACIONES" in combined_text:
         return "recomendacion_seguridad"
     return "otro"
 
@@ -390,6 +407,17 @@ def find_control_quality_header_start(lines: list[str]) -> int | None:
     return None
 
 
+def has_control_quality_markers(lines: list[str]) -> bool:
+    normalized_lines = [normalize_for_matching(line) for line in lines]
+    markers = [
+        "NOMBRE DEL PRODUCTO",
+        "LOTE",
+        "REGISTRO SANITARIO",
+        "RESULTADOS ANALITICOS",
+    ]
+    return all(any(marker in line for line in normalized_lines) for marker in markers)
+
+
 def find_falsified_header_start(lines: list[str]) -> int | None:
     for index, line in enumerate(lines):
         normalized_line = normalize_header(line)
@@ -408,6 +436,39 @@ def find_falsified_header_start(lines: list[str]) -> int | None:
                 return index
 
     return None
+
+
+def has_falsified_markers(lines: list[str]) -> bool:
+    normalized_lines = [normalize_for_matching(line) for line in lines]
+    has_header = any(
+        "DATOS DEL PRODUCTO" in line
+        or "DATOS DE PRODUCTOS FARMACEUTICOS FALSIFICADOS" in line
+        for line in normalized_lines
+    )
+    has_name = any("NOMBRE" == line or "NOMBRE DEL PRODUCTO" in line for line in normalized_lines)
+    has_lot = any("LOTE" == line or "Nº DE LOTE" in line or "N° DE LOTE" in line for line in normalized_lines)
+    has_manufacturer_country = any(
+        "FABRICANTE/PAIS" in line or "FABRICANTE / PAIS" in line
+        for line in normalized_lines
+    )
+    return has_header and has_name and has_lot and has_manufacturer_country
+
+
+def select_extractor(alert_type: str, lines: list[str]) -> str:
+    if alert_type == "retiro_mercado_control_calidad" or has_control_quality_markers(lines):
+        return "retiro_mercado"
+
+    if (
+        alert_type in {
+            "producto_falsificado",
+            "producto_sanitario_falsificado",
+            "producto_cosmetico_falsificado",
+        }
+        or has_falsified_markers(lines)
+    ):
+        return "falsificados"
+
+    return "ninguno"
 
 
 def get_preview_lines(lines: list[str], start_index: int | None, limit: int = 20) -> list[str]:
@@ -809,16 +870,17 @@ def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dic
     lines = normalize_lines(full_text)
     title = document.get("title")
     alert_number = detect_alert_number(title, full_text, document.get("document_key"))
-    alert_type = detect_alert_type(title)
+    alert_type = detect_alert_type(title, full_text)
+    extractor_selected = select_extractor(alert_type, lines)
 
-    if alert_type == "retiro_mercado_control_calidad":
+    if extractor_selected == "retiro_mercado":
         products, diagnostics = extract_control_quality_products(
             document,
             lines,
             alert_number,
             alert_type,
         )
-    elif alert_type in {"producto_falsificado", "productos_falsificados"}:
+    elif extractor_selected == "falsificados":
         products, diagnostics = extract_falsified_products(
             document,
             lines,
@@ -889,6 +951,8 @@ def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dic
     return products, {
         "alert_number": alert_number,
         "alert_type": alert_type,
+        "extractor_selected": extractor_selected,
+        "normalized_match_text": normalize_for_matching(f"{title or ''} {full_text[:1200]}"),
         **diagnostics,
     }
 
@@ -965,7 +1029,16 @@ def main():
             products, summary = extract_products_from_text(document, full_text)
             preview_lines = summary.get("preview_lines") or []
 
-            logger.info("Documento %s | alert_type detectado: %s", document_key, summary["alert_type"])
+            logger.info(
+                "Documento %s | alert_type detectado despues de normalizar: %s",
+                document_key,
+                summary["alert_type"],
+            )
+            logger.info(
+                "Documento %s | extractor seleccionado: %s",
+                document_key,
+                summary.get("extractor_selected"),
+            )
             if preview_lines:
                 logger.info(
                     "Documento %s | primeras lineas utiles: %s",

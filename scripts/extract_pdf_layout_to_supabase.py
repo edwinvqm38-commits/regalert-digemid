@@ -1,7 +1,7 @@
 import argparse
+import json
 import logging
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 import fitz
@@ -23,6 +23,8 @@ ALLOWED_STATUSES = [
     "text_extracted",
     "text_extracted_no_products",
     "structured_extracted",
+    "structured_extraction_error",
+    "layout_extraction_error",
 ]
 
 
@@ -49,6 +51,28 @@ def sanitize_file_name(document_key: str | None, file_name: str | None) -> str:
         safe_name = f"{safe_name}.pdf"
 
     return safe_name
+
+
+def sanitize_for_json(value):
+    if isinstance(value, dict):
+        return {
+            str(key): sanitize_for_json(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [sanitize_for_json(item) for item in value]
+
+    if isinstance(value, (bytes, bytearray)):
+        return {
+            "_omitted_binary": True,
+            "size_bytes": len(value),
+        }
+
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+
+    return str(value)
 
 
 def get_documents_to_process(supabase, limit: int, force: bool) -> list[dict]:
@@ -115,9 +139,9 @@ def extract_layout_from_pdf(local_path: Path) -> list[dict]:
         for page_index, page in enumerate(pdf, start=1):
             text_plain = page.get_text("text") or ""
             text_sorted = page.get_text("text", sort=True) or ""
-            blocks_json = page.get_text("dict")
+            blocks_json = sanitize_for_json(page.get_text("dict"))
             words_raw = page.get_text("words")
-            words_json = [
+            words_json = sanitize_for_json([
                 {
                     "x0": word[0],
                     "y0": word[1],
@@ -129,7 +153,7 @@ def extract_layout_from_pdf(local_path: Path) -> list[dict]:
                     "word_no": word[7],
                 }
                 for word in words_raw
-            ]
+            ])
 
             blocks_count = len(blocks_json.get("blocks", []))
             words_count = len(words_json)
@@ -142,12 +166,12 @@ def extract_layout_from_pdf(local_path: Path) -> list[dict]:
                 "text_sorted": text_sorted,
                 "blocks_json": blocks_json,
                 "words_json": words_json,
-                "layout_json": {
+                "layout_json": sanitize_for_json({
                     "blocks_count": blocks_count,
                     "words_count": words_count,
                     "text_plain_length": len(text_plain.strip()),
                     "text_sorted_length": len(text_sorted.strip()),
-                },
+                }),
                 "has_layout": True,
                 "blocks_count": blocks_count,
                 "words_count": words_count,
@@ -173,19 +197,36 @@ def get_existing_layout_pages(supabase, document_id: str) -> dict[int, str]:
 
 
 def build_page_payload(document_id: str, page: dict) -> dict:
-    return {
+    payload = {
         "document_id": document_id,
         "page_number": page["page_number"],
         "page_width": page["page_width"],
         "page_height": page["page_height"],
         "text_plain": page["text_plain"],
         "text_sorted": page["text_sorted"],
-        "blocks_json": page["blocks_json"],
-        "words_json": page["words_json"],
-        "layout_json": page["layout_json"],
+        "blocks_json": sanitize_for_json(page["blocks_json"]),
+        "words_json": sanitize_for_json(page["words_json"]),
+        "layout_json": sanitize_for_json(page["layout_json"]),
         "extraction_method": LAYOUT_METHOD,
         "has_layout": page["has_layout"],
     }
+
+    for field_name in ("blocks_json", "words_json", "layout_json"):
+        try:
+            json.dumps(payload[field_name])
+        except TypeError as error:
+            raise TypeError(
+                f"Campo {field_name} no serializable en pagina {page['page_number']}: {error}"
+            ) from error
+
+    try:
+        json.dumps(payload)
+    except TypeError as error:
+        raise TypeError(
+            f"Payload no serializable en pagina {page['page_number']}: {error}"
+        ) from error
+
+    return payload
 
 
 def upsert_layout_pages(supabase, document_id: str, pages: list[dict]) -> None:
@@ -203,6 +244,11 @@ def upsert_layout_pages(supabase, document_id: str, pages: list[dict]) -> None:
                 .eq("id", existing_page_id)
                 .execute()
             )
+            logger.info(
+                "Layout actualizado | documento %s | pagina %s",
+                document_id,
+                page["page_number"],
+            )
             continue
 
         (
@@ -211,41 +257,11 @@ def upsert_layout_pages(supabase, document_id: str, pages: list[dict]) -> None:
             .insert(payload)
             .execute()
         )
-
-
-def update_document_after_success(supabase, row: dict, pages: list[dict]) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    total_blocks = sum(page["blocks_count"] for page in pages)
-    total_words = sum(page["words_count"] for page in pages)
-
-    (
-        supabase
-        .table("digemid_documentos")
-        .update({
-            "process_message": (
-                f"Layout visual extraido con {LAYOUT_METHOD}. "
-                f"Paginas: {len(pages)}. Bloques: {total_blocks}. Palabras: {total_words}."
-            ),
-            "updated_at": now,
-        })
-        .eq("id", row["id"])
-        .execute()
-    )
-
-
-def update_document_after_error(supabase, row: dict, error: Exception) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-
-    (
-        supabase
-        .table("digemid_documentos")
-        .update({
-            "process_message": f"layout_error: {error}",
-            "updated_at": now,
-        })
-        .eq("id", row["id"])
-        .execute()
-    )
+        logger.info(
+            "Layout insertado | documento %s | pagina %s",
+            document_id,
+            page["page_number"],
+        )
 
 
 def main():
@@ -301,7 +317,6 @@ def main():
                 continue
 
             upsert_layout_pages(supabase, document_id, pages)
-            update_document_after_success(supabase, row, pages)
 
             processed_count += 1
             logger.info("Documento procesado correctamente: %s", document_key)
@@ -309,9 +324,6 @@ def main():
         except Exception as error:
             error_count += 1
             logger.exception("Error procesando %s: %s", document_key, error)
-
-            if not args.dry_run:
-                update_document_after_error(supabase, row, error)
 
     logger.info(
         "Finalizado. Procesados: %s | Saltados: %s | Errores: %s",

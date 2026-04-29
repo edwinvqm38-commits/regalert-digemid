@@ -726,7 +726,21 @@ def is_valid_lot_candidate(value: str | None) -> bool:
     if normalized in invalid_values:
         return False
 
+    if is_expiry_date_candidate(value):
+        return False
+
+    if " " in normalize_text(value) and len(normalize_text(value)) > 20:
+        return False
+
     return looks_like_lot(normalize_text(value))
+
+
+def is_expiry_date_candidate(value: str | None) -> bool:
+    normalized = normalize_text(value)
+    if not normalized:
+        return False
+
+    return bool(re.fullmatch(r"(0[1-9]|1[0-2])[-/](19|20)\d{2}\*?", normalized))
 
 
 def is_low_quality_product(product: dict) -> bool:
@@ -759,6 +773,144 @@ def is_low_quality_product(product: dict) -> bool:
         return True
 
     return False
+
+
+def detect_layout_table_profile(zone_lines: list[dict]) -> str:
+    zone_text = normalize_for_matching(" ".join(
+        line.get("full_text") or ""
+        for line in zone_lines
+    ))
+
+    if any(marker in zone_text for marker in ["FECHA", "VENCIMIENTO", "FECHA DE VENCIMIENTO"]):
+        return "with_expiry"
+
+    lot_rows = sum(
+        1 for line in zone_lines
+        if extract_valid_layout_lot([line.get("col_lote")]) is not None
+        or (
+            is_valid_lot_candidate(line.get("col_producto"))
+            and is_expiry_date_candidate(line.get("col_lote"))
+        )
+    )
+    if lot_rows > 1:
+        return "multiproduct"
+
+    return "simple"
+
+
+def select_layout_department(values: list[str]) -> str | None:
+    for value in values:
+        candidate = normalize_text(value)
+        if not candidate or candidate == "/":
+            continue
+        if is_layout_header_value(candidate):
+            continue
+        return candidate
+
+    return None
+
+
+def cleanup_manufacturer_fragment(value: str | None) -> str | None:
+    candidate = normalize_text(value)
+    if not candidate:
+        return None
+
+    cleaned = re.sub(
+        r"\b(FALSIFICADO|FALSIFICADOS|establecimiento|farmaceutico|farmacéutico|Insumos|Drogas|Diresa|DIRESA|Direccion|Dirección|Ejecutiva)\b",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;/")
+    return cleaned or None
+
+
+def reconstruct_manufacturer_country(
+    manufacturer_fragments: list[str],
+    fallback_country_fragments: list[str],
+) -> tuple[str | None, str | None]:
+    cleaned_fragments = [
+        cleanup_manufacturer_fragment(fragment)
+        for fragment in manufacturer_fragments
+    ]
+    cleaned_fragments = [fragment for fragment in cleaned_fragments if fragment]
+    combined = join_lines(cleaned_fragments)
+
+    if combined and "/" in combined:
+        left, right = combined.split("/", 1)
+        manufacturer = cleanup_manufacturer_fragment(left)
+        right_clean = cleanup_manufacturer_fragment(right)
+        if right_clean:
+            country_token = next(
+                (token for token in COUNTRY_NAMES if token in normalize_for_matching(right_clean)),
+                None,
+            )
+            if country_token:
+                original_country = next(
+                    (word for word in right_clean.split() if normalize_for_matching(word) == country_token),
+                    country_token.title(),
+                )
+                return manufacturer, original_country
+        return manufacturer, right_clean
+
+    if combined:
+        for token in COUNTRY_NAMES:
+            if token in normalize_for_matching(combined):
+                parts = re.split(token, combined, flags=re.IGNORECASE)
+                manufacturer = cleanup_manufacturer_fragment(parts[0])
+                return manufacturer, token.title()
+
+    for fragment in fallback_country_fragments:
+        cleaned = cleanup_manufacturer_fragment(fragment)
+        if cleaned:
+            for token in COUNTRY_NAMES:
+                if token in normalize_for_matching(cleaned):
+                    return combined, token.title()
+
+    return combined, None
+
+
+def select_lot_and_expiry_from_segment(segment: list[dict], table_profile: str) -> tuple[str | None, str | None, list[str]]:
+    lot_candidates: list[str] = []
+    expiry_candidates: list[str] = []
+
+    for line in segment:
+        col_producto = normalize_text(line.get("col_producto"))
+        col_lote = normalize_text(line.get("col_lote"))
+
+        if col_lote:
+            lot_candidates.append(col_lote)
+            if is_expiry_date_candidate(col_lote):
+                expiry_candidates.append(col_lote)
+
+        if table_profile == "with_expiry" and col_producto:
+            if is_valid_lot_candidate(col_producto):
+                lot_candidates.append(col_producto)
+            if is_expiry_date_candidate(col_producto):
+                expiry_candidates.append(col_producto)
+
+    selected_lot = None
+    selected_expiry = None
+
+    if table_profile == "with_expiry":
+        for line in segment:
+            col_producto = normalize_text(line.get("col_producto"))
+            col_lote = normalize_text(line.get("col_lote"))
+            if is_valid_lot_candidate(col_producto) and is_expiry_date_candidate(col_lote):
+                selected_lot = col_producto
+                selected_expiry = col_lote
+                break
+
+    if not selected_lot:
+        selected_lot = extract_valid_layout_lot(lot_candidates)
+
+    if not selected_expiry:
+        selected_expiry = next(
+            (candidate for candidate in expiry_candidates if is_expiry_date_candidate(candidate)),
+            None,
+        )
+
+    return selected_lot, selected_expiry, lot_candidates
 
 
 def extract_falsified_products_from_layout(
@@ -796,16 +948,27 @@ def extract_falsified_products_from_layout(
         column for column in column_names
         if any(normalize_text(line.get(column)) for line in zone_lines)
     ]
+    table_profile = detect_layout_table_profile(zone_lines)
 
     logger.info(
         "Documento %s | columnas detectadas en layout: %s",
         document.get("document_key"),
         ", ".join(detected_columns) if detected_columns else "ninguna",
     )
+    logger.info(
+        "Documento %s | table_profile detectado: %s",
+        document.get("document_key"),
+        table_profile,
+    )
 
     lot_rows = [
         index for index, line in enumerate(zone_lines)
-        if extract_valid_layout_lot([line.get("col_lote")]) is not None
+        if (
+            table_profile == "with_expiry"
+            and is_valid_lot_candidate(line.get("col_producto"))
+            and is_expiry_date_candidate(line.get("col_lote"))
+        )
+        or extract_valid_layout_lot([line.get("col_lote")]) is not None
     ]
     if not lot_rows:
         lot_rows = [len(zone_lines) - 1]
@@ -822,18 +985,35 @@ def extract_falsified_products_from_layout(
         product_lines = [
             line["col_producto"]
             for line in segment
-            if line.get("col_producto") and not is_layout_header_value(line.get("col_producto"))
+            if (
+                line.get("col_producto")
+                and not is_layout_header_value(line.get("col_producto"))
+                and not is_valid_lot_candidate(line.get("col_producto"))
+                and not is_expiry_date_candidate(line.get("col_producto"))
+            )
         ]
-        lot_values = [
+        col_lote_values = [
             line["col_lote"]
             for line in segment
             if line.get("col_lote")
         ]
-        manufacturer_country_lines = [
-            line["col_fabricante_pais"]
-            for line in segment
-            if line.get("col_fabricante_pais") and not is_layout_header_value(line.get("col_fabricante_pais"))
-        ]
+        manufacturer_country_lines = []
+        for line in segment:
+            fabricante_pais = line.get("col_fabricante_pais")
+            col_lote = line.get("col_lote")
+
+            if fabricante_pais and not is_layout_header_value(fabricante_pais):
+                manufacturer_country_lines.append(fabricante_pais)
+
+            if (
+                table_profile == "with_expiry"
+                and col_lote
+                and not is_layout_header_value(col_lote)
+                and not is_valid_lot_candidate(col_lote)
+                and not is_expiry_date_candidate(col_lote)
+            ):
+                manufacturer_country_lines.append(col_lote)
+
         intervention_lines = [
             line["col_intervencion"]
             for line in zone_lines
@@ -842,40 +1022,52 @@ def extract_falsified_products_from_layout(
         department_values = [
             line["col_departamento"]
             for line in segment
-            if line.get("col_departamento") and not is_layout_header_value(line.get("col_departamento"))
-        ]
-        expiry_values = [
-            line["col_lote"]
-            for line in zone_lines
-            if line.get("col_lote")
-            and any(char.isdigit() for char in normalize_text(line.get("col_lote")))
-            and re.search(r"(0[1-9]|1[0-2])[-/](20\d{2})", normalize_text(line.get("col_lote")))
+            if (
+                line.get("col_departamento")
+                and not is_layout_header_value(line.get("col_departamento"))
+                and normalize_text(line.get("col_departamento")) != "/"
+            )
         ]
 
         product_name = join_lines(product_lines)
+        lot_number, expiry_date, lot_candidates = select_lot_and_expiry_from_segment(segment, table_profile)
         logger.info(
             "Documento %s | lot candidates from layout col_lote: %s",
             document.get("document_key"),
-            lot_values,
+            col_lote_values,
         )
-        lot_number = extract_valid_layout_lot(lot_values)
         logger.info(
             "Documento %s | selected lot_number: %s",
             document.get("document_key"),
             lot_number,
         )
-        manufacturer_country_value = join_lines(manufacturer_country_lines)
-        manufacturer, manufacturer_country = split_manufacturer_country(manufacturer_country_value)
+        logger.info(
+            "Documento %s | selected expiry_date: %s",
+            document.get("document_key"),
+            expiry_date,
+        )
+        manufacturer, manufacturer_country = reconstruct_manufacturer_country(
+            manufacturer_country_lines,
+            manufacturer_country_lines,
+        )
         intervention_address = join_lines(intervention_lines)
-        department = first_non_header_value(department_values)
-        expiry_date = first_non_header_value(expiry_values)
+        department = select_layout_department(department_values)
         raw_block = "\n".join(line["full_text"] for line in segment if line.get("full_text"))
-
-        if not manufacturer and manufacturer_country_value and not is_country_line(manufacturer_country_value):
-            manufacturer = manufacturer_country_value
 
         if not (product_name or lot_number or intervention_address):
             continue
+
+        logger.info(
+            "Documento %s | manufacturer reconstruido: %s | country: %s",
+            document.get("document_key"),
+            manufacturer,
+            manufacturer_country,
+        )
+        logger.info(
+            "Documento %s | department seleccionado: %s",
+            document.get("document_key"),
+            department,
+        )
 
         product = build_partial_product(
             document,
@@ -898,6 +1090,7 @@ def extract_falsified_products_from_layout(
                     "zone_start_index": start_index,
                     "zone_end_index": end_index,
                     "detected_columns": detected_columns,
+                    "table_profile": table_profile,
                 },
             },
             confidence=0.75 if product_name and lot_number else 0.65,

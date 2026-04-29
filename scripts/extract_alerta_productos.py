@@ -1027,21 +1027,53 @@ def cleanup_product_name(product_name: str | None, lot_number: str | None, expir
     return before_cleanup, cleaned or None
 
 
-def extract_lot_from_product_name(product_name: str | None) -> str | None:
+def extract_lot_from_product_name(product_name: str | None, expiry_date: str | None = None) -> str | None:
     normalized_product_name = normalize_text(product_name)
     if not normalized_product_name:
         return None
 
+    normalized_expiry = normalize_text(expiry_date)
+    reject_tokens = {
+        "MG",
+        "ML",
+        "CAJA",
+        "VIAL",
+        "COMPRIMIDOS",
+        "COMPRIMIDO",
+        "CAPSULAS",
+        "CÁPSULAS",
+        "BLISTER",
+        "BLÍSTER",
+        "SOLUCION",
+        "SOLUCIÓN",
+        "INYECTABLE",
+        "ORAL",
+    }
+
     tokens = [
         normalize_text(token)
-        for token in re.split(r"\s+", normalized_product_name)
+        for token in re.split(r"\s+", normalized_product_name.replace("(", " ").replace(")", " "))
         if normalize_text(token)
     ]
 
     for token in tokens:
+        normalized_token = normalize_for_matching(token)
+        if normalized_expiry and token == normalized_expiry:
+            continue
         if is_expiry_date_candidate(token):
             continue
-        if is_valid_lot_candidate(token):
+        if normalized_token in reject_tokens:
+            continue
+        if "." in token:
+            continue
+        if token.isdigit() and len(token) < 5:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9*\-]{2,}", token):
+            continue
+        if len(token) >= 5 or re.fullmatch(r"[A-Za-z]\d[A-Za-z0-9]{2,}", token):
+            if is_valid_lot_candidate(token):
+                return token
+        elif re.fullmatch(r"[A-Za-z0-9]{4}", token) and any(char.isdigit() for char in token):
             return token
 
     return None
@@ -1181,9 +1213,6 @@ def extract_falsified_products_from_layout(
 
                 lot_number = lot_from_product_column or lot_number
                 expiry_date = expiry_from_lote_column or expiry_date
-            if not lot_number:
-                lot_from_product_name = extract_lot_from_product_name(product_name)
-                lot_number = lot_from_product_name or lot_number
         logger.info(
             "Documento %s | lot candidates from layout col_lote: %s",
             document.get("document_key"),
@@ -1231,6 +1260,20 @@ def extract_falsified_products_from_layout(
         intervention_address = join_lines(intervention_lines)
         department = department_from_same_row or select_layout_department(department_values)
         raw_block = "\n".join(line["full_text"] for line in segment if line.get("full_text"))
+
+        if table_profile == "with_expiry" and not lot_number:
+            logger.info("final pre-insert product_name before lot extraction=%s", product_name)
+            lot_from_product_name = extract_lot_from_product_name(product_name, expiry_date)
+            logger.info("lot_from_product_name=%s", lot_from_product_name)
+            if lot_from_product_name:
+                lot_number = lot_from_product_name
+                _, product_name = cleanup_product_name(
+                    product_name,
+                    lot_number,
+                    expiry_date,
+                )
+            logger.info("final pre-insert product_name after lot extraction=%s", product_name)
+            logger.info("final pre-insert lot_number=%s", lot_number)
 
         if not (product_name or lot_number or intervention_address):
             continue

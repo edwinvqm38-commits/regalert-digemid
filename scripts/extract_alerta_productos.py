@@ -9,6 +9,25 @@ from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client
 
+def clean_final_field(value):
+    """
+    Limpia campos finales antes de guardarlos en Supabase.
+    Sirve para eliminar asteriscos, espacios dobles y caracteres sucios
+    que vienen del PDF DIGEMID.
+    """
+    if value is None:
+        return None
+
+    value = str(value).replace("\u00a0", " ").strip()
+
+    # Elimina asteriscos usados como marca visual en algunos PDFs
+    value = re.sub(r"\s*\*\s*", " ", value)
+
+    # Normaliza espacios dobles
+    value = re.sub(r"\s+", " ", value).strip()
+
+    return value or None
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1887,10 +1906,15 @@ def replace_products_for_document(supabase, document_id: str, products: list[dic
     )
 
     if products:
+        cleaned_products = [
+            clean_product_record(product)
+            for product in products
+        ]
+
         (
             supabase
             .table(PRODUCT_TABLE)
-            .insert(products)
+            .insert(cleaned_products)
             .execute()
         )
 

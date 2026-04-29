@@ -125,7 +125,7 @@ async function sendMessage(
     chat_id: chatId,
     text,
     parse_mode: "HTML",
-    disable_web_page_preview: false,
+    disable_web_page_preview: true,
     reply_markup: replyMarkup,
   });
 }
@@ -520,34 +520,35 @@ async function handleCallback(update: TelegramUpdate) {
   const callback = update.callback_query!;
   const data = callback.data ?? "";
   const chatId = String(callback.message?.chat.id ?? "");
-  const messageId = callback.message?.message_id;
 
   await answerCallback(callback.id);
 
-  if (!chatId || !messageId) return;
+  console.log("HANDLE_CALLBACK_DATA:", data);
+  console.log("HANDLE_CALLBACK_CHAT_ID:", chatId);
+
+  if (!chatId) {
+    return;
+  }
 
   if (data === "menu:principal") {
-    return await editMessage(
+    return await sendMessage(
       chatId,
-      messageId,
       "🤖 <b>RegAlert DIGEMID</b>\n\nSelecciona una opción:",
       mainMenu(),
     );
   }
 
   if (data === "menu:alertas") {
-    return await editMessage(
+    return await sendMessage(
       chatId,
-      messageId,
       "🚨 <b>Alertas DIGEMID</b>\n\n¿Qué deseas consultar?",
       alertasMenu(),
     );
   }
 
   if (data === "menu:ayuda") {
-    return await editMessage(
+    return await sendMessage(
       chatId,
-      messageId,
       [
         "ℹ️ <b>Ayuda RegAlert DIGEMID</b>",
         "",
@@ -565,9 +566,9 @@ async function handleCallback(update: TelegramUpdate) {
 
   if (data === "alertas:ultimas") {
     const rows = await getLatestAlerts(5);
-    return await editMessage(
+
+    return await sendMessage(
       chatId,
-      messageId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
@@ -575,9 +576,9 @@ async function handleCallback(update: TelegramUpdate) {
 
   if (data === "alertas:hoy") {
     const rows = await getTodayAlerts();
-    return await editMessage(
+
+    return await sendMessage(
       chatId,
-      messageId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
@@ -585,35 +586,32 @@ async function handleCallback(update: TelegramUpdate) {
 
   if (data === "alertas:mes") {
     const rows = await getMonthAlerts();
-    return await editMessage(
+
+    return await sendMessage(
       chatId,
-      messageId,
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
   }
 
   if (data === "alertas:buscar_info") {
-    return await editMessage(
+    return await sendMessage(
       chatId,
-      messageId,
       "🔎 <b>Buscar alerta</b>\n\nEscribe una consulta así:\n\n<code>/buscar retiro</code>\n<code>/buscar producto</code>",
       alertasMenu(),
     );
   }
 
   if (data === "alertas:numero_info") {
-    return await editMessage(
+    return await sendMessage(
       chatId,
-      messageId,
       "🔢 <b>Consultar por número</b>\n\nEscribe:\n\n<code>/detalle 50-2026</code>",
       alertasMenu(),
     );
   }
 
-  return await editMessage(
+  return await sendMessage(
     chatId,
-    messageId,
     "No reconocí esa opción.\n\nVuelve al menú principal.",
     mainMenu(),
   );
@@ -634,6 +632,10 @@ serve(async (req: Request) => {
     }
 
     const update = (await req.json()) as TelegramUpdate;
+    console.log("UPDATE_RECIBIDO:", JSON.stringify(update));
+    console.log("TIENE_MESSAGE:", Boolean(update.message));
+    console.log("TIENE_CALLBACK:", Boolean(update.callback_query));
+    console.log("CALLBACK_DATA:", update.callback_query?.data ?? null);
 
     const chatId = String(
       update.message?.chat.id ?? update.callback_query?.message?.chat.id ?? "",

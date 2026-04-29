@@ -146,6 +146,33 @@ COUNTRY_NAMES = {
     "VENEZUELA",
 }
 
+PERU_DEPARTMENTS = {
+    "AMAZONAS",
+    "ANCASH",
+    "APURIMAC",
+    "AREQUIPA",
+    "AYACUCHO",
+    "CAJAMARCA",
+    "CUSCO",
+    "HUANCAVELICA",
+    "HUANUCO",
+    "ICA",
+    "JUNIN",
+    "LA LIBERTAD",
+    "LAMBAYEQUE",
+    "LIMA",
+    "LORETO",
+    "MADRE DE DIOS",
+    "MOQUEGUA",
+    "PASCO",
+    "PIURA",
+    "PUNO",
+    "SAN MARTIN",
+    "TACNA",
+    "TUMBES",
+    "UCAYALI",
+}
+
 CONTROL_QUALITY_HEADER_PATTERNS = [
     "NOMBRE DEL PRODUCTO",
     "Nº DE LOTE",
@@ -799,14 +826,32 @@ def detect_layout_table_profile(zone_lines: list[dict]) -> str:
 
 
 def select_layout_department(values: list[str]) -> str | None:
+    invalid_values = {"", "/", "EN", "DE", "LA", "EL", "NULL"}
+
+    logger.info("department candidates: %s", values)
+
+    normalized_pairs = [
+        (value, normalize_for_matching(value))
+        for value in values
+        if normalize_text(value)
+    ]
+
+    for value, normalized in normalized_pairs:
+        if normalized in PERU_DEPARTMENTS:
+            logger.info("department selected: %s", value)
+            return value
+
     for value in values:
         candidate = normalize_text(value)
-        if not candidate or candidate == "/":
+        normalized = normalize_for_matching(candidate)
+        if not candidate or normalized in invalid_values:
             continue
         if is_layout_header_value(candidate):
             continue
+        logger.info("department selected: %s", candidate)
         return candidate
 
+    logger.info("department selected: %s", None)
     return None
 
 
@@ -911,6 +956,49 @@ def select_lot_and_expiry_from_segment(segment: list[dict], table_profile: str) 
         )
 
     return selected_lot, selected_expiry, lot_candidates
+
+
+def extract_lot_from_product_column(segment: list[dict], expiry_date: str | None) -> str | None:
+    if not expiry_date:
+        return None
+
+    for line in segment:
+        col_producto = normalize_text(line.get("col_producto"))
+        col_lote = normalize_text(line.get("col_lote"))
+
+        if not col_producto or not col_lote:
+            continue
+
+        if not is_expiry_date_candidate(col_lote):
+            continue
+
+        tokens = [normalize_text(token) for token in re.split(r"\s+", col_producto) if normalize_text(token)]
+        for token in tokens:
+            if is_valid_lot_candidate(token):
+                return token
+
+    return None
+
+
+def cleanup_product_name(product_name: str | None, lot_number: str | None, expiry_date: str | None) -> tuple[str | None, str | None]:
+    before_cleanup = product_name
+    cleaned = normalize_text(product_name)
+
+    if not cleaned:
+        return before_cleanup, None
+
+    for token in [lot_number, expiry_date]:
+        normalized_token = normalize_text(token)
+        if normalized_token:
+            cleaned = re.sub(
+                rf"(?<!\w){re.escape(normalized_token)}(?!\w)",
+                " ",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return before_cleanup, cleaned or None
 
 
 def extract_falsified_products_from_layout(
@@ -1031,6 +1119,10 @@ def extract_falsified_products_from_layout(
 
         product_name = join_lines(product_lines)
         lot_number, expiry_date, lot_candidates = select_lot_and_expiry_from_segment(segment, table_profile)
+        lot_from_product_column = None
+        if table_profile == "with_expiry" and expiry_date and not lot_number:
+            lot_from_product_column = extract_lot_from_product_column(segment, expiry_date)
+            lot_number = lot_from_product_column or lot_number
         logger.info(
             "Documento %s | lot candidates from layout col_lote: %s",
             document.get("document_key"),
@@ -1045,6 +1137,26 @@ def extract_falsified_products_from_layout(
             "Documento %s | selected expiry_date: %s",
             document.get("document_key"),
             expiry_date,
+        )
+        logger.info(
+            "Documento %s | lot_from_product_column detectado: %s",
+            document.get("document_key"),
+            lot_from_product_column,
+        )
+        product_name_before_cleanup, product_name = cleanup_product_name(
+            product_name,
+            lot_number,
+            expiry_date,
+        )
+        logger.info(
+            "Documento %s | product_name_before_cleanup: %s",
+            document.get("document_key"),
+            product_name_before_cleanup,
+        )
+        logger.info(
+            "Documento %s | product_name_after_cleanup: %s",
+            document.get("document_key"),
+            product_name,
         )
         manufacturer, manufacturer_country = reconstruct_manufacturer_country(
             manufacturer_country_lines,

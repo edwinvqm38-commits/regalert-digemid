@@ -39,11 +39,13 @@ def main():
     parser.add_argument("--enrich-limit", type=int, default=50)
     parser.add_argument("--drive-limit", type=int, default=50)
     parser.add_argument("--text-limit", type=int, default=50)
+    parser.add_argument("--layout-limit", type=int, default=50)
     parser.add_argument("--structured-limit", type=int, default=50)
     parser.add_argument("--skip-monitor", action="store_true")
     parser.add_argument("--skip-enrich", action="store_true")
     parser.add_argument("--skip-drive", action="store_true")
     parser.add_argument("--skip-text-extract", action="store_true")
+    parser.add_argument("--skip-layout-extract", action="store_true")
     parser.add_argument("--skip-structured-extract", action="store_true")
     parser.add_argument("--drive-dry-run", action="store_true")
     args = parser.parse_args()
@@ -93,6 +95,17 @@ def main():
                 "scripts/extract_pdf_text_to_supabase.py",
                 "--limit",
                 str(args.text_limit),
+            ],
+        )
+
+    if not args.skip_layout_extract:
+        run_step(
+            "Extraer layout visual de PDFs DIGEMID",
+            [
+                python,
+                "scripts/extract_pdf_layout_to_supabase.py",
+                "--limit",
+                str(args.layout_limit),
             ],
         )
 

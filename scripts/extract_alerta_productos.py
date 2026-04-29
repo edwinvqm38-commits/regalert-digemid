@@ -682,6 +682,53 @@ def first_non_header_value(values: list[str], reject_prefixes: list[str] | None 
     return None
 
 
+def extract_valid_layout_lot(values: list[str]) -> str | None:
+    lot_candidates: list[str] = []
+
+    for value in values:
+        normalized_value = normalize_text(value)
+        if not normalized_value:
+            continue
+
+        lot_candidates.append(normalized_value)
+
+        if is_valid_lot_candidate(normalized_value):
+            return normalized_value
+
+        tokens = [normalize_text(token) for token in re.split(r"\s+", normalized_value) if normalize_text(token)]
+        for token in tokens:
+            if is_valid_lot_candidate(token):
+                return token
+
+    return None
+
+
+def is_valid_lot_candidate(value: str | None) -> bool:
+    normalized = normalize_for_matching(value)
+    if not normalized:
+        return False
+
+    invalid_values = {
+        "LOTE",
+        "NOMBRE",
+        "PRODUCTO",
+        "PRODUCTOS",
+        "FALSIFICADO",
+        "FALSIFICADOS",
+        "FABRICANTE",
+        "PAIS",
+        "INTERVENCION",
+        "DEPARTAMENTO",
+        "FECHA",
+        "VENCIMIENTO",
+    }
+
+    if normalized in invalid_values:
+        return False
+
+    return looks_like_lot(normalize_text(value))
+
+
 def extract_falsified_products_from_layout(
     supabase,
     document: dict,
@@ -751,7 +798,17 @@ def extract_falsified_products_from_layout(
     ]
 
     product_name = join_lines(product_lines)
-    lot_number = first_non_header_value(lot_values, reject_prefixes=["FECHA DE", "VENCIMIENTO"])
+    logger.info(
+        "Documento %s | lot candidates from layout col_lote: %s",
+        document.get("document_key"),
+        lot_values,
+    )
+    lot_number = extract_valid_layout_lot(lot_values)
+    logger.info(
+        "Documento %s | selected lot_number: %s",
+        document.get("document_key"),
+        lot_number,
+    )
     manufacturer_country_value = join_lines(manufacturer_country_lines)
     manufacturer, manufacturer_country = split_manufacturer_country(manufacturer_country_value)
     intervention_address = join_lines(intervention_lines)

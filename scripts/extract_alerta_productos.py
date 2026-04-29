@@ -1027,6 +1027,26 @@ def cleanup_product_name(product_name: str | None, lot_number: str | None, expir
     return before_cleanup, cleaned or None
 
 
+def extract_lot_from_product_name(product_name: str | None) -> str | None:
+    normalized_product_name = normalize_text(product_name)
+    if not normalized_product_name:
+        return None
+
+    tokens = [
+        normalize_text(token)
+        for token in re.split(r"\s+", normalized_product_name)
+        if normalize_text(token)
+    ]
+
+    for token in tokens:
+        if is_expiry_date_candidate(token):
+            continue
+        if is_valid_lot_candidate(token):
+            return token
+
+    return None
+
+
 def extract_falsified_products_from_layout(
     supabase,
     document: dict,
@@ -1146,6 +1166,7 @@ def extract_falsified_products_from_layout(
         product_name = join_lines(product_lines)
         lot_number, expiry_date, lot_candidates = select_lot_and_expiry_from_segment(segment, table_profile)
         lot_from_product_column = None
+        lot_from_product_name = None
         expiry_from_lote_column = None
         department_from_same_row = None
 
@@ -1160,6 +1181,9 @@ def extract_falsified_products_from_layout(
 
                 lot_number = lot_from_product_column or lot_number
                 expiry_date = expiry_from_lote_column or expiry_date
+            if not lot_number:
+                lot_from_product_name = extract_lot_from_product_name(product_name)
+                lot_number = lot_from_product_name or lot_number
         logger.info(
             "Documento %s | lot candidates from layout col_lote: %s",
             document.get("document_key"),
@@ -1179,13 +1203,17 @@ def extract_falsified_products_from_layout(
             "lot_from_product_column=%s",
             lot_from_product_column,
         )
+        logger.info("lot_from_product_name=%s", lot_from_product_name)
         logger.info("expiry_from_lote_column=%s", expiry_from_lote_column)
         logger.info("department_from_same_row=%s", department_from_same_row)
+        product_name_before_cleanup = product_name
+        logger.info("product_name_before_lot_cleanup=%s", product_name_before_cleanup)
         product_name_before_cleanup, product_name = cleanup_product_name(
             product_name,
             lot_number,
             expiry_date,
         )
+        logger.info("product_name_after_lot_cleanup=%s", product_name)
         logger.info(
             "Documento %s | product_name_before_cleanup: %s",
             document.get("document_key"),

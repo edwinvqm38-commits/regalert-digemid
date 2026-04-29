@@ -1,7 +1,14 @@
+# Entornos y caché Python
 __pycache__/
 *.py[cod]
-.env
-.venv
+.venv/
 env/
-venv/supabase/.temp/
+venv/
+
+# Variables y secretos
+.env
+*.json
+_secrets/
+
+# Supabase local
 supabase/.temp/

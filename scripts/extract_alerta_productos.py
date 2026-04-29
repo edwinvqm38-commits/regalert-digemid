@@ -1079,6 +1079,62 @@ def extract_lot_from_product_name(product_name: str | None, expiry_date: str | N
     return None
 
 
+def extract_lot_from_product_name_regex(product_name: str | None, expiry_date: str | None = None) -> tuple[str | None, list[str]]:
+    normalized_product_name = normalize_text(product_name)
+    normalized_expiry = normalize_text(expiry_date)
+
+    if not normalized_product_name:
+        return None, []
+
+    reject_tokens = {
+        "CAJA",
+        "VIAL",
+        "COMPRIMIDOS",
+        "COMPRIMIDO",
+        "MG",
+        "ML",
+        "SOLUCION",
+        "SOLUCIÓN",
+        "INYECTABLE",
+        "ORAL",
+    }
+
+    candidates = re.findall(r"(?<![\d.])\b[A-Z0-9]{4,12}\*?\b(?!-\d)", normalized_product_name, flags=re.IGNORECASE)
+    numeric_candidates = re.findall(r"\b\d{5,12}\*?\b", normalized_product_name)
+    all_candidates: list[str] = []
+
+    for candidate in candidates + numeric_candidates:
+        cleaned = normalize_text(candidate)
+        if cleaned and cleaned not in all_candidates:
+            all_candidates.append(cleaned)
+
+    prioritized = sorted(
+        all_candidates,
+        key=lambda value: (
+            "*" not in value,
+            not any(char.isalpha() for char in value),
+            -len(value),
+        ),
+    )
+
+    for candidate in prioritized:
+        normalized_candidate = normalize_for_matching(candidate)
+        if normalized_expiry and candidate == normalized_expiry:
+            continue
+        if is_expiry_date_candidate(candidate):
+            continue
+        if normalized_candidate in reject_tokens:
+            continue
+        if "." in candidate:
+            continue
+        if candidate.isdigit() and candidate in {"50", "100", "120", "1"}:
+            continue
+        if is_valid_lot_candidate(candidate):
+            return candidate, all_candidates
+
+    return None, all_candidates
+
+
 def extract_falsified_products_from_layout(
     supabase,
     document: dict,
@@ -1272,6 +1328,21 @@ def extract_falsified_products_from_layout(
                     lot_number,
                     expiry_date,
                 )
+            if not lot_number:
+                regex_lot_selected, regex_lot_candidates = extract_lot_from_product_name_regex(
+                    product_name,
+                    expiry_date,
+                )
+                logger.info("regex_lot_candidates_from_product_name=%s", regex_lot_candidates)
+                logger.info("regex_lot_selected=%s", regex_lot_selected)
+                if regex_lot_selected:
+                    lot_number = regex_lot_selected
+                    _, product_name = cleanup_product_name(
+                        product_name,
+                        lot_number,
+                        expiry_date,
+                    )
+                logger.info("product_name_after_regex_lot_cleanup=%s", product_name)
             logger.info("final pre-insert product_name after lot extraction=%s", product_name)
             logger.info("final pre-insert lot_number=%s", lot_number)
 

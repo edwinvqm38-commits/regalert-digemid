@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 def clean_final_field(value):
+
+    
     """
     Limpia campos finales antes de guardarlos en Supabase.
     Sirve para eliminar asteriscos, espacios dobles y caracteres sucios
@@ -28,6 +30,36 @@ def clean_final_field(value):
 
     return value or None
 
+
+def clean_product_record(product: dict) -> dict:
+    """
+    Limpia los campos principales del producto antes de guardarlo en Supabase.
+    Evita guardar asteriscos, espacios dobles o caracteres sucios provenientes del PDF.
+    """
+    cleaned_product = dict(product)
+
+    fields_to_clean = [
+        "product_name",
+        "lot_number",
+        "sanitary_registration",
+        "manufacturer",
+        "manufacturer_country",
+        "registration_holder",
+        "analytical_result",
+        "expiry_date",
+        "department",
+        "intervention_address",
+    ]
+
+    for field in fields_to_clean:
+        cleaned_product[field] = clean_final_field(cleaned_product.get(field))
+
+    # Si department no es un departamento válido del Perú, lo dejamos en null.
+    department = cleaned_product.get("department")
+    if department and normalize_for_matching(department) not in PERU_DEPARTMENTS:
+        cleaned_product["department"] = None
+
+    return cleaned_product
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1897,6 +1929,21 @@ def should_try_layout_fallback(summary: dict, products: list[dict]) -> bool:
 
 
 def replace_products_for_document(supabase, document_id: str, products: list[dict]) -> None:
+    cleaned_products = [
+        clean_product_record(product)
+        for product in products
+    ] if products else []
+
+    # Filtro final de seguridad:
+    # No guardar registros muy débiles, sin lote y con nombre evidentemente contaminado.
+    cleaned_products = [
+        product for product in cleaned_products
+        if not (
+            not product.get("lot_number")
+            and float(product.get("confidence") or 0) <= 0.65
+        )
+    ]
+
     (
         supabase
         .table(PRODUCT_TABLE)
@@ -1905,19 +1952,13 @@ def replace_products_for_document(supabase, document_id: str, products: list[dic
         .execute()
     )
 
-    if products:
-        cleaned_products = [
-            clean_product_record(product)
-            for product in products
-        ]
-
+    if cleaned_products:
         (
             supabase
             .table(PRODUCT_TABLE)
             .insert(cleaned_products)
             .execute()
         )
-
 
 def update_document_status(
     supabase,

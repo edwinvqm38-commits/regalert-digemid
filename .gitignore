@@ -10,5 +10,8 @@ venv/
 *.json
 _secrets/
 
+# Archivos temporales del sistema
+tmp/
+
 # Supabase local
-supabase/.temp/
+supabase/.temp/tmp/

@@ -1,14 +1,18 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+
+const SUPABASE_SERVICE_ROLE_KEY =
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ??
+  JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") ?? "{}").service_role ??
+  "";
+
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
-
 type TelegramUpdate = {
   message?: {
     message_id: number;
@@ -55,8 +59,8 @@ function isAllowed(chatId: string): boolean {
 
   const allowed = BOT_ALLOWED_CHAT_IDS
     .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+    .map((item: string) => item.trim())
+    .filter((item: string) => item.length > 0);
 
   return allowed.includes(chatId);
 }
@@ -615,7 +619,7 @@ async function handleCallback(update: TelegramUpdate) {
   );
 }
 
-serve(async (req) => {
+serve(async (req: Request) => {
   try {
     if (req.method !== "POST") {
       return new Response("RegAlert DIGEMID Telegram Bot OK", {

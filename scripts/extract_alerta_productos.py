@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_TABLE = "digemid_alerta_productos"
 PAGE_TABLE = "digemid_documento_paginas"
+LAYOUT_PAGE_TABLE = "digemid_documento_layout_paginas"
 EXTRACTION_METHOD = "rule_based_v1"
+LAYOUT_EXTRACTION_METHOD = "layout_rule_based_v1"
 DEFAULT_STATUSES = [
     "text_extracted",
     "text_extracted_no_products",
@@ -258,6 +260,18 @@ def fetch_document_pages(supabase, document_id: str) -> tuple[list[dict], str]:
             .execute()
         )
         return response.data or [], "legacy"
+
+
+def fetch_document_layout_pages(supabase, document_id: str) -> list[dict]:
+    response = (
+        supabase
+        .table(LAYOUT_PAGE_TABLE)
+        .select("page_number, words_json")
+        .eq("document_id", document_id)
+        .order("page_number")
+        .execute()
+    )
+    return response.data or []
 
 
 def build_full_text(pages: list[dict], storage_mode: str) -> str:
@@ -509,6 +523,283 @@ def split_manufacturer_country(value: str | None) -> tuple[str | None, str | Non
         return None, value
 
     return value, None
+
+
+def group_words_by_layout_line(layout_pages: list[dict]) -> list[dict]:
+    grouped: dict[tuple[int, int], list[dict]] = {}
+
+    for page in layout_pages:
+        page_number = page.get("page_number")
+        words = page.get("words_json") or []
+
+        if not isinstance(words, list):
+            continue
+
+        for word in words:
+            if not isinstance(word, dict):
+                continue
+
+            text = normalize_text(word.get("text"))
+            x0 = word.get("x0")
+            y0 = word.get("y0")
+
+            if not text or x0 is None or y0 is None:
+                continue
+
+            try:
+                y_group = round(float(y0) / 3) * 3
+                key = (int(page_number), int(y_group))
+                grouped.setdefault(key, []).append({
+                    "text": text,
+                    "x0": float(x0),
+                    "y0": float(y0),
+                })
+            except (TypeError, ValueError):
+                continue
+
+    lines: list[dict] = []
+    for (page_number, y_group), words in sorted(grouped.items()):
+        words_sorted = sorted(words, key=lambda item: item["x0"])
+        full_text = join_lines([word["text"] for word in words_sorted]) or ""
+        columns = {
+            "col_producto": [],
+            "col_lote": [],
+            "col_fabricante_pais": [],
+            "col_intervencion": [],
+            "col_departamento": [],
+        }
+
+        for word in words_sorted:
+            x0 = word["x0"]
+            text = word["text"]
+
+            if x0 < 270:
+                columns["col_producto"].append(text)
+            elif x0 < 350:
+                columns["col_lote"].append(text)
+            elif x0 < 480:
+                columns["col_fabricante_pais"].append(text)
+            elif x0 < 650:
+                columns["col_intervencion"].append(text)
+            else:
+                columns["col_departamento"].append(text)
+
+        lines.append({
+            "page_number": page_number,
+            "y_group": y_group,
+            "full_text": full_text,
+            "col_producto": join_lines(columns["col_producto"]),
+            "col_lote": join_lines(columns["col_lote"]),
+            "col_fabricante_pais": join_lines(columns["col_fabricante_pais"]),
+            "col_intervencion": join_lines(columns["col_intervencion"]),
+            "col_departamento": join_lines(columns["col_departamento"]),
+        })
+
+    return lines
+
+
+def find_layout_table_zone(lines: list[dict]) -> tuple[list[dict], int | None, int | None]:
+    start_markers = [
+        "DATOS DEL PRODUCTO",
+        "DATOS DE PRODUCTOS",
+        "PRODUCTOS COSMETICOS FALSIFICADOS",
+        "NOMBRE",
+        "LOTE",
+        "FABRICANTE",
+    ]
+    end_markers = [
+        "DEBIDO AL RIESGO",
+        "LIMA,",
+        "(*)",
+        "PARA MAYOR INFORMACION",
+        "EL TITULAR DEL REGISTRO SANITARIO",
+    ]
+
+    start_index = None
+    for index, line in enumerate(lines):
+        haystack = normalize_for_matching(" ".join(filter(None, [
+            line.get("full_text"),
+            line.get("col_producto"),
+            line.get("col_lote"),
+            line.get("col_fabricante_pais"),
+            line.get("col_intervencion"),
+            line.get("col_departamento"),
+        ])))
+        if any(marker in haystack for marker in start_markers):
+            start_index = index
+            break
+
+    if start_index is None:
+        return [], None, None
+
+    end_index = len(lines)
+    for index in range(start_index + 1, len(lines)):
+        haystack = normalize_for_matching(lines[index].get("full_text"))
+        if any(marker in haystack for marker in end_markers):
+            end_index = index
+            break
+
+    return lines[start_index:end_index], start_index, end_index
+
+
+def is_layout_header_value(value: str | None) -> bool:
+    normalized = normalize_for_matching(value)
+    if not normalized:
+        return True
+
+    header_tokens = [
+        "NOMBRE",
+        "NOMBRE DEL PRODUCTO",
+        "LOTE",
+        "FECHA DE",
+        "VENCIMIENTO",
+        "FABRICANTE",
+        "PAIS",
+        "FABRICANTE/PAIS",
+        "FABRICANTE / PAIS",
+        "INTERVENCION",
+        "DIRECCION DE INCAUTACION",
+        "DEPARTAMENTO",
+        "DATOS DEL PRODUCTO",
+        "DATOS DE PRODUCTOS",
+        "PRODUCTO FARMACEUTICO INCAUTADO",
+        "PRODUCTOS FARMACEUTICOS FALSIFICADOS",
+    ]
+    return any(token == normalized or token in normalized for token in header_tokens)
+
+
+def first_non_header_value(values: list[str], reject_prefixes: list[str] | None = None) -> str | None:
+    reject_prefixes = reject_prefixes or []
+
+    for value in values:
+        normalized = normalize_for_matching(value)
+        if is_layout_header_value(value):
+            continue
+        if any(normalized.startswith(prefix) for prefix in reject_prefixes):
+            continue
+        return value
+
+    return None
+
+
+def extract_falsified_products_from_layout(
+    supabase,
+    document: dict,
+    alert_number: str | None,
+    alert_type: str,
+) -> tuple[list[dict], dict]:
+    layout_pages = fetch_document_layout_pages(supabase, document["id"])
+    layout_lines = group_words_by_layout_line(layout_pages)
+    zone_lines, start_index, end_index = find_layout_table_zone(layout_lines)
+
+    if not zone_lines:
+        return [], {
+            "layout_fallback_used": True,
+            "layout_lines_count": len(layout_lines),
+            "layout_columns_detected": [],
+            "reason": "No se detecto zona de tabla en layout",
+        }
+
+    logger.info(
+        "Documento %s | fallback layout activado | lineas reconstruidas: %s",
+        document.get("document_key"),
+        len(layout_lines),
+    )
+
+    column_names = [
+        "col_producto",
+        "col_lote",
+        "col_fabricante_pais",
+        "col_intervencion",
+        "col_departamento",
+    ]
+    detected_columns = [
+        column for column in column_names
+        if any(normalize_text(line.get(column)) for line in zone_lines)
+    ]
+
+    logger.info(
+        "Documento %s | columnas detectadas en layout: %s",
+        document.get("document_key"),
+        ", ".join(detected_columns) if detected_columns else "ninguna",
+    )
+
+    product_lines = [
+        line["col_producto"]
+        for line in zone_lines
+        if line.get("col_producto") and not is_layout_header_value(line.get("col_producto"))
+    ]
+    lot_values = [
+        line["col_lote"]
+        for line in zone_lines
+        if line.get("col_lote")
+    ]
+    manufacturer_country_lines = [
+        line["col_fabricante_pais"]
+        for line in zone_lines
+        if line.get("col_fabricante_pais") and not is_layout_header_value(line.get("col_fabricante_pais"))
+    ]
+    intervention_lines = [
+        line["col_intervencion"]
+        for line in zone_lines
+        if line.get("col_intervencion") and not is_layout_header_value(line.get("col_intervencion"))
+    ]
+    department_values = [
+        line["col_departamento"]
+        for line in zone_lines
+        if line.get("col_departamento") and not is_layout_header_value(line.get("col_departamento"))
+    ]
+
+    product_name = join_lines(product_lines)
+    lot_number = first_non_header_value(lot_values, reject_prefixes=["FECHA DE", "VENCIMIENTO"])
+    manufacturer_country_value = join_lines(manufacturer_country_lines)
+    manufacturer, manufacturer_country = split_manufacturer_country(manufacturer_country_value)
+    intervention_address = join_lines(intervention_lines)
+    department = first_non_header_value(department_values)
+    raw_block = "\n".join(line["full_text"] for line in zone_lines if line.get("full_text"))
+
+    if not manufacturer and manufacturer_country_value and not is_country_line(manufacturer_country_value):
+        manufacturer = manufacturer_country_value
+
+    product = build_partial_product(
+        document,
+        alert_number,
+        alert_type,
+        [raw_block],
+        {
+            "product_name": product_name,
+            "lot_number": lot_number,
+            "manufacturer": manufacturer,
+            "manufacturer_country": manufacturer_country,
+            "intervention_address": intervention_address,
+            "department": department,
+            "raw_block": raw_block,
+            "extraction_method": LAYOUT_EXTRACTION_METHOD,
+            "metadata": {
+                "source": "layout_words_json",
+                "layout_line_count": len(layout_lines),
+                "zone_start_index": start_index,
+                "zone_end_index": end_index,
+                "detected_columns": detected_columns,
+            },
+        },
+        confidence=0.75 if product_name and lot_number else 0.65,
+    )
+
+    if not (product_name or lot_number or intervention_address):
+        return [], {
+            "layout_fallback_used": True,
+            "layout_lines_count": len(layout_lines),
+            "layout_columns_detected": detected_columns,
+            "reason": "Layout detectado pero sin datos suficientes para producto",
+        }
+
+    return [product], {
+        "layout_fallback_used": True,
+        "layout_lines_count": len(layout_lines),
+        "layout_columns_detected": detected_columns,
+        "reason": "Extraccion desde layout completada",
+    }
 
 
 def looks_like_registration_holder_line(line: str) -> bool:
@@ -957,6 +1248,17 @@ def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dic
     }
 
 
+def should_try_layout_fallback(summary: dict, products: list[dict]) -> bool:
+    return (
+        not products
+        and summary.get("alert_type") in {
+            "producto_falsificado",
+            "producto_sanitario_falsificado",
+            "producto_cosmetico_falsificado",
+        }
+    )
+
+
 def replace_products_for_document(supabase, document_id: str, products: list[dict]) -> None:
     (
         supabase
@@ -1052,6 +1354,38 @@ def main():
                 page_storage_mode,
                 len(products),
             )
+
+            if should_try_layout_fallback(summary, products):
+                logger.info("Documento %s | se activa fallback de layout para falsificados", document_key)
+                layout_products, layout_summary = extract_falsified_products_from_layout(
+                    supabase,
+                    document,
+                    summary.get("alert_number"),
+                    summary.get("alert_type"),
+                )
+                if layout_products:
+                    products = layout_products
+                    summary = {
+                        **summary,
+                        **layout_summary,
+                        "reason": layout_summary.get("reason", summary.get("reason")),
+                    }
+                    logger.info(
+                        "Documento %s | productos extraidos desde layout: %s",
+                        document_key,
+                        len(layout_products),
+                    )
+                else:
+                    logger.info(
+                        "Documento %s | fallback layout sin productos | razon: %s",
+                        document_key,
+                        layout_summary.get("reason"),
+                    )
+                    summary = {
+                        **summary,
+                        **layout_summary,
+                        "reason": layout_summary.get("reason", summary.get("reason")),
+                    }
 
             if args.dry_run:
                 processed_count += 1

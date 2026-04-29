@@ -729,6 +729,38 @@ def is_valid_lot_candidate(value: str | None) -> bool:
     return looks_like_lot(normalize_text(value))
 
 
+def is_low_quality_product(product: dict) -> bool:
+    product_name = normalize_text(product.get("product_name"))
+    lot_number = normalize_text(product.get("lot_number"))
+    manufacturer = normalize_text(product.get("manufacturer"))
+    manufacturer_country = normalize_text(product.get("manufacturer_country"))
+    confidence = product.get("confidence")
+    normalized_lot = normalize_for_matching(lot_number)
+
+    invalid_lot_tokens = [
+        "FECHA DE",
+        "VENCIMIENTO",
+        "FABRICANTE",
+        "PAIS",
+        "NOMBRE",
+        "LOTE",
+        "PRODUCTO",
+    ]
+
+    if not product_name or not lot_number:
+        return True
+    if any(token in normalized_lot for token in invalid_lot_tokens):
+        return True
+    if len(lot_number) > 40:
+        return True
+    if len(manufacturer) > 250 or len(manufacturer_country) > 250:
+        return True
+    if isinstance(confidence, (int, float)) and float(confidence) <= 0.65:
+        return True
+
+    return False
+
+
 def extract_falsified_products_from_layout(
     supabase,
     document: dict,
@@ -771,79 +803,119 @@ def extract_falsified_products_from_layout(
         ", ".join(detected_columns) if detected_columns else "ninguna",
     )
 
-    product_lines = [
-        line["col_producto"]
-        for line in zone_lines
-        if line.get("col_producto") and not is_layout_header_value(line.get("col_producto"))
+    lot_rows = [
+        index for index, line in enumerate(zone_lines)
+        if extract_valid_layout_lot([line.get("col_lote")]) is not None
     ]
-    lot_values = [
-        line["col_lote"]
-        for line in zone_lines
-        if line.get("col_lote")
-    ]
-    manufacturer_country_lines = [
-        line["col_fabricante_pais"]
-        for line in zone_lines
-        if line.get("col_fabricante_pais") and not is_layout_header_value(line.get("col_fabricante_pais"))
-    ]
-    intervention_lines = [
-        line["col_intervencion"]
-        for line in zone_lines
-        if line.get("col_intervencion") and not is_layout_header_value(line.get("col_intervencion"))
-    ]
-    department_values = [
-        line["col_departamento"]
-        for line in zone_lines
-        if line.get("col_departamento") and not is_layout_header_value(line.get("col_departamento"))
-    ]
+    if not lot_rows:
+        lot_rows = [len(zone_lines) - 1]
 
-    product_name = join_lines(product_lines)
-    logger.info(
-        "Documento %s | lot candidates from layout col_lote: %s",
-        document.get("document_key"),
-        lot_values,
-    )
-    lot_number = extract_valid_layout_lot(lot_values)
-    logger.info(
-        "Documento %s | selected lot_number: %s",
-        document.get("document_key"),
-        lot_number,
-    )
-    manufacturer_country_value = join_lines(manufacturer_country_lines)
-    manufacturer, manufacturer_country = split_manufacturer_country(manufacturer_country_value)
-    intervention_address = join_lines(intervention_lines)
-    department = first_non_header_value(department_values)
-    raw_block = "\n".join(line["full_text"] for line in zone_lines if line.get("full_text"))
+    products: list[dict] = []
+    start_row = 0
 
-    if not manufacturer and manufacturer_country_value and not is_country_line(manufacturer_country_value):
-        manufacturer = manufacturer_country_value
+    for lot_row in lot_rows:
+        segment = zone_lines[start_row:lot_row + 1]
+        start_row = lot_row + 1
+        if not segment:
+            continue
 
-    product = build_partial_product(
-        document,
-        alert_number,
-        alert_type,
-        [raw_block],
-        {
-            "product_name": product_name,
-            "lot_number": lot_number,
-            "manufacturer": manufacturer,
-            "manufacturer_country": manufacturer_country,
-            "intervention_address": intervention_address,
-            "department": department,
-            "raw_block": raw_block,
-            "extraction_method": LAYOUT_EXTRACTION_METHOD,
-            "metadata": {
-                "source": "layout_words_json",
-                "layout_line_count": len(layout_lines),
-                "zone_start_index": start_index,
-                "zone_end_index": end_index,
-                "detected_columns": detected_columns,
+        product_lines = [
+            line["col_producto"]
+            for line in segment
+            if line.get("col_producto") and not is_layout_header_value(line.get("col_producto"))
+        ]
+        lot_values = [
+            line["col_lote"]
+            for line in segment
+            if line.get("col_lote")
+        ]
+        manufacturer_country_lines = [
+            line["col_fabricante_pais"]
+            for line in segment
+            if line.get("col_fabricante_pais") and not is_layout_header_value(line.get("col_fabricante_pais"))
+        ]
+        intervention_lines = [
+            line["col_intervencion"]
+            for line in zone_lines
+            if line.get("col_intervencion") and not is_layout_header_value(line.get("col_intervencion"))
+        ]
+        department_values = [
+            line["col_departamento"]
+            for line in segment
+            if line.get("col_departamento") and not is_layout_header_value(line.get("col_departamento"))
+        ]
+        expiry_values = [
+            line["col_lote"]
+            for line in zone_lines
+            if line.get("col_lote")
+            and any(char.isdigit() for char in normalize_text(line.get("col_lote")))
+            and re.search(r"(0[1-9]|1[0-2])[-/](20\d{2})", normalize_text(line.get("col_lote")))
+        ]
+
+        product_name = join_lines(product_lines)
+        logger.info(
+            "Documento %s | lot candidates from layout col_lote: %s",
+            document.get("document_key"),
+            lot_values,
+        )
+        lot_number = extract_valid_layout_lot(lot_values)
+        logger.info(
+            "Documento %s | selected lot_number: %s",
+            document.get("document_key"),
+            lot_number,
+        )
+        manufacturer_country_value = join_lines(manufacturer_country_lines)
+        manufacturer, manufacturer_country = split_manufacturer_country(manufacturer_country_value)
+        intervention_address = join_lines(intervention_lines)
+        department = first_non_header_value(department_values)
+        expiry_date = first_non_header_value(expiry_values)
+        raw_block = "\n".join(line["full_text"] for line in segment if line.get("full_text"))
+
+        if not manufacturer and manufacturer_country_value and not is_country_line(manufacturer_country_value):
+            manufacturer = manufacturer_country_value
+
+        if not (product_name or lot_number or intervention_address):
+            continue
+
+        product = build_partial_product(
+            document,
+            alert_number,
+            alert_type,
+            [raw_block],
+            {
+                "product_name": product_name,
+                "lot_number": lot_number,
+                "manufacturer": manufacturer,
+                "manufacturer_country": manufacturer_country,
+                "intervention_address": intervention_address,
+                "department": department,
+                "expiry_date": expiry_date,
+                "raw_block": raw_block,
+                "extraction_method": LAYOUT_EXTRACTION_METHOD,
+                "metadata": {
+                    "source": "layout_words_json",
+                    "layout_line_count": len(layout_lines),
+                    "zone_start_index": start_index,
+                    "zone_end_index": end_index,
+                    "detected_columns": detected_columns,
+                },
             },
-        },
-        confidence=0.75 if product_name and lot_number else 0.65,
-    )
+            confidence=0.75 if product_name and lot_number else 0.65,
+        )
+        products.append(product)
 
-    if not (product_name or lot_number or intervention_address):
+    valid_products = [
+        product for product in products
+        if not is_low_quality_product(product)
+    ]
+
+    if not valid_products and products:
+        valid_products = [
+            product for product in products
+            if normalize_text(product.get("product_name")) or normalize_text(product.get("lot_number"))
+        ]
+
+    if not valid_products:
         return [], {
             "layout_fallback_used": True,
             "layout_lines_count": len(layout_lines),
@@ -851,7 +923,7 @@ def extract_falsified_products_from_layout(
             "reason": "Layout detectado pero sin datos suficientes para producto",
         }
 
-    return [product], {
+    return valid_products, {
         "layout_fallback_used": True,
         "layout_lines_count": len(layout_lines),
         "layout_columns_detected": detected_columns,
@@ -1307,12 +1379,15 @@ def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dic
 
 def should_try_layout_fallback(summary: dict, products: list[dict]) -> bool:
     return (
-        not products
-        and summary.get("alert_type") in {
+        summary.get("alert_type") in {
             "producto_falsificado",
             "producto_sanitario_falsificado",
             "producto_cosmetico_falsificado",
         }
+        and (
+            not products
+            or any(is_low_quality_product(product) for product in products)
+        )
     )
 
 
@@ -1411,9 +1486,21 @@ def main():
                 page_storage_mode,
                 len(products),
             )
+            if products:
+                logger.info("Documento %s | productos texto plano detectados: %s", document_key, len(products))
 
             if should_try_layout_fallback(summary, products):
-                logger.info("Documento %s | se activa fallback de layout para falsificados", document_key)
+                discarded_plain_products = [
+                    product for product in products
+                    if is_low_quality_product(product)
+                ]
+                if discarded_plain_products:
+                    logger.info(
+                        "Documento %s | productos texto plano descartados por baja calidad: %s",
+                        document_key,
+                        len(discarded_plain_products),
+                    )
+                logger.info("Documento %s | fallback layout activado por baja calidad", document_key)
                 layout_products, layout_summary = extract_falsified_products_from_layout(
                     supabase,
                     document,

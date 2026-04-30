@@ -42,4 +42,4 @@ jobs:
           version: latest
 
       - name: Desplegar función telegram-bot
-        run: supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api
+        run: supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt

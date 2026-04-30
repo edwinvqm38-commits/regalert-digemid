@@ -1,0 +1,46 @@
+name: Set Telegram Webhook
+
+on:
+  workflow_dispatch:
+
+jobs:
+  set-webhook:
+    runs-on: ubuntu-latest
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+
+    steps:
+      - name: Validar secrets requeridos
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "Falta el secret TELEGRAM_BOT_TOKEN"
+            exit 1
+          fi
+
+          if [ -z "$SUPABASE_PROJECT_REF" ]; then
+            echo "Falta el secret SUPABASE_PROJECT_REF"
+            exit 1
+          fi
+
+          echo "Secrets requeridos encontrados."
+
+      - name: Configurar webhook de Telegram
+        run: |
+          WEBHOOK_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-bot"
+
+          echo "Configurando webhook hacia:"
+          echo "$WEBHOOK_URL"
+
+          RESPONSE=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -H "Content-Type: application/json" \
+            -d "{\"url\":\"${WEBHOOK_URL}\"}")
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | grep -q '"ok":true'
+
+      - name: Verificar webhook configurado
+        run: |
+          curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"

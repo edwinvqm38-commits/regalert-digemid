@@ -30,11 +30,112 @@ def clean_final_field(value):
 
     return value or None
 
+def normalize_registration_holder_and_result(
+    registration_holder,
+    analytical_result,
+) -> tuple[str | None, str | None]:
+    """
+    Corrige casos donde parte del resultado analítico se pegó al titular.
+
+    Ejemplos:
+    - holder: DROGUERÍA DIPHASAC S.A.C. No conforme para el ensayo de
+      result: Contenido de Ácido Clavulánico
+
+    - holder: DROGUERÍA PERÚ S.A.C. No conforme para
+      result: el ensayo de Contenido de Azatioprina.
+
+    Resultado:
+    - holder limpio
+    - analytical_result completo
+    """
+
+    holder = clean_final_field(registration_holder)
+    result = clean_final_field(analytical_result)
+
+    if not holder and not result:
+        return None, None
+
+    def normalize_analytical_result(value: str | None) -> str | None:
+        text = clean_final_field(value)
+
+        if not text:
+            return None
+
+        # Normaliza duplicaciones raras.
+        text = re.sub(
+            r"(?i)^No conforme para\s+No conforme para\s+",
+            "No conforme para ",
+            text,
+        )
+
+        text = re.sub(
+            r"(?i)^No conforme para el ensayo de\s+de\s+",
+            "No conforme para el ensayo de ",
+            text,
+        )
+
+        text = re.sub(
+            r"(?i)^No conforme para el ensayo\s+de\s+",
+            "No conforme para el ensayo de ",
+            text,
+        )
+
+        # Caso: "el ensayo de Contenido de Azatioprina."
+        if re.search(r"(?i)^el ensayo de\b", text):
+            text = f"No conforme para {text}"
+
+        # Caso: "de Contenido de Azatioprina."
+        elif re.search(r"(?i)^de\s+", text):
+            text = f"No conforme para el ensayo {text}"
+
+        # Caso: "Contenido de Ácido Clavulánico" o "Partículas visibles."
+        elif not re.search(r"(?i)^No conforme", text):
+            if re.search(
+                r"(?i)^(Contenido de|Part[ií]culas|Impurezas|Disoluci[oó]n|Valoraci[oó]n|Esterilidad)",
+                text,
+            ):
+                text = f"No conforme para el ensayo de {text}"
+
+        # Caso: "No conforme para el ensayo Contenido..."
+        text = re.sub(
+            r"(?i)^No conforme para el ensayo\s+(?!de\b)",
+            "No conforme para el ensayo de ",
+            text,
+        )
+
+        return clean_final_field(text)
+
+    if holder:
+        leak_patterns = [
+            r"(?i)\b(No conforme para el ensayo de.*)$",
+            r"(?i)\b(No conforme para el ensayo.*)$",
+            r"(?i)\b(No conforme para.*)$",
+            r"(?i)\b(No conforme.*)$",
+        ]
+
+        for pattern in leak_patterns:
+            match = re.search(pattern, holder)
+
+            if match:
+                leaked_text = clean_final_field(match.group(1))
+                holder = clean_final_field(holder[:match.start()])
+
+                if result:
+                    result = clean_final_field(f"{leaked_text} {result}")
+                else:
+                    result = leaked_text
+
+                break
+
+    result = normalize_analytical_result(result)
+
+    return holder, result
 
 def clean_product_record(product: dict) -> dict:
     """
     Limpia los campos principales del producto antes de guardarlo en Supabase.
     Evita guardar asteriscos, espacios dobles o caracteres sucios provenientes del PDF.
+    Además, corrige contaminación entre titular del registro sanitario y resultado analítico.
     """
     cleaned_product = dict(product)
 
@@ -54,12 +155,81 @@ def clean_product_record(product: dict) -> dict:
     for field in fields_to_clean:
         cleaned_product[field] = clean_final_field(cleaned_product.get(field))
 
+    # Corrige casos como:
+    # registration_holder = "DROGUERÍA DIPHASAC S.A.C. No conforme para el ensayo de"
+    # analytical_result = "Contenido de Ácido Clavulánico"
+    registration_holder, analytical_result = normalize_registration_holder_and_result(
+        cleaned_product.get("registration_holder"),
+        cleaned_product.get("analytical_result"),
+    )
+
+    cleaned_product["registration_holder"] = registration_holder
+    cleaned_product["analytical_result"] = analytical_result
+
     # Si department no es un departamento válido del Perú, lo dejamos en null.
     department = cleaned_product.get("department")
-    if department and normalize_for_matching(department) not in PERU_DEPARTMENTS:
+    department_normalized = normalize_for_matching(department)
+
+    if department and department_normalized not in PERU_DEPARTMENTS:
         cleaned_product["department"] = None
+    elif department_normalized in PERU_DEPARTMENTS:
+        cleaned_product["department"] = department_normalized
+
+    # Marca productos sospechosos para revisión manual.
+    if is_suspicious_product_name(cleaned_product.get("product_name")):
+        metadata = cleaned_product.get("metadata") or {}
+        metadata["needs_manual_review"] = True
+        metadata["review_reason"] = "product_name_suspicious_or_contaminated"
+        cleaned_product["metadata"] = metadata
+
+        current_confidence = float(cleaned_product.get("confidence") or 0)
+        cleaned_product["confidence"] = min(current_confidence, 0.60)
 
     return cleaned_product
+def is_suspicious_product_name(product_name: str | None) -> bool:
+    """
+    Detecta nombres de producto probablemente contaminados o mal ordenados.
+    No elimina el producto automáticamente, pero ayuda a bajarle confianza
+    o marcarlo para revisión.
+    """
+    name = normalize_text(product_name)
+    normalized = normalize_for_matching(name)
+
+    if not name:
+        return True
+
+    # Casos donde el nombre empieza con presentación/envase y no con marca.
+    suspicious_starts = [
+        "FOLIO DE ALUMINIO",
+        "BLISTER",
+        "BLÍSTER",
+        "CAJA X",
+        "FRASCO",
+        "SOLUCION",
+        "SOLUCIÓN",
+        "TABLETA",
+        "CAPSULA",
+        "CÁPSULA",
+        "AMPOLLA",
+    ]
+
+    if any(normalized.startswith(item) for item in suspicious_starts):
+        return True
+
+    # Casos donde se coló texto narrativo de intervención.
+    suspicious_phrases = [
+        "CENTRO COMERCIAL",
+        "DONDE SE ALMACENABA",
+        "PRODUCTOS INCAUTADOS",
+        "ACCIONES DE CONTROL",
+        "DIRECCION EJECUTIVA",
+        "DIRECCIÓN EJECUTIVA",
+    ]
+
+    if any(item in normalized for item in suspicious_phrases):
+        return True
+
+    return False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -73,6 +243,7 @@ PAGE_TABLE = "digemid_documento_paginas"
 LAYOUT_PAGE_TABLE = "digemid_documento_layout_paginas"
 EXTRACTION_METHOD = "rule_based_v1"
 LAYOUT_EXTRACTION_METHOD = "layout_rule_based_v1"
+ROWSPAN_EXTRACTION_METHOD = "layout_rowspan_table_v1"
 DEFAULT_STATUSES = [
     "text_extracted",
     "text_extracted_no_products",
@@ -687,7 +858,6 @@ def find_layout_table_zone(lines: list[dict]) -> tuple[list[dict], int | None, i
     ]
     end_markers = [
         "DEBIDO AL RIESGO",
-        "LIMA,",
         "(*)",
         "PARA MAYOR INFORMACION",
         "EL TITULAR DEL REGISTRO SANITARIO",
@@ -932,46 +1102,109 @@ def reconstruct_manufacturer_country(
     manufacturer_fragments: list[str],
     fallback_country_fragments: list[str],
 ) -> tuple[str | None, str | None]:
+    """
+    Reconstruye fabricante y país desde fragmentos de layout.
+    Maneja casos como:
+    - Indeurec S.A. /Ecuador
+    - Laboratorio Cifarma S.A.C. / Perú
+    - Laboratorio Mega Labs S.A. / Uruguay
+    - Fabricante en una línea y país en la siguiente
+    """
+
+    country_canonical = {
+        "PERU": "Perú",
+        "ECUADOR": "Ecuador",
+        "URUGUAY": "Uruguay",
+        "ARGENTINA": "Argentina",
+        "INDIA": "India",
+        "FRANCIA": "Francia",
+        "REINO UNIDO": "Reino Unido",
+        "ESTADOS UNIDOS": "Estados Unidos",
+        "CHINA": "China",
+        "CHILE": "Chile",
+        "COLOMBIA": "Colombia",
+        "BRASIL": "Brasil",
+        "MEXICO": "México",
+        "PANAMA": "Panamá",
+        "ESPANA": "España",
+        "ALEMANIA": "Alemania",
+        "ITALIA": "Italia",
+        "SUIZA": "Suiza",
+        "CANADA": "Canadá",
+        "JAPON": "Japón",
+        "VENEZUELA": "Venezuela",
+    }
+
+    def detect_country(value: str | None) -> str | None:
+        normalized_value = normalize_for_matching(value)
+        if not normalized_value:
+            return None
+
+        for country in sorted(COUNTRY_NAMES, key=len, reverse=True):
+            normalized_country = normalize_for_matching(country)
+            if re.search(rf"(?<![A-Z]){re.escape(normalized_country)}(?![A-Z])", normalized_value):
+                return country_canonical.get(normalized_country, country.title())
+
+        return None
+
     cleaned_fragments = [
         cleanup_manufacturer_fragment(fragment)
         for fragment in manufacturer_fragments
     ]
-    cleaned_fragments = [fragment for fragment in cleaned_fragments if fragment]
-    combined = join_lines(cleaned_fragments)
 
-    if combined and "/" in combined:
-        left, right = combined.split("/", 1)
-        manufacturer = cleanup_manufacturer_fragment(left)
-        right_clean = cleanup_manufacturer_fragment(right)
-        if right_clean:
-            country_token = next(
-                (token for token in COUNTRY_NAMES if token in normalize_for_matching(right_clean)),
-                None,
-            )
-            if country_token:
-                original_country = next(
-                    (word for word in right_clean.split() if normalize_for_matching(word) == country_token),
-                    country_token.title(),
-                )
-                return manufacturer, original_country
-        return manufacturer, right_clean
+    cleaned_fallback = [
+        cleanup_manufacturer_fragment(fragment)
+        for fragment in fallback_country_fragments
+    ]
 
-    if combined:
-        for token in COUNTRY_NAMES:
-            if token in normalize_for_matching(combined):
-                parts = re.split(token, combined, flags=re.IGNORECASE)
-                manufacturer = cleanup_manufacturer_fragment(parts[0])
-                return manufacturer, token.title()
+    # Une fragmentos sin duplicarlos, porque a veces se envía la misma lista dos veces.
+    all_fragments = []
+    for fragment in cleaned_fragments + cleaned_fallback:
+        if fragment and fragment not in all_fragments:
+            all_fragments.append(fragment)
 
-    for fragment in fallback_country_fragments:
-        cleaned = cleanup_manufacturer_fragment(fragment)
-        if cleaned:
-            for token in COUNTRY_NAMES:
-                if token in normalize_for_matching(cleaned):
-                    return combined, token.title()
+    combined = join_lines(all_fragments)
 
-    return combined, None
+    if not combined:
+        return None, None
 
+    combined = normalize_text(combined)
+
+    # Caso con separador "/"
+    if "/" in combined:
+        parts = [
+            normalize_text(part)
+            for part in re.split(r"\s*/\s*", combined)
+            if normalize_text(part)
+        ]
+
+        if parts:
+            manufacturer = cleanup_manufacturer_fragment(parts[0])
+            right_side = join_lines(parts[1:]) if len(parts) > 1 else None
+
+            country = detect_country(right_side) or detect_country(combined)
+
+            if country:
+                return manufacturer, country
+
+            return manufacturer, cleanup_manufacturer_fragment(right_side)
+
+    # Caso sin separador pero con país dentro del texto.
+    country = detect_country(combined)
+    if country:
+        normalized_country = normalize_for_matching(country)
+        tokens = combined.split()
+
+        manufacturer_tokens = [
+            token
+            for token in tokens
+            if normalize_for_matching(token) != normalized_country
+        ]
+
+        manufacturer = cleanup_manufacturer_fragment(" ".join(manufacturer_tokens))
+        return manufacturer, country
+
+    return cleanup_manufacturer_fragment(combined), None
 
 def select_lot_and_expiry_from_segment(segment: list[dict], table_profile: str) -> tuple[str | None, str | None, list[str]]:
     lot_candidates: list[str] = []
@@ -1185,6 +1418,980 @@ def extract_lot_from_product_name_regex(product_name: str | None, expiry_date: s
 
     return None, all_candidates
 
+def looks_like_rowspan_lot_start(value: str | None) -> bool:
+    """
+    Detecta lotes en tablas con celdas combinadas.
+    Soporta casos:
+    - 0380-20
+    - 1984385
+    - 2020381
+    - M07484
+    - M0655 (envase mediato)
+    - 8902*
+    - 4344**
+    """
+    text = normalize_text(value)
+    if not text:
+        return False
+
+    normalized = normalize_for_matching(text)
+
+    invalid = {
+        "LOTE",
+        "NOMBRE",
+        "FABRICANTE",
+        "PAIS",
+        "DEPARTAMENTO",
+        "DIRECCION",
+        "DIRECCIÓN",
+    }
+
+    if normalized in invalid:
+        return False
+
+    if not re.search(r"\d", text):
+        return False
+
+    # Código de lote con posible paréntesis.
+    return bool(
+        re.match(
+            r"^[A-Z0-9][A-Z0-9\-]{2,}\*{0,2}(?:\s*\(.*)?$",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+
+def normalize_lot_ocr(value: str | None) -> str | None:
+    """
+    Corrige errores comunes OCR/layout en números de lote.
+    Ejemplo:
+    MO655 -> M0655
+    """
+    text = clean_final_field(value)
+
+    if not text:
+        return None
+
+    # Caso típico: letra O confundida con cero después de M
+    text = re.sub(r"^M[OÓ](\d)", r"M0\1", text, flags=re.IGNORECASE)
+
+    # Normaliza espacios dentro de paréntesis
+    text = re.sub(r"\(\s+", "(", text)
+    text = re.sub(r"\s+\)", ")", text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def looks_like_lot_continuation(value: str | None) -> bool:
+    """
+    Detecta continuación de lote cuando el PDF parte el texto en varias líneas.
+    Ejemplo:
+    M0655 (envase
+    mediato)
+    """
+    text = normalize_text(value)
+    normalized = normalize_for_matching(text)
+
+    if not text:
+        return False
+
+    if looks_like_rowspan_lot_start(text):
+        return False
+
+    continuation_markers = [
+        "ENVASE",
+        "MEDIATO",
+        "INMEDIATO",
+        "MEDIATA",
+        "INMEDIATA",
+    ]
+
+    return ")" in text or any(marker in normalized for marker in continuation_markers)
+
+
+def merge_rowspan_lot_lines(lot_lines: list[str]) -> list[str]:
+    """
+    Une lotes partidos en varias líneas.
+    Ejemplo:
+    ['M0655 (envase', 'mediato)', 'M06551 (envase', 'inmediato)']
+    ->
+    ['M0655 (envase mediato)', 'M06551 (envase inmediato)']
+    """
+    lots: list[str] = []
+    current: str | None = None
+
+    for raw in lot_lines:
+        text = clean_final_field(raw)
+        if not text:
+            continue
+
+        if looks_like_rowspan_lot_start(text):
+            if current:
+                lots.append(clean_final_field(current))
+            current = text
+            continue
+
+        if current and looks_like_lot_continuation(text):
+            current = normalize_text(f"{current} {text}")
+            continue
+
+        if current:
+            lots.append(clean_final_field(current))
+            current = None
+
+    if current:
+        lots.append(clean_final_field(current))
+
+    # Quitar duplicados conservando orden
+    unique_lots = []
+    for lot in lots:
+        if lot and lot not in unique_lots:
+            unique_lots.append(lot)
+
+    return unique_lots
+
+
+def looks_like_packaging_line(value: str | None) -> bool:
+    text = normalize_for_matching(value)
+
+    if not text:
+        return False
+
+    packaging_starts = [
+        "FOLIO DE ALUMINIO",
+        "SOLUCION",
+        "SOLUCIÓN",
+        "CAJA X",
+        "TABLETA",
+        "BLISTER",
+        "BLÍSTER",
+        "FRASCO",
+        "NATURAL SPRAY",
+        "POLVO PARA",
+    ]
+
+    return any(text.startswith(item) for item in packaging_starts)
+
+
+def looks_like_product_start_line(value: str | None) -> bool:
+    """
+    Detecta si una línea de la columna producto parece iniciar un nuevo producto.
+    No considera como nuevo producto líneas de presentación/envase.
+    """
+    text = normalize_text(value)
+    normalized = normalize_for_matching(text)
+
+    if not text:
+        return False
+
+    if is_layout_header_value(text):
+        return False
+
+    if looks_like_rowspan_lot_start(text):
+        return False
+
+    if looks_like_packaging_line(text):
+        return False
+
+    invalid_fragments = [
+        "PRODUCTOS INCAUTADOS",
+        "ACCIONES DE CONTROL",
+        "DIRECCION",
+        "DIRECCIÓN",
+        "ESTABLECIMIENTO",
+        "CENTRO COMERCIAL",
+    ]
+
+    if any(fragment in normalized for fragment in invalid_fragments):
+        return False
+
+    return True
+
+def canonical_country(value: str | None) -> str | None:
+    """
+    Devuelve el país normalizado solo si realmente es un país conocido.
+    Evita guardar basura como 'Centro', 'Centro en', 'Tienda', etc.
+    """
+    text = clean_final_field(value)
+    normalized = normalize_for_matching(text)
+
+    if not normalized:
+        return None
+
+    country_map = {
+        "PERU": "Perú",
+        "PERÚ": "Perú",
+        "ECUADOR": "Ecuador",
+        "URUGUAY": "Uruguay",
+        "FRANCIA": "Francia",
+        "INDIA": "India",
+        "ARGENTINA": "Argentina",
+        "UK": "UK (Reino Unido)",
+        "REINO UNIDO": "Reino Unido",
+        "UK REINO UNIDO": "UK (Reino Unido)",
+        "UK (REINO UNIDO)": "UK (Reino Unido)",
+        "ESTADOS UNIDOS": "Estados Unidos",
+        "CHINA": "China",
+        "CHILE": "Chile",
+        "COLOMBIA": "Colombia",
+        "BRASIL": "Brasil",
+        "MEXICO": "México",
+        "MÉXICO": "México",
+        "ESPAÑA": "España",
+        "ESPANA": "España",
+        "ALEMANIA": "Alemania",
+        "ITALIA": "Italia",
+        "SUIZA": "Suiza",
+        "CANADA": "Canadá",
+        "CANADÁ": "Canadá",
+        "JAPON": "Japón",
+        "JAPÓN": "Japón",
+    }
+
+    if normalized in country_map:
+        return country_map[normalized]
+
+    return None
+
+
+def extract_country_prefix(value: str | None) -> tuple[str | None, str | None]:
+    """
+    Si una celda empieza con un país, separa:
+    'Francia Cosméticos incautados...' -> ('Francia', 'Cosméticos incautados...')
+    """
+    text = clean_final_field(value)
+
+    if not text:
+        return None, None
+
+    candidates = [
+        "UK (Reino Unido)",
+        "Reino Unido",
+        "Estados Unidos",
+        "Francia",
+        "Perú",
+        "Ecuador",
+        "Uruguay",
+        "India",
+        "Argentina",
+        "China",
+        "Chile",
+        "Colombia",
+        "Brasil",
+        "México",
+        "España",
+        "Alemania",
+        "Italia",
+        "Suiza",
+        "Canadá",
+        "Japón",
+    ]
+
+    for country in candidates:
+        pattern = rf"^\s*{re.escape(country)}\b[\.;,:\s-]*"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            remaining = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+            return canonical_country(country), remaining or None
+
+    return None, text
+
+def extract_country_anywhere(value: str | None) -> str | None:
+    """
+    Detecta país aunque esté dentro de una línea mezclada.
+    Ejemplo:
+    'P&G Prestige Beaute Geneva / UK (Reino Unido)' -> 'UK (Reino Unido)'
+    """
+    text = clean_final_field(value)
+
+    if not text:
+        return None
+
+    normalized = normalize_for_matching(text)
+
+    country_patterns = [
+        ("UK (Reino Unido)", [r"\bUK\s*\(?\s*REINO UNIDO\s*\)?", r"\bUK\b"]),
+        ("Reino Unido", [r"\bREINO UNIDO\b"]),
+        ("Francia", [r"\bFRANCIA\b"]),
+        ("Perú", [r"\bPERU\b", r"\bPERÚ\b"]),
+        ("Ecuador", [r"\bECUADOR\b"]),
+        ("Uruguay", [r"\bURUGUAY\b"]),
+        ("India", [r"\bINDIA\b"]),
+        ("Argentina", [r"\bARGENTINA\b"]),
+        ("Estados Unidos", [r"\bESTADOS UNIDOS\b"]),
+        ("China", [r"\bCHINA\b"]),
+        ("Chile", [r"\bCHILE\b"]),
+        ("Colombia", [r"\bCOLOMBIA\b"]),
+        ("Brasil", [r"\bBRASIL\b"]),
+        ("México", [r"\bMEXICO\b", r"\bMÉXICO\b"]),
+        ("España", [r"\bESPANA\b", r"\bESPAÑA\b"]),
+        ("Alemania", [r"\bALEMANIA\b"]),
+        ("Italia", [r"\bITALIA\b"]),
+        ("Suiza", [r"\bSUIZA\b"]),
+        ("Canadá", [r"\bCANADA\b", r"\bCANADÁ\b"]),
+        ("Japón", [r"\bJAPON\b", r"\bJAPÓN\b"]),
+    ]
+
+    for canonical, patterns in country_patterns:
+        for pattern in patterns:
+            if re.search(pattern, normalized, flags=re.IGNORECASE):
+                return canonical
+
+    return None
+
+
+def clean_rowspan_manufacturer(value: str | None) -> str | None:
+    """
+    Limpia fabricante en tablas con celdas combinadas.
+    Evita que se mezclen palabras de la dirección como 'sanitaria'.
+    """
+    text = cleanup_manufacturer_fragment(value)
+
+    if not text:
+        return None
+
+    text = re.sub(r"\bsanitaria\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" ,;/")
+
+    return text or None
+
+
+def find_country_near_y(
+    zone_lines: list[dict],
+    target_y: float,
+    max_gap: float = 80.0,
+) -> str | None:
+    """
+    Busca país cerca de la coordenada Y del fabricante/lote.
+    Sirve cuando el país cae desplazado en la columna de intervención,
+    fabricante/país o dentro del full_text.
+    """
+    candidates: list[tuple[float, int, str]] = []
+
+    for line in zone_lines:
+        y = get_line_y(line)
+        gap = abs(y - target_y)
+
+        if gap > max_gap:
+            continue
+
+        values_to_check = [
+            line.get("col_fabricante_pais"),
+            line.get("col_intervencion"),
+            line.get("full_text"),
+        ]
+
+        for value in values_to_check:
+            text = normalize_text(value)
+
+            if not text:
+                continue
+
+            # Prioridad 1: país exacto o al inicio.
+            country_from_prefix, _remaining = extract_country_prefix(text)
+            if country_from_prefix:
+                candidates.append((gap, 1, country_from_prefix))
+                continue
+
+            # Prioridad 2: celda completa exactamente igual a un país.
+            country_exact = canonical_country(text)
+            if country_exact:
+                candidates.append((gap, 2, country_exact))
+                continue
+
+            # Prioridad 3: país dentro de una línea mezclada.
+            country_inside = extract_country_anywhere(text)
+            if country_inside:
+                candidates.append((gap, 3, country_inside))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
+
+def split_rowspan_manufacturer_country(value: str | None) -> tuple[str | None, str | None]:
+    """
+    Separa Fabricante / País.
+    Maneja:
+    - Indeurec S.A. / Ecuador
+    - Laboratorio Cifarma S.A.C. Perú
+    - Laboratorio Mega Labs S.A. Uruguay
+    - P&G Prestige Beaute Geneva UK (Reino Unido)
+    """
+    text = normalize_text(value)
+
+    if not text:
+        return None, None
+
+    text = re.sub(r"\s+", " ", text).strip()
+
+    def remove_country_from_text(source: str, country: str | None) -> str:
+        cleaned = source
+
+        country_patterns = [
+            r"\bUK\s*\(?\s*REINO UNIDO\s*\)?",
+            r"\bREINO UNIDO\b",
+            r"\bFRANCIA\b",
+            r"\bPERU\b",
+            r"\bPERÚ\b",
+            r"\bECUADOR\b",
+            r"\bURUGUAY\b",
+            r"\bINDIA\b",
+            r"\bARGENTINA\b",
+            r"\bESTADOS UNIDOS\b",
+            r"\bCHINA\b",
+            r"\bCHILE\b",
+            r"\bCOLOMBIA\b",
+            r"\bBRASIL\b",
+            r"\bMEXICO\b",
+            r"\bMÉXICO\b",
+            r"\bESPAÑA\b",
+            r"\bESPANA\b",
+            r"\bALEMANIA\b",
+            r"\bITALIA\b",
+            r"\bSUIZA\b",
+            r"\bCANADA\b",
+            r"\bCANADÁ\b",
+            r"\bJAPON\b",
+            r"\bJAPÓN\b",
+        ]
+
+        for pattern in country_patterns:
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;/")
+        return cleaned
+
+    # Caso con separador "/"
+    if "/" in text:
+        parts = [
+            normalize_text(part)
+            for part in re.split(r"\s*/\s*", text)
+            if normalize_text(part)
+        ]
+
+        manufacturer = cleanup_manufacturer_fragment(parts[0]) if parts else None
+        country_text = join_lines(parts[1:]) if len(parts) > 1 else None
+
+        country = canonical_country(country_text) or extract_country_anywhere(country_text)
+
+        return manufacturer, country
+
+    # Caso sin separador, pero con país dentro del mismo texto.
+    country = canonical_country(text) or extract_country_anywhere(text)
+
+    if country:
+        manufacturer_text = remove_country_from_text(text, country)
+        manufacturer = cleanup_manufacturer_fragment(manufacturer_text)
+        return manufacturer, country
+
+    return cleanup_manufacturer_fragment(text), None
+def get_line_y(line: dict) -> float:
+    try:
+        return float(line.get("y_group") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def is_country_only_text(value: str | None) -> bool:
+    normalized = normalize_for_matching(value)
+
+    if not normalized:
+        return False
+
+    country_aliases = {
+        "PERU",
+        "PERÚ",
+        "ECUADOR",
+        "URUGUAY",
+        "FRANCIA",
+        "INDIA",
+        "ARGENTINA",
+        "UK",
+        "UK (REINO UNIDO)",
+        "REINO UNIDO",
+    }
+
+    normalized_countries = {normalize_for_matching(country) for country in COUNTRY_NAMES}
+
+    return normalized in normalized_countries or normalized in country_aliases
+
+
+def looks_like_manufacturer_line(value: str | None) -> bool:
+    text = normalize_text(value)
+    normalized = normalize_for_matching(text)
+
+    if not text:
+        return False
+
+    if is_layout_header_value(text):
+        return False
+
+    if is_country_only_text(text):
+        return False
+
+    manufacturer_markers = [
+        "LABORATORIO",
+        "LABS",
+        "PHARMA",
+        "FARMA",
+        "S.A.",
+        "S.A.C.",
+        "SAC",
+        "INC",
+        "P&G",
+        "PRESTIGE",
+        "INDEUREC",
+        "CATALENT",
+        "GLOBELA",
+        "SWISS",
+        "ZEE",
+    ]
+
+    return "/" in text or any(marker in normalized for marker in manufacturer_markers)
+
+
+def build_product_blocks_by_y(zone_lines: list[dict]) -> list[dict]:
+    blocks: list[dict] = []
+    current: dict | None = None
+
+    def flush():
+        nonlocal current
+        if current and current["lines"]:
+            current["text"] = join_lines(current["lines"])
+            current["center_y"] = sum(current["ys"]) / len(current["ys"])
+            blocks.append(current)
+        current = None
+
+    for line in zone_lines:
+        text = normalize_text(line.get("col_producto"))
+        y = get_line_y(line)
+
+        if not text or is_layout_header_value(text):
+            continue
+
+        if looks_like_product_start_line(text):
+            flush()
+            current = {
+                "lines": [text],
+                "ys": [y],
+                "start_y": y,
+                "end_y": y,
+            }
+            continue
+
+        if current and looks_like_packaging_line(text):
+            current["lines"].append(text)
+            current["ys"].append(y)
+            current["end_y"] = y
+            continue
+
+        if current and not looks_like_rowspan_lot_start(text):
+            # Permite completar nombres largos partidos en varias líneas.
+            normalized = normalize_for_matching(text)
+            invalid_fragments = [
+                "PRODUCTOS INCAUTADOS",
+                "ACCIONES DE CONTROL",
+                "DIRECCION",
+                "DIRECCIÓN",
+                "DEPARTAMENTO",
+                "FABRICANTE",
+                "LOTE",
+            ]
+
+            if not any(fragment in normalized for fragment in invalid_fragments):
+                current["lines"].append(text)
+                current["ys"].append(y)
+                current["end_y"] = y
+
+    flush()
+    return blocks
+
+
+def build_manufacturer_blocks_by_y(zone_lines: list[dict]) -> list[dict]:
+    blocks: list[dict] = []
+    current: dict | None = None
+
+    def flush():
+        nonlocal current
+        if current and current["lines"]:
+            raw_text = join_lines(current["lines"])
+            manufacturer, country = split_rowspan_manufacturer_country(raw_text)
+
+            current["raw_text"] = raw_text
+            current["manufacturer"] = manufacturer
+            current["manufacturer_country"] = country
+            current["center_y"] = sum(current["ys"]) / len(current["ys"])
+
+            if manufacturer or country:
+                blocks.append(current)
+
+        current = None
+
+    for line in zone_lines:
+        text = normalize_text(line.get("col_fabricante_pais"))
+        y = get_line_y(line)
+
+        possible_country, _remaining_intervention = extract_country_prefix(
+            line.get("col_intervencion")
+        )
+
+        if text and text.endswith("/") and possible_country:
+            text = normalize_text(f"{text} {possible_country}")
+
+        if not text or is_layout_header_value(text):
+            continue
+
+        starts_manufacturer = looks_like_manufacturer_line(text)
+
+        if starts_manufacturer:
+            if current:
+                previous_y = current["ys"][-1]
+                gap = abs(y - previous_y)
+
+                # Si está muy cerca, probablemente es continuación del mismo fabricante.
+                if gap <= 18:
+                    current["lines"].append(text)
+                    current["ys"].append(y)
+                    current["end_y"] = y
+                    continue
+
+                flush()
+
+            current = {
+                "lines": [text],
+                "ys": [y],
+                "start_y": y,
+                "end_y": y,
+            }
+            continue
+
+        if current and is_country_only_text(text):
+            current["lines"].append(text)
+            current["ys"].append(y)
+            current["end_y"] = y
+            continue
+
+        if current and "/" in text:
+            current["lines"].append(text)
+            current["ys"].append(y)
+            current["end_y"] = y
+            continue
+
+    flush()
+    return blocks
+
+
+def extract_lot_items_by_y(zone_lines: list[dict]) -> list[dict]:
+    lot_items: list[dict] = []
+    current: dict | None = None
+
+    def flush():
+        nonlocal current
+        if current and current.get("lines"):
+            raw_lot = join_lines(current["lines"])
+            lot_number = normalize_lot_ocr(raw_lot)
+
+            if lot_number:
+                current["lot_number"] = lot_number
+                current["center_y"] = sum(current["ys"]) / len(current["ys"])
+                lot_items.append(current)
+
+        current = None
+
+    for line in zone_lines:
+        text = normalize_text(line.get("col_lote"))
+        y = get_line_y(line)
+
+        if not text or is_layout_header_value(text):
+            continue
+
+        text = normalize_lot_ocr(text)
+
+        if not text:
+            continue
+
+        if looks_like_rowspan_lot_start(text):
+            flush()
+            current = {
+                "lines": [text],
+                "ys": [y],
+                "start_y": y,
+                "end_y": y,
+                "raw_lines": [normalize_text(line.get("full_text"))],
+            }
+            continue
+
+        if current and looks_like_lot_continuation(text):
+            current["lines"].append(text)
+            current["ys"].append(y)
+            current["end_y"] = y
+            current["raw_lines"].append(normalize_text(line.get("full_text")))
+            continue
+
+    flush()
+
+    # Quitar duplicados conservando orden
+    unique_items: list[dict] = []
+    seen = set()
+
+    for item in lot_items:
+        lot = item.get("lot_number")
+        if lot in seen:
+            continue
+        seen.add(lot)
+        unique_items.append(item)
+
+    return unique_items
+
+
+def nearest_block_by_y(y: float, blocks: list[dict]) -> dict | None:
+    if not blocks:
+        return None
+
+    return min(
+        blocks,
+        key=lambda block: abs(float(block.get("center_y") or 0) - y)
+    )
+
+def choose_rowspan_block_for_lot(
+    lot_y: float,
+    blocks: list[dict],
+    forward_gap: float = 45.0,
+) -> dict | None:
+    """
+    Selecciona el bloque correcto para un lote en tablas con celdas combinadas.
+
+    Criterio:
+    - Si el lote cae dentro del bloque, usa ese bloque.
+    - Si el lote está justo antes del siguiente producto/fabricante,
+      pertenece al siguiente bloque.
+    - Si no se cumple lo anterior, usa cercanía vertical.
+    """
+    if not blocks:
+        return None
+
+    sorted_blocks = sorted(
+        blocks,
+        key=lambda block: float(block.get("center_y") or 0)
+    )
+
+    # 1. Si el lote cae dentro del rango vertical del bloque.
+    for block in sorted_blocks:
+        center_y = float(block.get("center_y") or 0)
+        start_y = float(block.get("start_y") or center_y)
+        end_y = float(block.get("end_y") or center_y)
+
+        if start_y - 6 <= lot_y <= end_y + 6:
+            return block
+
+    previous_block = None
+    next_block = None
+
+    for block in sorted_blocks:
+        center_y = float(block.get("center_y") or 0)
+
+        if center_y < lot_y:
+            previous_block = block
+            continue
+
+        next_block = block
+        break
+
+    # 2. Si el lote está justo antes del siguiente bloque,
+    # pertenece al siguiente bloque.
+    if next_block:
+        next_center = float(next_block.get("center_y") or 0)
+        next_start = float(next_block.get("start_y") or next_center)
+
+        previous_end = None
+        if previous_block:
+            previous_center = float(previous_block.get("center_y") or 0)
+            previous_end = float(previous_block.get("end_y") or previous_center)
+
+        if lot_y <= next_start and (next_start - lot_y) <= forward_gap:
+            return next_block
+
+        if previous_end is not None and previous_end <= lot_y <= next_start:
+            return next_block
+
+    # 3. Fallback: cercanía vertical.
+    return nearest_block_by_y(lot_y, sorted_blocks)
+
+def extract_rowspan_products_from_layout(
+    document: dict,
+    alert_number: str | None,
+    alert_type: str,
+    layout_lines: list[dict],
+    zone_lines: list[dict],
+    start_index: int | None,
+    end_index: int | None,
+    detected_columns: list[str],
+    table_profile: str,
+) -> tuple[list[dict], dict]:
+    """
+    Extractor especializado para tablas con celdas combinadas.
+    En lugar de cortar por segmentos, asigna cada lote al bloque de producto
+    y fabricante más cercano verticalmente.
+    """
+
+    # No usar este extractor para tablas con fecha de vencimiento.
+    # Esas tablas tienen otra estructura.
+    if table_profile == "with_expiry":
+        return [], {
+            "layout_rowspan_used": False,
+            "reason": "No aplica rowspan para tabla con fecha de vencimiento",
+        }
+
+    product_blocks = build_product_blocks_by_y(zone_lines)
+    manufacturer_blocks = build_manufacturer_blocks_by_y(zone_lines)
+    lot_items = extract_lot_items_by_y(zone_lines)
+
+    if len(product_blocks) < 1 or len(lot_items) < 1:
+        return [], {
+            "layout_rowspan_used": False,
+            "reason": "No se detectaron bloques suficientes de producto/lote",
+        }
+
+    # Dirección global
+    intervention_values = [
+        normalize_text(line.get("col_intervencion"))
+        for line in zone_lines
+        if normalize_text(line.get("col_intervencion"))
+        and not is_layout_header_value(line.get("col_intervencion"))
+    ]
+
+    global_intervention = join_lines(intervention_values)
+
+    # Departamento global
+    department_values = [
+        normalize_text(line.get("col_departamento"))
+        for line in zone_lines
+        if normalize_text(line.get("col_departamento"))
+        and not is_layout_header_value(line.get("col_departamento"))
+    ]
+
+    global_department = select_layout_department(department_values)
+
+    products: list[dict] = []
+
+    for lot_item in lot_items:
+        lot_number = lot_item.get("lot_number")
+        lot_y = float(lot_item.get("center_y") or 0)
+
+        product_block = choose_rowspan_block_for_lot(
+            lot_y,
+            product_blocks,
+            forward_gap=55.0,
+        )
+
+        manufacturer_block = choose_rowspan_block_for_lot(
+            lot_y,
+            manufacturer_blocks,
+            forward_gap=65.0,
+        )
+
+        product_name = product_block.get("text") if product_block else None
+        manufacturer = manufacturer_block.get("manufacturer") if manufacturer_block else None
+        manufacturer_country = manufacturer_block.get("manufacturer_country") if manufacturer_block else None
+
+        manufacturer = clean_rowspan_manufacturer(manufacturer)
+
+        if not manufacturer_country:
+            country_reference_y = (
+                float(manufacturer_block.get("center_y") or lot_y)
+                if manufacturer_block
+                else lot_y
+            )
+
+            manufacturer_country = find_country_near_y(
+                zone_lines,
+                country_reference_y,
+                max_gap=45.0,
+            )
+
+        if not product_name or not lot_number:
+            continue
+
+        raw_block_lines = []
+
+        if product_block:
+            raw_block_lines.append(product_block.get("text") or "")
+
+        raw_block_lines.append(lot_number)
+
+        if manufacturer_block:
+            raw_block_lines.append(manufacturer_block.get("raw_text") or "")
+
+        if global_intervention:
+            raw_block_lines.append(global_intervention)
+
+        if global_department:
+            raw_block_lines.append(global_department)
+
+        raw_block = "\n".join([line for line in raw_block_lines if line])
+
+        product = build_partial_product(
+            document,
+            alert_number,
+            alert_type,
+            [raw_block],
+            {
+                "product_name": product_name,
+                "lot_number": lot_number,
+                "manufacturer": manufacturer,
+                "manufacturer_country": manufacturer_country,
+                "intervention_address": global_intervention,
+                "department": global_department,
+                "raw_block": raw_block,
+                "extraction_method": ROWSPAN_EXTRACTION_METHOD,
+                "metadata": {
+                    "source": "layout_words_json",
+                    "table_type": "rowspan_merged_cells_y_nearest",
+                    "lot_y": lot_y,
+                    "product_center_y": product_block.get("center_y") if product_block else None,
+                    "manufacturer_center_y": manufacturer_block.get("center_y") if manufacturer_block else None,
+                    "layout_line_count": len(layout_lines),
+                    "zone_start_index": start_index,
+                    "zone_end_index": end_index,
+                    "detected_columns": detected_columns,
+                    "table_profile": table_profile,
+                },
+            },
+            confidence=0.88 if product_name and lot_number and manufacturer and manufacturer_country and global_department else 0.72,
+        )
+
+        products.append(product)
+
+    # Evitar duplicados por document_key + lot_number
+    unique_products: list[dict] = []
+    seen_lots = set()
+
+    for product in products:
+        key = (
+            normalize_text(product.get("document_key")),
+            normalize_text(product.get("lot_number")),
+        )
+
+        if key in seen_lots:
+            continue
+
+        seen_lots.add(key)
+        unique_products.append(product)
+
+    if len(unique_products) < 1:
+        return [], {
+            "layout_rowspan_used": False,
+            "reason": "Tabla combinada no produjo productos",
+        }
+
+    return unique_products, {
+        "layout_rowspan_used": True,
+        "layout_lines_count": len(layout_lines),
+        "layout_columns_detected": detected_columns,
+        "reason": "Extraccion por tabla con celdas combinadas usando cercania vertical",
+    }
 
 def extract_falsified_products_from_layout(
     supabase,
@@ -1217,10 +2424,12 @@ def extract_falsified_products_from_layout(
         "col_intervencion",
         "col_departamento",
     ]
+
     detected_columns = [
         column for column in column_names
         if any(normalize_text(line.get(column)) for line in zone_lines)
     ]
+
     table_profile = detect_layout_table_profile(zone_lines)
 
     logger.info(
@@ -1228,12 +2437,33 @@ def extract_falsified_products_from_layout(
         document.get("document_key"),
         ", ".join(detected_columns) if detected_columns else "ninguna",
     )
+
     logger.info(
         "Documento %s | table_profile detectado: %s",
         document.get("document_key"),
         table_profile,
     )
 
+    
+    rowspan_products, rowspan_summary = extract_rowspan_products_from_layout(
+        document=document,
+        alert_number=alert_number,
+        alert_type=alert_type,
+        layout_lines=layout_lines,
+        zone_lines=zone_lines,
+        start_index=start_index,
+        end_index=end_index,
+        detected_columns=detected_columns,
+        table_profile=table_profile,
+    )
+
+    if rowspan_products:
+        logger.info(
+            "Documento %s | productos extraidos con rowspan: %s",
+            document.get("document_key"),
+            len(rowspan_products),
+        )
+        return rowspan_products, rowspan_summary
     lot_rows = [
         index for index, line in enumerate(zone_lines)
         if (
@@ -1243,15 +2473,50 @@ def extract_falsified_products_from_layout(
         )
         or extract_valid_layout_lot([line.get("col_lote")]) is not None
     ]
+
     if not lot_rows:
         lot_rows = [len(zone_lines) - 1]
 
     products: list[dict] = []
-    start_row = 0
 
-    for lot_row in lot_rows:
-        segment = zone_lines[start_row:lot_row + 1]
-        start_row = lot_row + 1
+    last_product_context = {
+        "product_name": None,
+        "manufacturer": None,
+        "manufacturer_country": None,
+        "department": None,
+    }
+
+    # Cambio 3:
+    # Antes el segmento se cortaba mal y arrastraba líneas del producto anterior.
+    # Ahora cada segmento nace desde la fila del lote y llega hasta antes del siguiente lote.
+    if len(lot_rows) == 1 and lot_rows[0] == len(zone_lines) - 1:
+        segment_ranges = [(0, len(zone_lines))]
+    else:
+        segment_ranges = []
+
+        for lot_index, lot_row in enumerate(lot_rows):
+            next_lot_row = (
+                lot_rows[lot_index + 1]
+                if lot_index + 1 < len(lot_rows)
+                else len(zone_lines)
+            )
+
+            segment_start = lot_row
+
+            # Si la fila del lote no trae nombre de producto, miramos una fila arriba.
+            # Esto ayuda cuando el PDF parte el nombre en varias líneas.
+            if (
+                lot_row > 0
+                and not normalize_text(zone_lines[lot_row].get("col_producto"))
+            ):
+                segment_start = lot_row - 1
+
+            if segment_start < next_lot_row:
+                segment_ranges.append((segment_start, next_lot_row))
+
+    for segment_start, segment_end in segment_ranges:
+        segment = zone_lines[segment_start:segment_end]
+
         if not segment:
             continue
 
@@ -1265,12 +2530,15 @@ def extract_falsified_products_from_layout(
                 and not is_expiry_date_candidate(line.get("col_producto"))
             )
         ]
+
         col_lote_values = [
             line["col_lote"]
             for line in segment
             if line.get("col_lote")
         ]
+
         manufacturer_country_lines = []
+
         for line in segment:
             fabricante_pais = line.get("col_fabricante_pais")
             col_lote = line.get("col_lote")
@@ -1278,6 +2546,7 @@ def extract_falsified_products_from_layout(
             if fabricante_pais and not is_layout_header_value(fabricante_pais):
                 manufacturer_country_lines.append(fabricante_pais)
 
+            # En tablas con vencimiento, a veces la columna lote trae fragmentos de fabricante/país.
             if (
                 table_profile == "with_expiry"
                 and col_lote
@@ -1290,8 +2559,10 @@ def extract_falsified_products_from_layout(
         intervention_lines = [
             line["col_intervencion"]
             for line in zone_lines
-            if line.get("col_intervencion") and not is_layout_header_value(line.get("col_intervencion"))
+            if line.get("col_intervencion")
+            and not is_layout_header_value(line.get("col_intervencion"))
         ]
+
         department_values = [
             line["col_departamento"]
             for line in segment
@@ -1303,7 +2574,12 @@ def extract_falsified_products_from_layout(
         ]
 
         product_name = join_lines(product_lines)
-        lot_number, expiry_date, lot_candidates = select_lot_and_expiry_from_segment(segment, table_profile)
+
+        lot_number, expiry_date, lot_candidates = select_lot_and_expiry_from_segment(
+            segment,
+            table_profile,
+        )
+
         lot_from_product_column = None
         lot_from_product_name = None
         expiry_from_lote_column = None
@@ -1315,63 +2591,123 @@ def extract_falsified_products_from_layout(
                 lot_from_product_column = normalize_text(matched_row.get("col_producto"))
                 expiry_from_lote_column = normalize_text(matched_row.get("col_lote"))
                 raw_department = normalize_text(matched_row.get("col_departamento"))
+
                 if is_valid_peru_department(raw_department):
                     department_from_same_row = raw_department
 
                 lot_number = lot_from_product_column or lot_number
                 expiry_date = expiry_from_lote_column or expiry_date
+
         logger.info(
             "Documento %s | lot candidates from layout col_lote: %s",
             document.get("document_key"),
             col_lote_values,
         )
+
         logger.info(
             "Documento %s | selected lot_number: %s",
             document.get("document_key"),
             lot_number,
         )
+
         logger.info(
             "Documento %s | selected expiry_date: %s",
             document.get("document_key"),
             expiry_date,
         )
-        logger.info(
-            "lot_from_product_column=%s",
-            lot_from_product_column,
-        )
+
+        logger.info("lot_from_product_column=%s", lot_from_product_column)
         logger.info("lot_from_product_name=%s", lot_from_product_name)
         logger.info("expiry_from_lote_column=%s", expiry_from_lote_column)
         logger.info("department_from_same_row=%s", department_from_same_row)
+
         product_name_before_cleanup = product_name
         logger.info("product_name_before_lot_cleanup=%s", product_name_before_cleanup)
+
         product_name_before_cleanup, product_name = cleanup_product_name(
             product_name,
             lot_number,
             expiry_date,
         )
+
         logger.info("product_name_after_lot_cleanup=%s", product_name)
+
         logger.info(
             "Documento %s | product_name_before_cleanup: %s",
             document.get("document_key"),
             product_name_before_cleanup,
         )
+
         logger.info(
             "Documento %s | product_name_after_cleanup: %s",
             document.get("document_key"),
             product_name,
         )
+
         manufacturer, manufacturer_country = reconstruct_manufacturer_country(
             manufacturer_country_lines,
             manufacturer_country_lines,
         )
+
+        # Cambio 4:
+        # Si el PDF usa celdas combinadas y la fila trae solo lote,
+        # reutilizamos el último producto/fabricante válido.
+        if not product_name and last_product_context.get("product_name"):
+            product_name = last_product_context.get("product_name")
+
+        # Si el nombre empieza con una presentación/envase, intentamos unirlo al último producto.
+        # Ejemplo: "folio de aluminio x 4 cápsula" + "HEPABIONTA".
+        if product_name and last_product_context.get("product_name"):
+            normalized_product = normalize_for_matching(product_name)
+            last_name = last_product_context.get("product_name")
+            normalized_last = normalize_for_matching(last_name)
+
+            packaging_starts = (
+                "FOLIO DE ALUMINIO",
+                "BLISTER",
+                "BLÍSTER",
+                "CAJA X",
+                "FRASCO",
+                "SOLUCION",
+                "SOLUCIÓN",
+                "TABLETA",
+                "CAPSULA",
+                "CÁPSULA",
+                "AMPOLLA",
+            )
+
+            if normalized_product.startswith(packaging_starts):
+                if normalized_last not in normalized_product:
+                    product_name = normalize_text(f"{last_name} {product_name}")
+                elif not normalized_product.startswith(normalized_last):
+                    product_without_last = re.sub(
+                        re.escape(last_name),
+                        "",
+                        product_name,
+                        flags=re.IGNORECASE,
+                    ).strip()
+                    product_name = normalize_text(f"{last_name} {product_without_last}")
+
+        if not manufacturer and last_product_context.get("manufacturer"):
+            manufacturer = last_product_context.get("manufacturer")
+
+        if not manufacturer_country and last_product_context.get("manufacturer_country"):
+            manufacturer_country = last_product_context.get("manufacturer_country")
+
         intervention_address = join_lines(intervention_lines)
         department = department_from_same_row or select_layout_department(department_values)
+
+        if not department and last_product_context.get("department"):
+            department = last_product_context.get("department")
+
         raw_block = "\n".join(line["full_text"] for line in segment if line.get("full_text"))
 
         if table_profile == "with_expiry" and not lot_number:
             logger.info("final pre-insert product_name before lot extraction=%s", product_name)
+
             lot_from_product_name = extract_lot_from_product_name(product_name, expiry_date)
             logger.info("lot_from_product_name=%s", lot_from_product_name)
+
             if lot_from_product_name:
                 lot_number = lot_from_product_name
                 _, product_name = cleanup_product_name(
@@ -1379,13 +2715,16 @@ def extract_falsified_products_from_layout(
                     lot_number,
                     expiry_date,
                 )
+
             if not lot_number:
                 regex_lot_selected, regex_lot_candidates = extract_lot_from_product_name_regex(
                     product_name,
                     expiry_date,
                 )
+
                 logger.info("regex_lot_candidates_from_product_name=%s", regex_lot_candidates)
                 logger.info("regex_lot_selected=%s", regex_lot_selected)
+
                 if regex_lot_selected:
                     lot_number = regex_lot_selected
                     _, product_name = cleanup_product_name(
@@ -1393,7 +2732,9 @@ def extract_falsified_products_from_layout(
                         lot_number,
                         expiry_date,
                     )
+
                 logger.info("product_name_after_regex_lot_cleanup=%s", product_name)
+
             logger.info("final pre-insert product_name after lot extraction=%s", product_name)
             logger.info("final pre-insert lot_number=%s", lot_number)
 
@@ -1406,11 +2747,13 @@ def extract_falsified_products_from_layout(
             manufacturer,
             manufacturer_country,
         )
+
         logger.info(
             "Documento %s | department seleccionado: %s",
             document.get("document_key"),
             department,
         )
+
         logger.info("final product_name=%s", product_name)
 
         product = build_partial_product(
@@ -1433,12 +2776,29 @@ def extract_falsified_products_from_layout(
                     "layout_line_count": len(layout_lines),
                     "zone_start_index": start_index,
                     "zone_end_index": end_index,
+                    "segment_start": segment_start,
+                    "segment_end": segment_end,
                     "detected_columns": detected_columns,
                     "table_profile": table_profile,
                 },
             },
             confidence=0.75 if product_name and lot_number else 0.65,
         )
+
+        # Cambio 5:
+        # Actualizamos contexto para reutilizarlo en filas siguientes con celdas combinadas.
+        if product_name:
+            last_product_context["product_name"] = product_name
+
+        if manufacturer:
+            last_product_context["manufacturer"] = manufacturer
+
+        if manufacturer_country:
+            last_product_context["manufacturer_country"] = manufacturer_country
+
+        if department:
+            last_product_context["department"] = department
+
         products.append(product)
 
     valid_products = [
@@ -1449,7 +2809,8 @@ def extract_falsified_products_from_layout(
     if not valid_products and products:
         valid_products = [
             product for product in products
-            if normalize_text(product.get("product_name")) or normalize_text(product.get("lot_number"))
+            if normalize_text(product.get("product_name"))
+            or normalize_text(product.get("lot_number"))
         ]
 
     if not valid_products:

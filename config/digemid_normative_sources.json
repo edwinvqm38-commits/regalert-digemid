@@ -1,0 +1,23 @@
+[
+  {
+    "label": "Normas Legales DIGEMID",
+    "source_section": "normas-legales",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/publicaciones/normas-legales/",
+    "documento_tipo": "norma_legal",
+    "documento_subtipo": null
+  },
+  {
+    "label": "Resolucion Ministerial DIGEMID",
+    "source_section": "resolucion-ministerial",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/publicaciones/resolucion-ministerial/",
+    "documento_tipo": "resolucion",
+    "documento_subtipo": "resolucion_ministerial"
+  },
+  {
+    "label": "Decreto Supremo DIGEMID",
+    "source_section": "decreto-supremo",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/publicaciones/decreto-supremo/",
+    "documento_tipo": "decreto",
+    "documento_subtipo": "decreto_supremo"
+  }
+]

@@ -71,10 +71,14 @@ function mainMenu() {
       [{ text: "🚨 Alertas DIGEMID", callback_data: "menu:alertas" }],
       [
         { text: "🆕 Últimas", callback_data: "alertas:ultimas" },
-        { text: "🗓️ Este mes", callback_data: "alertas:mes" },
+        { text: "📅 Hoy", callback_data: "alertas:hoy" },
       ],
       [
-        { text: "📅 Hoy", callback_data: "alertas:hoy" },
+        { text: "📆 Semana", callback_data: "alertas:semana" },
+        { text: "🕒 Recientes", callback_data: "alertas:recientes" },
+      ],
+      [
+        { text: "🗓️ Este mes", callback_data: "alertas:mes" },
         { text: "🔎 Buscar", callback_data: "alertas:buscar_info" },
       ],
       [{ text: "ℹ️ Ayuda", callback_data: "menu:ayuda" }],
@@ -263,6 +267,78 @@ function detailButtons(row: any) {
   return {
     inline_keyboard: buttons,
   };
+}
+
+function mainMenuText() {
+  return [
+    "🤖 <b>RegAlert DIGEMID</b>",
+    "",
+    "Selecciona una opción:",
+  ].join("\n");
+}
+
+function helpText() {
+  return [
+    "ℹ️ <b>Comandos disponibles</b>",
+    "",
+    "<b>/start</b>",
+    "Inicia el bot y muestra la bienvenida.",
+    "",
+    "<b>/menu</b>",
+    "Muestra el menú principal con botones.",
+    "",
+    "<b>/ayuda</b>",
+    "Muestra esta guía de comandos y opciones.",
+    "",
+    "<b>/ultimas</b>",
+    "Muestra las últimas alertas registradas.",
+    "",
+    "<b>/hoy</b>",
+    "Muestra alertas publicadas hoy.",
+    "",
+    "<b>/semana</b>",
+    "Muestra alertas publicadas oficialmente esta semana usando published_date.",
+    "",
+    "<b>/mes</b>",
+    "Muestra alertas publicadas este mes.",
+    "",
+    "<b>/recientes</b>",
+    "Muestra alertas registradas recientemente en el sistema usando created_at.",
+    "",
+    "<b>/buscar texto</b>",
+    "Busca alertas por palabra clave. Ejemplo: /buscar retiro",
+    "",
+    "<b>/detalle 50-2026</b>",
+    "Consulta una alerta por número o código.",
+    "",
+    "📌 <b>Opciones del menú</b>",
+    "",
+    "<b>🆕 Últimas 5</b>",
+    "Muestra las últimas 5 alertas.",
+    "",
+    "<b>📅 Hoy</b>",
+    "Muestra alertas publicadas hoy.",
+    "",
+    "<b>📆 Semana</b>",
+    "Muestra alertas publicadas durante la semana actual.",
+    "",
+    "<b>🕒 Recientes</b>",
+    "Muestra alertas registradas recientemente en la base de datos.",
+    "",
+    "<b>🗓️ Este mes</b>",
+    "Muestra alertas publicadas durante el mes actual.",
+    "",
+    "<b>🔢 Por número</b>",
+    "Permite consultar una alerta por número o código, por ejemplo 50-2026.",
+    "",
+    "<b>🔎 Buscar por palabra</b>",
+    "Permite buscar por texto, producto, laboratorio, lote o término relacionado.",
+    "",
+    "<b>⬅️ Volver</b>",
+    "Regresa al menú anterior o al menú principal.",
+    "",
+    "Usa /menu para volver al panel principal.",
+  ].join("\n");
 }
 
 function getLimaDateParts() {
@@ -555,18 +631,16 @@ async function handleCommand(
   const trimmed = text.trim();
 
   if (trimmed === "/start" || trimmed === "/menu") {
-    await logConsulta({ chatId, userId, command: "/start", status: "ok" });
+    await logConsulta({
+      chatId,
+      userId,
+      command: trimmed === "/menu" ? "/menu" : "/start",
+      status: "ok",
+    });
 
     return await sendMessage(
       chatId,
-      [
-        "🤖 <b>RegAlert DIGEMID</b>",
-        "",
-        "Hola, Edwin.",
-        "Puedo ayudarte a consultar alertas registradas de DIGEMID.",
-        "",
-        "Selecciona una opción:",
-      ].join("\n"),
+      mainMenuText(),
       mainMenu(),
     );
   }
@@ -574,24 +648,7 @@ async function handleCommand(
   if (trimmed === "/ayuda") {
     await logConsulta({ chatId, userId, command: "/ayuda", status: "ok" });
 
-    return await sendMessage(
-      chatId,
-      [
-        "ℹ️ <b>Ayuda RegAlert DIGEMID</b>",
-        "",
-        "Comandos disponibles:",
-        "",
-        "🚨 /alertas — Menú de alertas",
-        "🆕 /ultimas — Últimas alertas",
-        "📅 /hoy — Alertas publicadas hoy",
-        "📆 /semana — Alertas publicadas esta semana",
-        "🕒 /recientes — Alertas registradas en los últimos 7 días",
-        "🗓️ /mes — Alertas del mes",
-        "🔢 /detalle 50-2026 — Ver detalle",
-        "🔎 /buscar texto — Buscar por palabra",
-      ].join("\n"),
-      mainMenu(),
-    );
+    return await sendMessage(chatId, helpText(), mainMenu());
   }
 
   if (trimmed === "/alertas") {
@@ -773,11 +830,7 @@ async function handleCallback(update: TelegramUpdate) {
   }
 
   if (data === "menu:principal") {
-    return await sendMessage(
-      chatId,
-      "🤖 <b>RegAlert DIGEMID</b>\n\nSelecciona una opción:",
-      mainMenu(),
-    );
+    return await sendMessage(chatId, mainMenuText(), mainMenu());
   }
 
   if (data === "menu:alertas") {
@@ -789,23 +842,7 @@ async function handleCallback(update: TelegramUpdate) {
   }
 
   if (data === "menu:ayuda") {
-    return await sendMessage(
-      chatId,
-      [
-        "ℹ️ <b>Ayuda RegAlert DIGEMID</b>",
-        "",
-        "Puedes usar:",
-        "",
-        "🆕 /ultimas",
-        "📅 /hoy",
-        "📆 /semana",
-        "🕒 /recientes",
-        "🗓️ /mes",
-        "🔢 /detalle 50-2026",
-        "🔎 /buscar texto",
-      ].join("\n"),
-      mainMenu(),
-    );
+    return await sendMessage(chatId, helpText(), mainMenu());
   }
 
   if (data === "alertas:ultimas") {

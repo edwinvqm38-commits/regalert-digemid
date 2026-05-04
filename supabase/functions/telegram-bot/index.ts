@@ -90,6 +90,7 @@ function alertasMenu() {
         { text: "📅 Hoy", callback_data: "alertas:hoy" },
       ],
       [
+        { text: "📆 Semana", callback_data: "alertas:semana" },
         { text: "🗓️ Este mes", callback_data: "alertas:mes" },
         { text: "🔢 Por número", callback_data: "alertas:numero_info" },
       ],
@@ -261,8 +262,102 @@ function detailButtons(row: any) {
   };
 }
 
+function getLimaDateParts() {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Lima",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  });
+
+  const parts = formatter.formatToParts(new Date());
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  const weekdayLabel = parts.find((part) => part.type === "weekday")?.value ?? "Mon";
+
+  const weekdayMap: Record<string, number> = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+
+  return {
+    isoDate: `${year}-${month}-${day}`,
+    isoWeekday: weekdayMap[weekdayLabel] ?? 1,
+  };
+}
+
+function shiftIsoDate(isoDate: string, days: number) {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const utcDate = new Date(Date.UTC(year, month - 1, day));
+  utcDate.setUTCDate(utcDate.getUTCDate() + days);
+  return utcDate.toISOString().slice(0, 10);
+}
+
+function getCurrentWeekBounds() {
+  const { isoDate, isoWeekday } = getLimaDateParts();
+  const weekStart = shiftIsoDate(isoDate, -(isoWeekday - 1));
+  const weekEnd = shiftIsoDate(weekStart, 6);
+
+  return { weekStart, weekEnd };
+}
+
+function formatWeekAlertList(rows: any[], total: number, shownLimit: number) {
+  const title = "📅 <b>Alertas DIGEMID de esta semana</b>";
+
+  if (!rows.length) {
+    return [
+      title,
+      "",
+      "No se encontraron alertas publicadas esta semana.",
+      "",
+      "Puedes probar con /ultimas.",
+    ].join("\n");
+  }
+
+  const lines = [title, ""];
+
+  if (total > shownLimit) {
+    lines.push(`Mostrando las últimas ${shownLimit} alertas de esta semana.`);
+    lines.push("");
+  }
+
+  rows.forEach((row, index) => {
+    lines.push(`${index + 1}. <b>Alerta DIGEMID N° ${escapeHtml(row.document_key)}</b>`);
+    lines.push(`Fecha: ${escapeHtml(row.published_date_display ?? row.published_date ?? "Sin fecha")}`);
+    lines.push(`Estado: ${escapeHtml(row.process_status ?? "Sin estado")}`);
+    lines.push(`Sección: ${escapeHtml(row.source_section ?? "Sin sección")}`);
+
+    if (row.title) {
+      lines.push(`Título: ${escapeHtml(row.title)}`);
+    }
+
+    if (row.file_url) {
+      lines.push(`PDF: ${escapeHtml(row.file_url)}`);
+    }
+
+    if (row.detail_url) {
+      lines.push(`Detalle: ${escapeHtml(row.detail_url)}`);
+    }
+
+    lines.push("");
+  });
+
+  lines.push(`Total: ${total} ${total === 1 ? "alerta encontrada." : "alertas encontradas."}`);
+
+  return lines.join("\n");
+}
+
 const ALERT_SELECT =
   "alert_number, alert_title, published_date, published_date_display, detail_url, pdf_source_url, drive_file_url, drive_download_url, process_status";
+const WEEK_ALERT_SELECT =
+  "document_key, title, published_date, published_date_display, source_section, file_url, detail_url, process_status";
 
 async function getLatestAlerts(limit = 5) {
   const { data, error } = await supabase
@@ -309,6 +404,30 @@ async function getMonthAlerts() {
   if (error) throw error;
 
   return data ?? [];
+}
+
+async function getAlertasSemana(limit = 10) {
+  const { weekStart, weekEnd } = getCurrentWeekBounds();
+
+  const { data, error, count } = await supabase
+    .from("digemid_documentos")
+    .select(WEEK_ALERT_SELECT, { count: "exact" })
+    .eq("source_type", "alerta")
+    .not("published_date", "is", null)
+    .gte("published_date", weekStart)
+    .lte("published_date", weekEnd)
+    .order("published_date", { ascending: false })
+    .order("document_key", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return {
+    rows: data ?? [],
+    total: count ?? (data?.length ?? 0),
+    weekStart,
+    weekEnd,
+  };
 }
 
 async function searchAlerts(query: string) {
@@ -378,6 +497,7 @@ async function handleCommand(
         "🚨 /alertas — Menú de alertas",
         "🆕 /ultimas — Últimas alertas",
         "📅 /hoy — Alertas publicadas hoy",
+        "📆 /semana — Alertas publicadas esta semana",
         "🗓️ /mes — Alertas del mes",
         "🔢 /detalle 50-2026 — Ver detalle",
         "🔎 /buscar texto — Buscar por palabra",
@@ -426,6 +546,23 @@ async function handleCommand(
     return await sendMessage(
       chatId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
+      alertasMenu(),
+    );
+  }
+
+  if (trimmed === "/semana") {
+    const { rows, total } = await getAlertasSemana(10);
+    await logConsulta({
+      chatId,
+      userId,
+      command: "/semana",
+      resultCount: rows.length,
+      status: "ok",
+    });
+
+    return await sendMessage(
+      chatId,
+      formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
   }
@@ -556,6 +693,7 @@ async function handleCallback(update: TelegramUpdate) {
         "",
         "🆕 /ultimas",
         "📅 /hoy",
+        "📆 /semana",
         "🗓️ /mes",
         "🔢 /detalle 50-2026",
         "🔎 /buscar texto",
@@ -580,6 +718,16 @@ async function handleCallback(update: TelegramUpdate) {
     return await sendMessage(
       chatId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
+      alertasMenu(),
+    );
+  }
+
+  if (data === "alertas:semana") {
+    const { rows, total } = await getAlertasSemana(10);
+
+    return await sendMessage(
+      chatId,
+      formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
   }

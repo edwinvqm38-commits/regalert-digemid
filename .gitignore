@@ -15,3 +15,5 @@ tmp/
 
 # Supabase local
 supabase/.temp/tmp/
+
+.claude/

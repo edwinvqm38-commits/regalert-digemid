@@ -91,6 +91,9 @@ function alertasMenu() {
       ],
       [
         { text: "📆 Semana", callback_data: "alertas:semana" },
+        { text: "🕒 Recientes", callback_data: "alertas:recientes" },
+      ],
+      [
         { text: "🗓️ Este mes", callback_data: "alertas:mes" },
         { text: "🔢 Por número", callback_data: "alertas:numero_info" },
       ],
@@ -354,10 +357,76 @@ function formatWeekAlertList(rows: any[], total: number, shownLimit: number) {
   return lines.join("\n");
 }
 
+function formatCreatedAtSimple(value: string | null | undefined) {
+  if (!value) {
+    return "Sin fecha";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+
+  return new Intl.DateTimeFormat("es-PE", {
+    timeZone: "America/Lima",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function formatRecentAlertList(rows: any[]) {
+  const title = "🕒 <b>Alertas registradas recientemente</b>";
+
+  if (!rows.length) {
+    return [
+      title,
+      "",
+      "No se encontraron alertas registradas en los últimos 7 días.",
+      "",
+      "Puedes probar con /ultimas o /semana.",
+    ].join("\n");
+  }
+
+  const lines = [title, ""];
+
+  rows.forEach((row, index) => {
+    lines.push(`${index + 1}. <b>Alerta DIGEMID N° ${escapeHtml(row.document_key)}</b>`);
+    lines.push(`Fecha publicada: ${escapeHtml(row.published_date_display ?? row.published_date ?? "Sin fecha")}`);
+    lines.push(`Registrada: ${escapeHtml(formatCreatedAtSimple(row.created_at))}`);
+    lines.push(`Estado: ${escapeHtml(row.process_status ?? "Sin estado")}`);
+    lines.push(`Sección: ${escapeHtml(row.source_section ?? "Sin sección")}`);
+
+    if (row.title) {
+      lines.push(`Título: ${escapeHtml(row.title)}`);
+    }
+
+    if (row.file_url) {
+      lines.push(`PDF: ${escapeHtml(row.file_url)}`);
+    }
+
+    if (row.detail_url) {
+      lines.push(`Detalle: ${escapeHtml(row.detail_url)}`);
+    }
+
+    lines.push("");
+  });
+
+  lines.push(`Total: ${rows.length} ${rows.length === 1 ? "alerta encontrada." : "alertas encontradas."}`);
+
+  return lines.join("\n");
+}
+
 const ALERT_SELECT =
   "alert_number, alert_title, published_date, published_date_display, detail_url, pdf_source_url, drive_file_url, drive_download_url, process_status";
 const WEEK_ALERT_SELECT =
   "document_key, title, published_date, published_date_display, source_section, file_url, detail_url, process_status";
+const RECENT_ALERT_SELECT =
+  "document_key, title, published_date, published_date_display, created_at, source_section, file_url, detail_url, process_status";
 
 async function getLatestAlerts(limit = 5) {
   const { data, error } = await supabase
@@ -430,6 +499,24 @@ async function getAlertasSemana(limit = 10) {
   };
 }
 
+async function getRecentAlerts(limit = 10) {
+  const sevenDaysAgoIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from("digemid_documentos")
+    .select(RECENT_ALERT_SELECT)
+    .eq("source_type", "alerta")
+    .gte("created_at", sevenDaysAgoIso)
+    .order("created_at", { ascending: false })
+    .order("published_date", { ascending: false })
+    .order("document_key", { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return data ?? [];
+}
+
 async function searchAlerts(query: string) {
   const cleanQuery = query.trim();
 
@@ -498,6 +585,7 @@ async function handleCommand(
         "🆕 /ultimas — Últimas alertas",
         "📅 /hoy — Alertas publicadas hoy",
         "📆 /semana — Alertas publicadas esta semana",
+        "🕒 /recientes — Alertas registradas en los últimos 7 días",
         "🗓️ /mes — Alertas del mes",
         "🔢 /detalle 50-2026 — Ver detalle",
         "🔎 /buscar texto — Buscar por palabra",
@@ -563,6 +651,23 @@ async function handleCommand(
     return await sendMessage(
       chatId,
       formatWeekAlertList(rows, total, 10),
+      alertasMenu(),
+    );
+  }
+
+  if (trimmed === "/recientes") {
+    const rows = await getRecentAlerts(10);
+    await logConsulta({
+      chatId,
+      userId,
+      command: "/recientes",
+      resultCount: rows.length,
+      status: "ok",
+    });
+
+    return await sendMessage(
+      chatId,
+      formatRecentAlertList(rows),
       alertasMenu(),
     );
   }
@@ -694,6 +799,7 @@ async function handleCallback(update: TelegramUpdate) {
         "🆕 /ultimas",
         "📅 /hoy",
         "📆 /semana",
+        "🕒 /recientes",
         "🗓️ /mes",
         "🔢 /detalle 50-2026",
         "🔎 /buscar texto",
@@ -728,6 +834,16 @@ async function handleCallback(update: TelegramUpdate) {
     return await sendMessage(
       chatId,
       formatWeekAlertList(rows, total, 10),
+      alertasMenu(),
+    );
+  }
+
+  if (data === "alertas:recientes") {
+    const rows = await getRecentAlerts(10);
+
+    return await sendMessage(
+      chatId,
+      formatRecentAlertList(rows),
       alertasMenu(),
     );
   }

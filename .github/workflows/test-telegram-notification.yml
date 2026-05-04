@@ -1,0 +1,43 @@
+name: Test Telegram Notification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-telegram:
+    runs-on: ubuntu-latest
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Validar secrets de Telegram
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "Falta TELEGRAM_BOT_TOKEN"
+            exit 1
+          fi
+
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Falta TELEGRAM_CHAT_ID"
+            exit 1
+          fi
+
+          echo "Secrets de Telegram encontrados."
+
+      - name: Enviar mensaje de prueba
+        run: |
+          MESSAGE="✅ Prueba de notificación automática DIGEMID
+
+          Este mensaje fue enviado desde GitHub Actions.
+
+          Si recibes esto, el canal de alertas automáticas por Telegram está funcionando correctamente."
+
+          RESPONSE=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${MESSAGE}")
+
+          echo "$RESPONSE"
+
+          echo "$RESPONSE" | grep -q '"ok":true'

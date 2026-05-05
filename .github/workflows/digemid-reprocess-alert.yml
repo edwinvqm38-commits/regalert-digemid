@@ -1,0 +1,45 @@
+name: DIGEMID - Reprocesar Alerta
+
+on:
+  workflow_dispatch:
+    inputs:
+      document_key:
+        description: "Document key de la alerta. Ejemplo: 51-2026"
+        required: true
+        default: "51-2026"
+      force:
+        description: "Forzar reproceso"
+        required: true
+        default: "true"
+
+jobs:
+  reprocess-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Reprocesar alerta estructurada
+        run: |
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            python scripts/extract_alerta_productos.py --document-key "${{ github.event.inputs.document_key }}" --force
+          else
+            python scripts/extract_alerta_productos.py --document-key "${{ github.event.inputs.document_key }}"
+          fi

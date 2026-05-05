@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "digemid_normative_sources.json"
 CONTAINER_TAGS = ("li", "article", "tr", "p", "div")
 SKIP_HREF_PREFIXES = ("#", "javascript:", "mailto:", "tel:")
+DISALLOWED_PARENT_TAGS = {"header", "footer", "nav", "aside"}
 SKIP_TEXTS = {
     "",
     "pdf",
@@ -35,6 +36,48 @@ SKIP_TEXTS = {
     "click aqui",
     "click aquí",
 }
+BLOCKED_KEYWORDS = {
+    "informacion institucional",
+    "información institucional",
+    "gestion de calidad",
+    "gestión de calidad",
+    "antisoborno",
+    "formatos",
+    "ventanilla virtual",
+    "firma digital",
+    "expedientes",
+    "consultas web",
+    "establecimientos farmaceuticos",
+    "establecimientos farmacéuticos",
+    "productos robados",
+    "laboratorios pendientes",
+    "especialidades farmaceuticas",
+    "especialidades farmacéuticas",
+    "productos biologicos",
+    "productos biológicos",
+    "consultas",
+    "certificacion",
+    "certificación",
+    "tramite",
+    "trámite",
+    "contacto",
+    "inicio",
+    "portal",
+    "mapa del sitio",
+}
+SECTION_PRIORITY_HINTS = {
+    "resolucion-ministerial": (
+        "resolucion ministerial",
+        "resolución ministerial",
+        "r.m.",
+        "rm ",
+    ),
+    "decreto-supremo": (
+        "decreto supremo",
+        "d.s.",
+        "ds ",
+    ),
+}
 TYPE_PATTERNS = [
     ("RM", re.compile(r"\b(?:R\.?\s*M\.?|RESOLUCION MINISTERIAL)\s*(?:N[°Oº.]*)?\s*(\d{1,4})[-/](20\d{2})([/\-][A-Z0-9\-]+)?", re.IGNORECASE)),
     ("DS", re.compile(r"\b(?:D\.?\s*S\.?|DECRETO SUPREMO)\s*(?:N[°Oº.]*)?\s*(\d{1,4})[-/](20\d{2})([/\-][A-Z0-9\-]+)?", re.IGNORECASE)),
@@ -44,6 +87,16 @@ TYPE_PATTERNS = [
     ("DU", re.compile(r"\b(?:D\.?\s*U\.?|DECRETO DE URGENCIA)\s*(?:N[°Oº.]*)?\s*(\d{1,4})([/\-][A-Z0-9\-]+)?", re.IGNORECASE)),
     ("LEY", re.compile(r"\b(?:LEY)\s*(?:N[°Oº.]*)?\s*(\d{1,6})([/\-][A-Z0-9\-]+)?", re.IGNORECASE)),
 ]
+NORMATIVE_EVIDENCE_PATTERN = re.compile(
+    r"\b("
+    r"resolucion ministerial|resolución ministerial|"
+    r"resolucion directoral|resolución directoral|"
+    r"resolucion suprema|resolución suprema|"
+    r"decreto supremo|decreto legislativo|decreto de urgencia|decreto ley|ley|"
+    r"r\.m\.|r\.d\.|r\.s\.|d\.s\.|d\.l\.|d\.u\."
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def is_pdf_url(url: str | None) -> bool:
@@ -84,6 +137,37 @@ def extract_file_name(file_url: str | None) -> str | None:
 
 def normalize_spaces_upper(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().upper()
+
+
+def normalize_text_basic(text: str | None) -> str:
+    return remove_accents(clean_text(text or "")).lower()
+
+
+def contains_blocked_keyword(*values: str | None) -> bool:
+    combined = " ".join(normalize_text_basic(value) for value in values if value)
+    return any(keyword in combined for keyword in BLOCKED_KEYWORDS)
+
+
+def looks_like_normative_title(text: str | None, url: str | None = None) -> bool:
+    combined = f"{text or ''} {url or ''}"
+    return bool(NORMATIVE_EVIDENCE_PATTERN.search(combined))
+
+
+def source_section_in_url(url: str | None, source_section: str) -> bool:
+    if not url:
+        return False
+    return source_section.lower() in url.lower()
+
+
+def section_priority_match(title: str, url: str, source_section: str) -> bool:
+    normalized_title = normalize_text_basic(title)
+    normalized_url = normalize_text_basic(url)
+    hints = SECTION_PRIORITY_HINTS.get(source_section, ())
+
+    if source_section_in_url(url, source_section):
+        return True
+
+    return any(hint in normalized_title or hint in normalized_url for hint in hints)
 
 
 def generate_normative_document_key(
@@ -149,6 +233,8 @@ class NormativeMonitorAgent:
         for parent in anchor.parents:
             if not isinstance(parent, Tag):
                 continue
+            if parent.name in DISALLOWED_PARENT_TAGS:
+                return anchor
             if parent.name not in CONTAINER_TAGS:
                 continue
 
@@ -189,6 +275,66 @@ class NormativeMonitorAgent:
 
         return ""
 
+    def choose_links(self, normalized_links: list[tuple[str, str]], source: dict) -> tuple[str | None, str | None]:
+        source_section = source["source_section"]
+        detail_url = None
+        file_url = None
+
+        for absolute_url, anchor_text in normalized_links:
+            if contains_blocked_keyword(anchor_text, absolute_url):
+                continue
+
+            if is_pdf_url(absolute_url):
+                if not file_url:
+                    file_url = absolute_url
+                continue
+
+            if source_section_in_url(absolute_url, source_section):
+                detail_url = absolute_url
+                break
+
+            if not detail_url and looks_like_normative_title(anchor_text, absolute_url):
+                detail_url = absolute_url
+
+        if not detail_url and file_url:
+            detail_url = file_url
+
+        return detail_url, file_url
+
+    def has_minimum_evidence(
+        self,
+        title: str,
+        context_text: str,
+        detail_url: str | None,
+        source: dict,
+        date_display: str | None,
+    ) -> bool:
+        source_section = source["source_section"]
+        title_is_normative = looks_like_normative_title(title, detail_url)
+        has_date = bool(date_display)
+        in_section = source_section_in_url(detail_url, source_section)
+
+        if contains_blocked_keyword(title, context_text, detail_url):
+            return False
+
+        if source_section == "resolucion-ministerial":
+            return (
+                has_date
+                and title_is_normative
+                and section_priority_match(title, detail_url or "", source_section)
+            )
+
+        if source_section == "decreto-supremo":
+            return (
+                has_date
+                and title_is_normative
+                and section_priority_match(title, detail_url or "", source_section)
+            )
+
+        return (has_date and (in_section or title_is_normative)) or (
+            title_is_normative and in_section
+        )
+
     def build_document(self, container: Tag, source: dict) -> dict | None:
         anchors = container.find_all("a", href=True)
         if not anchors:
@@ -206,18 +352,7 @@ class NormativeMonitorAgent:
         if not normalized_links:
             return None
 
-        detail_url = None
-        file_url = None
-
-        for absolute_url, _anchor_text in normalized_links:
-            if is_pdf_url(absolute_url) and not file_url:
-                file_url = absolute_url
-            elif not detail_url:
-                detail_url = absolute_url
-
-        if not detail_url:
-            detail_url = file_url
-
+        detail_url, file_url = self.choose_links(normalized_links, source)
         if not detail_url:
             return None
 
@@ -227,6 +362,9 @@ class NormativeMonitorAgent:
 
         context_text = clean_text(container.get_text(" "))
         date_display = extract_date_display(context_text) or extract_date_display(title)
+        if not self.has_minimum_evidence(title, context_text, detail_url, source, date_display):
+            return None
+
         published_date = normalize_date(date_display)
         document_key = generate_normative_document_key(
             title=title,
@@ -286,6 +424,47 @@ class NormativeMonitorAgent:
             "raw": raw,
         }
 
+    def is_container_pre_candidate(self, container: Tag, source: dict) -> bool:
+        if not isinstance(container, Tag):
+            return False
+
+        container_text = clean_text(container.get_text(" "))
+        if not container_text:
+            return False
+
+        if contains_blocked_keyword(container_text):
+            return False
+
+        anchors = container.find_all("a", href=True)
+        if not anchors:
+            return False
+
+        has_useful_link = False
+        for anchor in anchors:
+            href = clean_text(anchor.get("href", ""))
+            if not href or href.lower().startswith(SKIP_HREF_PREFIXES):
+                continue
+
+            absolute_url = urljoin(source["source_url"], href)
+            anchor_text = clean_text(anchor.get_text(" "))
+
+            if contains_blocked_keyword(anchor_text, absolute_url):
+                continue
+
+            has_useful_link = True
+            break
+
+        if not has_useful_link:
+            return False
+
+        title = self.choose_title(container)
+        date_display = extract_date_display(container_text) or extract_date_display(title)
+
+        if date_display:
+            return True
+
+        return looks_like_normative_title(title, container_text)
+
     def merge_documents(self, current: dict, candidate: dict) -> dict:
         merged = dict(current)
 
@@ -319,14 +498,20 @@ class NormativeMonitorAgent:
         documents_by_key: dict[str, dict] = {}
 
         for source in self.sources:
-            found_for_source = 0
+            total_links_detected = 0
+            total_candidates_before_filter = 0
+            total_candidates_after_filter = 0
+            total_returned = 0
+            max_documents_initial = int(source.get("max_documents_initial", 10))
 
             try:
                 html = self.fetch_html(source)
                 soup = BeautifulSoup(html, "html.parser")
                 seen_container_ids: set[int] = set()
+                source_document_keys: set[str] = set()
 
                 for anchor in soup.find_all("a", href=True):
+                    total_links_detected += 1
                     container = self.find_candidate_container(anchor)
                     container_id = id(container)
 
@@ -334,22 +519,33 @@ class NormativeMonitorAgent:
                         continue
 
                     seen_container_ids.add(container_id)
+                    if self.is_container_pre_candidate(container, source):
+                        total_candidates_before_filter += 1
+
                     document = self.build_document(container, source)
 
                     if not document:
                         continue
 
-                    found_for_source += 1
+                    total_candidates_after_filter += 1
                     current = documents_by_key.get(document["document_key"])
                     if current:
                         documents_by_key[document["document_key"]] = self.merge_documents(current, document)
                     else:
                         documents_by_key[document["document_key"]] = document
+                        source_document_keys.add(document["document_key"])
+                        total_returned = len(source_document_keys)
+
+                    if len(source_document_keys) >= max_documents_initial:
+                        break
 
                 logger.info(
-                    "Fuente procesada: %s | registros encontrados: %s",
+                    "Fuente procesada: %s | total_links_detected=%s | total_candidates_before_filter=%s | total_candidates_after_filter=%s | total_returned=%s",
                     source["label"],
-                    found_for_source,
+                    total_links_detected,
+                    total_candidates_before_filter,
+                    total_candidates_after_filter,
+                    total_returned,
                 )
             except Exception as error:
                 logger.exception("Error procesando fuente normativa %s: %s", source["label"], error)

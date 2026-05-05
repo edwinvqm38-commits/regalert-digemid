@@ -1,5 +1,7 @@
 import logging
 import os
+import random
+import time
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -15,6 +17,10 @@ PDF_ANCHOR_HINTS = (
     "pdf",
     "ver documento",
     "archivo",
+)
+PDF_PATH_HINTS = (
+    "/archivos/normatividad/",
+    "/archivos/",
 )
 
 
@@ -44,9 +50,15 @@ class NormativePdfDetectorAgent:
 
         self.supabase: Client = create_client(url, key)
         self.table_name = "digemid_documentos"
-        self.headers = {
-            "User-Agent": "RegAlert-DIGEMID-NormativePdfDetector/1.0",
-        }
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
+            }
+        )
+        self.ignored_link_connection_errors = 0
 
     def fetch_pending_documents(self) -> list[dict]:
         response = (
@@ -61,42 +73,30 @@ class NormativePdfDetectorAgent:
         )
         return response.data or []
 
-    def head_or_get_content_type(self, url: str) -> str:
+    def head_content_type(self, url: str) -> str:
         try:
-            response = requests.head(
+            response = self.session.head(
                 url,
-                headers=self.headers,
-                timeout=20,
+                timeout=6,
                 allow_redirects=True,
             )
             content_type = response.headers.get("Content-Type", "")
             if content_type:
                 return content_type.lower()
         except Exception:
-            pass
+            return ""
 
-        response = requests.get(
-            url,
-            headers=self.headers,
-            timeout=25,
-            allow_redirects=True,
-            stream=True,
-        )
-        try:
-            return response.headers.get("Content-Type", "").lower()
-        finally:
-            response.close()
+        return ""
 
     def is_pdf_response(self, url: str) -> bool:
         if is_pdf_url(url):
             return True
-        return "application/pdf" in self.head_or_get_content_type(url)
+        return "application/pdf" in self.head_content_type(url)
 
     def fetch_detail_response(self, url: str) -> requests.Response:
-        response = requests.get(
+        response = self.session.get(
             url,
-            headers=self.headers,
-            timeout=25,
+            timeout=20,
             allow_redirects=True,
         )
         response.raise_for_status()
@@ -105,12 +105,13 @@ class NormativePdfDetectorAgent:
     def score_pdf_link(self, absolute_url: str, anchor_text: str) -> int:
         score = 0
         lowered_text = clean_text(anchor_text).lower()
+        lowered_url = absolute_url.lower()
 
         if is_pdf_url(absolute_url):
             score += 10
 
-        if "application/pdf" in self.head_or_get_content_type(absolute_url):
-            score += 8
+        if any(hint in lowered_url for hint in PDF_PATH_HINTS):
+            score += 6
 
         for hint in PDF_ANCHOR_HINTS:
             if hint in lowered_text:
@@ -120,6 +121,23 @@ class NormativePdfDetectorAgent:
             score += 2
 
         return score
+
+    def maybe_validate_pdf_link(self, absolute_url: str, anchor_text: str) -> bool:
+        lowered_text = clean_text(anchor_text).lower()
+        if is_pdf_url(absolute_url):
+            return True
+
+        if not any(hint in lowered_text for hint in PDF_ANCHOR_HINTS):
+            return False
+
+        try:
+            return "application/pdf" in self.head_content_type(absolute_url)
+        except requests.RequestException:
+            self.ignored_link_connection_errors += 1
+            return False
+        except Exception:
+            self.ignored_link_connection_errors += 1
+            return False
 
     def detect_pdf_url(self, detail_url: str) -> dict:
         if self.is_pdf_response(detail_url):
@@ -152,8 +170,24 @@ class NormativePdfDetectorAgent:
             absolute_url = urljoin(detail_url, href)
             anchor_text = clean_text(anchor.get_text(" "))
             score = self.score_pdf_link(absolute_url, anchor_text)
-            if score > 0:
+            if score <= 0:
+                continue
+
+            if is_pdf_url(absolute_url) or any(
+                hint in absolute_url.lower() for hint in PDF_PATH_HINTS
+            ):
                 candidate_links.append((score, absolute_url))
+                continue
+
+            try:
+                if self.maybe_validate_pdf_link(absolute_url, anchor_text):
+                    candidate_links.append((score, absolute_url))
+            except requests.RequestException:
+                self.ignored_link_connection_errors += 1
+                continue
+            except Exception:
+                self.ignored_link_connection_errors += 1
+                continue
 
         if not candidate_links:
             return {
@@ -166,7 +200,11 @@ class NormativePdfDetectorAgent:
         candidate_links.sort(key=lambda item: item[0], reverse=True)
         best_url = candidate_links[0][1]
 
-        if not self.is_pdf_response(best_url):
+        if not (
+            is_pdf_url(best_url)
+            or any(hint in best_url.lower() for hint in PDF_PATH_HINTS)
+            or self.maybe_validate_pdf_link(best_url, "pdf")
+        ):
             return {
                 "status": "pdf_not_found",
                 "pdf_url": None,
@@ -226,6 +264,7 @@ class NormativePdfDetectorAgent:
             "pdf_detected": 0,
             "pdf_not_found": 0,
             "pdf_detection_error": 0,
+            "ignored_link_connection_errors": 0,
         }
 
         logger.info("total_pending=%s", summary["total_pending"])
@@ -272,11 +311,16 @@ class NormativePdfDetectorAgent:
                     error,
                 )
 
+            time.sleep(random.uniform(0.8, 1.5))
+
+        summary["ignored_link_connection_errors"] = self.ignored_link_connection_errors
+
         logger.info(
-            "Resumen deteccion PDF | total_pending=%s | pdf_detected=%s | pdf_not_found=%s | pdf_detection_error=%s",
+            "Resumen deteccion PDF | total_pending=%s | pdf_detected=%s | pdf_not_found=%s | pdf_detection_error=%s | ignored_link_connection_errors=%s",
             summary["total_pending"],
             summary["pdf_detected"],
             summary["pdf_not_found"],
             summary["pdf_detection_error"],
+            summary["ignored_link_connection_errors"],
         )
         return summary

@@ -65,6 +65,16 @@ BLOCKED_KEYWORDS = {
     "portal",
     "mapa del sitio",
 }
+GENERIC_CATEGORY_TITLES = {
+    "resolucion ministerial",
+    "decreto supremo",
+    "resolucion directoral",
+    "resolucion suprema",
+    "ley",
+    "decreto legislativo",
+    "decreto de urgencia",
+    "decreto ley",
+}
 SECTION_PRIORITY_HINTS = {
     "resolucion-ministerial": (
         "resolucion ministerial",
@@ -95,6 +105,10 @@ NORMATIVE_EVIDENCE_PATTERN = re.compile(
     r"decreto supremo|decreto legislativo|decreto de urgencia|decreto ley|ley|"
     r"r\.m\.|r\.d\.|r\.s\.|d\.s\.|d\.l\.|d\.u\."
     r")\b",
+    re.IGNORECASE,
+)
+NORMATIVE_NUMBER_PATTERN = re.compile(
+    r"\b(?:N[°Oº.]?|N\.º|NO)\s*\d{1,4}[-/](20\d{2})(?:[-/][A-Z0-9]+)*\b|\b\d{1,4}[-/](20\d{2})(?:[-/][A-Z0-9]+)*\b",
     re.IGNORECASE,
 )
 
@@ -148,15 +162,64 @@ def contains_blocked_keyword(*values: str | None) -> bool:
     return any(keyword in combined for keyword in BLOCKED_KEYWORDS)
 
 
+def is_generic_category_title(text: str | None) -> bool:
+    normalized = normalize_text_basic(text)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized in GENERIC_CATEGORY_TITLES
+
+
 def looks_like_normative_title(text: str | None, url: str | None = None) -> bool:
     combined = f"{text or ''} {url or ''}"
     return bool(NORMATIVE_EVIDENCE_PATTERN.search(combined))
+
+
+def has_normative_number(text: str | None, url: str | None = None) -> bool:
+    combined = f"{text or ''} {url or ''}"
+    return bool(NORMATIVE_NUMBER_PATTERN.search(combined))
 
 
 def source_section_in_url(url: str | None, source_section: str) -> bool:
     if not url:
         return False
     return source_section.lower() in url.lower()
+
+
+def is_listing_or_category_url(url: str | None) -> bool:
+    if not url:
+        return True
+
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/").lower()
+
+    blocked_exact = {
+        "/webdigemid/publicaciones/normas-legales",
+        "/webdigemid/publicaciones/resolucion-ministerial",
+        "/webdigemid/publicaciones/decreto-supremo",
+        "/webdigemid/publicaciones/normas-legales/decreto-supremo",
+        "/webdigemid/publicaciones/normas-legales/resolucion-ministerial",
+        "/webdigemid/publicaciones/normas-legales/resolucion-directoral",
+    }
+
+    if path in blocked_exact:
+        return True
+
+    if re.search(r"/webdigemid/publicaciones/normas-legales/\d{4}/", path):
+        return False
+
+    trailing_segment = path.rsplit("/", 1)[-1]
+    category_slugs = {
+        "normas-legales",
+        "resolucion-ministerial",
+        "resolucion-directoral",
+        "resolucion-suprema",
+        "decreto-supremo",
+        "decreto-legislativo",
+        "decreto-de-urgencia",
+        "decreto-ley",
+        "ley",
+    }
+
+    return trailing_segment in category_slugs
 
 
 def section_priority_match(title: str, url: str, source_section: str) -> bool:
@@ -289,6 +352,9 @@ class NormativeMonitorAgent:
                     file_url = absolute_url
                 continue
 
+            if is_listing_or_category_url(absolute_url):
+                continue
+
             if source_section_in_url(absolute_url, source_section):
                 detail_url = absolute_url
                 break
@@ -311,28 +377,35 @@ class NormativeMonitorAgent:
     ) -> bool:
         source_section = source["source_section"]
         title_is_normative = looks_like_normative_title(title, detail_url)
+        title_has_number = has_normative_number(title, detail_url)
         has_date = bool(date_display)
         in_section = source_section_in_url(detail_url, source_section)
 
         if contains_blocked_keyword(title, context_text, detail_url):
             return False
+        if is_generic_category_title(title):
+            return False
+        if is_listing_or_category_url(detail_url):
+            return False
+        if not has_date and not title_has_number:
+            return False
 
         if source_section == "resolucion-ministerial":
             return (
-                has_date
+                (has_date or title_has_number)
                 and title_is_normative
                 and section_priority_match(title, detail_url or "", source_section)
             )
 
         if source_section == "decreto-supremo":
             return (
-                has_date
+                (has_date or title_has_number)
                 and title_is_normative
                 and section_priority_match(title, detail_url or "", source_section)
             )
 
-        return (has_date and (in_section or title_is_normative)) or (
-            title_is_normative and in_section
+        return ((has_date or title_has_number) and (in_section or title_is_normative)) or (
+            title_is_normative and in_section and title_has_number
         )
 
     def build_document(self, container: Tag, source: dict) -> dict | None:
@@ -450,6 +523,8 @@ class NormativeMonitorAgent:
 
             if contains_blocked_keyword(anchor_text, absolute_url):
                 continue
+            if is_listing_or_category_url(absolute_url):
+                continue
 
             has_useful_link = True
             break
@@ -458,12 +533,17 @@ class NormativeMonitorAgent:
             return False
 
         title = self.choose_title(container)
+        if is_generic_category_title(title):
+            return False
         date_display = extract_date_display(container_text) or extract_date_display(title)
 
         if date_display:
             return True
 
-        return looks_like_normative_title(title, container_text)
+        return looks_like_normative_title(title, container_text) and has_normative_number(
+            title,
+            container_text,
+        )
 
     def merge_documents(self, current: dict, candidate: dict) -> dict:
         merged = dict(current)

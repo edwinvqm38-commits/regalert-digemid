@@ -825,7 +825,7 @@ def build_opdivo_comparative_fallback(full_text: str) -> list[dict]:
         "ETIQUETA": r"(?is)ETIQUETA\s*[:\-]?\s*(No indica N[°º]\s*de lote)\s*(Indica N[°º]\s*de lote)",
         "CONCENTRACIONES": r"(?is)CONCENTRACIONES\s*[:\-]?\s*(150\s*mg\s*/\s*15\s*mL\s*\(15\s*mg\s*/\s*mL\))\s*(100\s*mg\s*/\s*10\s*mL\s*\(10\s*mg\s*/\s*mL\)\s*y\s*40\s*mg\s*/\s*4\s*mL\s*\(10\s*mg\s*/\s*mL\))",
         "FORMA FARMACEUTICA": r"(?is)FORMA FARMACEUTICA\s*[:\-]?\s*(Polvo)\s*(Soluci[oó]n inyectable)",
-        "ALMACENAMIENTO": r"(?is)ALMACENAMIENTO\s*[:\-]?\s*(Almacenar a temperatura menor que 30[°º]C)\s*(Almacenar de 2[°º]C a 8[°º]C)",
+        "ALMACENAMIENTO": r"(?is)ALMACENAMIENTO\s*[:\-]?\s*(Almacenar\s+a\s+temperatura\s+menor\s+(?:que|a|de)\s*30\s*[°º]?\s*C)\s*(Almacenar\s+de\s*2\s*[°º]?\s*C\s*(?:a|-)\s*8\s*[°º]?\s*C)",
         "IDIOMA DEL ROTULADO": r"(?is)IDIOMA DEL ROTULADO\s*[:\-]?\s*(Ingl[eé]s)\s*(Espa[nñ]ol)",
     }
     rows: list[dict] = []
@@ -925,10 +925,22 @@ def extract_comparative_characteristics(lines: list[str], full_text: str | None 
             })
             break
 
-    if full_text and len([r for r in rows if r.get("producto_sin_rs") and r.get("producto_con_rs")]) < 6:
+    if full_text and len([r for r in rows if r.get("producto_sin_rs") and r.get("producto_con_rs")]) < 7:
         fallback_rows = build_opdivo_comparative_fallback(full_text)
         if fallback_rows:
-            rows = fallback_rows
+            rows_by_key = {
+                normalize_for_matching(row.get("caracteristica")): row
+                for row in rows
+            }
+            for fallback_row in fallback_rows:
+                key = normalize_for_matching(fallback_row.get("caracteristica"))
+                current = rows_by_key.get(key)
+                if not current:
+                    rows.append(fallback_row)
+                    rows_by_key[key] = fallback_row
+                    continue
+                if not (current.get("producto_sin_rs") and current.get("producto_con_rs")):
+                    rows_by_key[key].update(fallback_row)
 
     complete_rows = [
         row for row in rows

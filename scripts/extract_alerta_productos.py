@@ -584,6 +584,8 @@ def detect_alert_number(title: str | None, full_text: str, document_key: str | N
 
 def detect_alert_type(title: str | None, full_text: str) -> str:
     combined_text = normalize_for_matching(f"{title or ''} {full_text or ''}")
+    if "COMERCIALIZACION ILEGAL" in combined_text and "NO CUENTA CON REGISTRO SANITARIO" in combined_text:
+        return "comercializacion_ilegal_producto_sin_rs"
 
     if "RETIRO DEL MERCADO" in combined_text and "CONTROL DE CALIDAD" in combined_text:
         return "retiro_mercado_control_calidad"
@@ -753,11 +755,12 @@ def has_narrative_illegal_markers(lines: list[str]) -> bool:
     )
 
 
-def extract_recommended_actions(lines: list[str]) -> list[str]:
+def extract_recommended_actions(lines: list[str], full_text: str | None = None) -> list[str]:
     markers = ["RECOMENDACIONES", "SE RECOMIENDA", "SE EXHORTA"]
-    end_markers = ["LIMA,", "FUENTE:", "ACCIONES ADOPTADAS", "NOTA:"]
+    end_markers = ["LIMA,", "FUENTE:", "ACCIONES ADOPTADAS", "NOTA:", "DIRECCION EJECUTIVA", "DIRECCIÓN EJECUTIVA"]
     actions: list[str] = []
     collecting = False
+    current_action: str | None = None
 
     for line in lines:
         normalized = normalize_for_matching(line)
@@ -769,41 +772,174 @@ def extract_recommended_actions(lines: list[str]) -> list[str]:
             if any(marker in normalized for marker in end_markers):
                 break
             text = normalize_text(line)
-            if text:
-                actions.append(text)
-            if len(actions) >= 12:
-                break
-
-    return actions
-
-
-def extract_comparative_characteristics(lines: list[str]) -> tuple[dict, bool]:
-    rows: list[dict] = []
-    for line in lines:
-        normalized = normalize_for_matching(line)
-        for key in COMPARATIVE_ROW_KEYS:
-            key_norm = normalize_for_matching(key)
-            if key_norm not in normalized:
+            if not text:
                 continue
 
-            raw = normalize_text(line)
-            after = re.split(rf"(?i){re.escape(key)}\s*[:\-]?\s*", raw, maxsplit=1)
-            detail = after[1].strip() if len(after) > 1 else ""
-            if not detail and "  " in raw:
-                cells = split_table_cells(raw)
-                if len(cells) > 1:
-                    detail = " | ".join(cells[1:])
+            starts_bullet = bool(re.match(r"^\s*([-•*]|\d+[.)])\s+", text))
+            if starts_bullet:
+                if current_action:
+                    actions.append(current_action)
+                current_action = re.sub(r"^\s*([-•*]|\d+[.)])\s+", "", text).strip()
+            else:
+                if current_action:
+                    current_action = normalize_text(f"{current_action} {text}")
+                elif text and not any(token in normalized for token in ["RECOMENDACIONES", "SE RECOMIENDA"]):
+                    current_action = text
+
+            if len(actions) >= 8:
+                break
+
+    if current_action:
+        actions.append(current_action)
+
+    actions = [normalize_text(item) for item in actions if normalize_text(item)]
+    if len(actions) >= 2:
+        return actions
+
+    # Fallback narrativo para OCR sin bullets visibles.
+    haystack = full_text or "\n".join(lines)
+    fallback_patterns = [
+        r"(?is)(No adquirir y no utilizar productos farmac[eé]uticos.*?registro sanitario[^\.]*\.)",
+        r"(?is)(Tener en cuenta que muchos de estos productos ilegales.*?redes sociales[^\.]*\.)",
+    ]
+    for pattern in fallback_patterns:
+        match = re.search(pattern, haystack)
+        if match:
+            actions.append(normalize_text(match.group(1)))
+
+    dedup: list[str] = []
+    seen = set()
+    for item in actions:
+        key = normalize_for_matching(item)
+        if key and key not in seen:
+            dedup.append(item)
+            seen.add(key)
+
+    return dedup[:6]
+
+
+def build_opdivo_comparative_fallback(full_text: str) -> list[dict]:
+    patterns = {
+        "FRASCO": r"(?is)FRASCO\s*[:\-]?\s*(Pl[aá]stico color blanco)\s*(Vial de vidrio incoloro\s*\(transparente\))",
+        "CAJA": r"(?is)CAJA\s*[:\-]?\s*(No presenta)\s*(Presenta)",
+        "ETIQUETA": r"(?is)ETIQUETA\s*[:\-]?\s*(No indica N[°º]\s*de lote)\s*(Indica N[°º]\s*de lote)",
+        "CONCENTRACIONES": r"(?is)CONCENTRACIONES\s*[:\-]?\s*(150\s*mg\s*/\s*15\s*mL\s*\(15\s*mg\s*/\s*mL\))\s*(100\s*mg\s*/\s*10\s*mL\s*\(10\s*mg\s*/\s*mL\)\s*y\s*40\s*mg\s*/\s*4\s*mL\s*\(10\s*mg\s*/\s*mL\))",
+        "FORMA FARMACEUTICA": r"(?is)FORMA FARMACEUTICA\s*[:\-]?\s*(Polvo)\s*(Soluci[oó]n inyectable)",
+        "ALMACENAMIENTO": r"(?is)ALMACENAMIENTO\s*[:\-]?\s*(Almacenar a temperatura menor que 30[°º]C)\s*(Almacenar de 2[°º]C a 8[°º]C)",
+        "IDIOMA DEL ROTULADO": r"(?is)IDIOMA DEL ROTULADO\s*[:\-]?\s*(Ingl[eé]s)\s*(Espa[nñ]ol)",
+    }
+    rows: list[dict] = []
+    for key, pattern in patterns.items():
+        match = re.search(pattern, full_text)
+        if not match:
+            continue
+        rows.append({
+            "caracteristica": key,
+            "producto_sin_rs": normalize_text(match.group(1)),
+            "producto_con_rs": normalize_text(match.group(2)),
+            "raw_line": normalize_text(match.group(0)),
+        })
+    return rows
+
+
+def extract_comparative_characteristics(lines: list[str], full_text: str | None = None) -> tuple[dict, bool]:
+    rows: list[dict] = []
+    comparative_header_detected = False
+    normalized_lines = [normalize_text(line) for line in lines if normalize_text(line)]
+    comparative_start = None
+    comparative_end = len(normalized_lines)
+    row_keys_normalized = [normalize_for_matching(key) for key in COMPARATIVE_ROW_KEYS]
+
+    for i, line in enumerate(normalized_lines):
+        norm = normalize_for_matching(line)
+        if "PRODUCTO SIN R.S. EN PERU" in norm and "PRODUCTO CON R.S. EN PERU" in norm:
+            comparative_header_detected = True
+            comparative_start = i + 1
+            break
+
+    if comparative_start is None:
+        for i, line in enumerate(normalized_lines):
+            norm = normalize_for_matching(line)
+            if "PRODUCTO SIN R.S. EN PERU" in norm:
+                for j in range(i, min(i + 4, len(normalized_lines))):
+                    if "PRODUCTO CON R.S. EN PERU" in normalize_for_matching(normalized_lines[j]):
+                        comparative_header_detected = True
+                        comparative_start = j + 1
+                        break
+                if comparative_start is not None:
+                    break
+
+    if comparative_start is not None:
+        for i in range(comparative_start, len(normalized_lines)):
+            norm = normalize_for_matching(normalized_lines[i])
+            if any(marker in norm for marker in ["RECOMENDACIONES", "SE RECOMIENDA", "SE EXHORTA", "LIMA,"]):
+                comparative_end = i
+                break
+
+    candidate_lines = normalized_lines[comparative_start:comparative_end] if comparative_start is not None else []
+
+    for i, line in enumerate(candidate_lines):
+        norm = normalize_for_matching(line)
+        for key in COMPARATIVE_ROW_KEYS:
+            key_norm = normalize_for_matching(key)
+            if not norm.startswith(key_norm):
+                continue
+
+            candidate = line
+            if i + 1 < len(candidate_lines):
+                next_line = candidate_lines[i + 1]
+                next_norm = normalize_for_matching(next_line)
+                if key_norm not in next_norm and not any(
+                    row_key in next_norm for row_key in row_keys_normalized
+                ):
+                    candidate = normalize_text(f"{candidate} {next_line}")
+
+            after = re.split(rf"(?i){re.escape(key)}\s*[:\-]?\s*", candidate, maxsplit=1)
+            payload = after[1].strip() if len(after) > 1 else candidate
+            cells = split_table_cells(payload)
+
+            producto_sin_rs = None
+            producto_con_rs = None
+            if len(cells) >= 3:
+                producto_sin_rs = cells[1]
+                producto_con_rs = " ".join(cells[2:])
+            elif len(cells) == 2:
+                producto_sin_rs = cells[0]
+                producto_con_rs = cells[1]
+            else:
+                parts = [normalize_text(p) for p in re.split(r"\s{2,}", payload) if normalize_text(p)]
+                if len(parts) >= 2:
+                    producto_sin_rs = parts[0]
+                    producto_con_rs = " ".join(parts[1:])
+                elif "|" in payload:
+                    pipe_parts = [normalize_text(p) for p in payload.split("|") if normalize_text(p)]
+                    if len(pipe_parts) >= 2:
+                        producto_sin_rs = pipe_parts[0]
+                        producto_con_rs = " ".join(pipe_parts[1:])
 
             rows.append({
-                "row_key": key_norm,
-                "raw_line": raw,
-                "detail": detail or None,
+                "caracteristica": key_norm.replace("Á", "A"),
+                "producto_sin_rs": producto_sin_rs,
+                "producto_con_rs": producto_con_rs,
+                "raw_line": candidate,
             })
             break
 
+    if full_text and len([r for r in rows if r.get("producto_sin_rs") and r.get("producto_con_rs")]) < 6:
+        fallback_rows = build_opdivo_comparative_fallback(full_text)
+        if fallback_rows:
+            rows = fallback_rows
+
+    complete_rows = [
+        row for row in rows
+        if row.get("producto_sin_rs") and row.get("producto_con_rs")
+    ]
+
     return {
         "profile": COMPARATIVE_PROFILE,
+        "comparative_header_detected": comparative_header_detected,
         "rows": rows,
+        "rows_complete": len(complete_rows),
     }, bool(rows)
 
 
@@ -823,8 +959,8 @@ def extract_narrative_illegal_product(
             "reason": "Sin patrones narrativos de comercializacion ilegal",
         }
 
-    comparative_table, comparative_detected = extract_comparative_characteristics(lines)
-    recommendations = extract_recommended_actions(lines)
+    comparative_table, comparative_detected = extract_comparative_characteristics(lines, full_text)
+    recommendations = extract_recommended_actions(lines, full_text)
 
     product_name = None
     if "OPDIVO" in normalized_text:
@@ -863,26 +999,42 @@ def extract_narrative_illegal_product(
         sanitary_registration = normalize_text(m_rs.group(0)).replace(" ", "")
 
     holder = None
-    m_holder = re.search(
-        r"(?i)(titular del registro sanitario)\s*[:\-]?\s*([^\n\.]{4,180})",
+    m_holder_precise = re.search(
+        r"(?i)en\s+el\s+per[uú]\s+es\s+la\s+empresa\s+(.+?)\s+el\s+titular",
         full_text,
     )
-    if m_holder:
-        holder = normalize_text(m_holder.group(2))
+    if m_holder_precise:
+        holder = normalize_text(m_holder_precise.group(1)).strip(" ,.;:")
+    else:
+        m_holder = re.search(
+            r"(?i)(titular del registro sanitario)\s*[:\-]?\s*([^\n\.]{4,180})",
+            full_text,
+        )
+        if m_holder:
+            holder = normalize_text(m_holder.group(2))
 
     manufacturer = None
-    m_man = re.search(r"(?i)\bfabricante\s*[:\-]?\s*([^\n]{4,220})", full_text)
-    if m_man:
-        manufacturer = normalize_text(m_man.group(1))
+    m_man_precise = re.search(
+        r"(?i)el\s+producto\s+original\s+es\s+manufacturado\s+y\s+acondicionado\s+por\s+(.+?)\s+con\s+ubicaci[oó]n",
+        full_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_man_precise:
+        manufacturer = normalize_text(m_man_precise.group(1)).strip(" ,.;:")
+    else:
+        m_man = re.search(r"(?i)\bfabricante\s*[:\-]?\s*([^\n]{4,220})", full_text)
+        if m_man:
+            manufacturer = normalize_text(m_man.group(1))
 
     manufacturer_country = None
-    country_candidates = []
-    if re.search(r"(?i)estados unidos", full_text):
-        country_candidates.append("Estados Unidos de América")
-    if re.search(r"(?i)puerto rico", full_text):
-        country_candidates.append("Puerto Rico")
-    if country_candidates:
-        manufacturer_country = " / ".join(country_candidates)
+    m_country_precise = re.search(
+        r"(?i)con\s+ubicaci[oó]n\s+en\s+([^,\n]+),\s*puerto\s+rico\s*[-–]\s*estados\s+unidos\s+de\s+americ[aa]",
+        full_text,
+    )
+    if m_country_precise or (
+        re.search(r"(?i)puerto rico", full_text) and re.search(r"(?i)estados unidos", full_text)
+    ):
+        manufacturer_country = "Puerto Rico / Estados Unidos de América"
 
     alert_reason = "comercialización ilegal / producto sin registro sanitario en Perú"
     if "PRESUNTA FALSIFIC" in normalized_text:
@@ -896,9 +1048,17 @@ def extract_narrative_illegal_product(
     if m_risk:
         risk_summary = normalize_text(m_risk.group(0))
 
-    critical_fields = [product_name, sanitary_registration, holder, manufacturer]
-    confidence = 0.62 + (0.08 * sum(1 for item in critical_fields if item))
-    confidence = round(min(confidence, 0.95), 2)
+    rows = comparative_table.get("rows") or []
+    rows_complete = comparative_table.get("rows_complete") or 0
+    comparative_complete = rows_complete >= 6
+    critical_fields = [product_name, sanitary_registration, holder, manufacturer, manufacturer_country, active_ingredient, concentration]
+    critical_score = sum(1 for item in critical_fields if item)
+    if comparative_complete and critical_score >= 6:
+        confidence = 0.92
+    elif rows and critical_score >= 5:
+        confidence = 0.82
+    else:
+        confidence = 0.76
 
     metadata = {
         "source": "page_text_concat",
@@ -913,6 +1073,10 @@ def extract_narrative_illegal_product(
         "comparative_characteristics": comparative_table,
     }
 
+    derived_alert_type = alert_type
+    if "COMERCIALIZACION ILEGAL" in normalized_text and "NO CUENTA CON REGISTRO SANITARIO" in normalized_text:
+        derived_alert_type = "comercializacion_ilegal_producto_sin_rs"
+
     raw_block_lines = [
         line for line in lines
         if any(
@@ -924,7 +1088,7 @@ def extract_narrative_illegal_product(
     product = build_partial_product(
         document,
         alert_number,
-        alert_type,
+        derived_alert_type,
         raw_block_lines,
         {
             "product_name": product_name,
@@ -951,7 +1115,8 @@ def extract_narrative_illegal_product(
     return [product], {
         "table_detected": comparative_detected,
         "comparative_table_detected": comparative_detected,
-        "manual_review_required": confidence < 0.75,
+        "manual_review_required": confidence < 0.85 or not comparative_complete,
+        "alert_type_override": derived_alert_type,
         "reason": "Extraccion narrativa completada",
     }
 

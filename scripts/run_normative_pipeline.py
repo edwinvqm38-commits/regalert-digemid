@@ -1,4 +1,5 @@
 import logging
+import argparse
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from agents.agent_normative_monitor import NormativeMonitorAgent
+from agents.agent_normative_pdf_detector import NormativePdfDetectorAgent
 from agents.agent_normative_register import NormativeRegisterAgent
 
 logging.basicConfig(
@@ -19,11 +21,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def main() -> None:
-    load_dotenv()
-
-    logger.info("=== Iniciando pipeline normativo DIGEMID ===")
-
+def run_metadata_phase() -> None:
+    logger.info("=== Fase metadata normativa DIGEMID ===")
     monitor = NormativeMonitorAgent()
     documents = monitor.collect_documents()
 
@@ -33,12 +32,39 @@ def main() -> None:
     summary = register.process_and_save(documents)
 
     logger.info(
-        "Resumen pipeline normativo | encontrados=%s | nuevos=%s | actualizados=%s | guardados=%s",
+        "Resumen metadata | encontrados=%s | nuevos=%s | actualizados=%s | guardados=%s",
         summary["found"],
         summary["new"],
         summary["updated"],
         summary["saved"],
     )
+
+
+def run_detect_pdf_phase() -> None:
+    logger.info("=== Fase deteccion PDF normativa DIGEMID ===")
+    detector = NormativePdfDetectorAgent()
+    detector.process()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--phase",
+        choices=["metadata", "detect-pdf", "all"],
+        default="all",
+    )
+    args = parser.parse_args()
+
+    load_dotenv()
+
+    logger.info("=== Iniciando pipeline normativo DIGEMID ===")
+
+    if args.phase in ("metadata", "all"):
+        run_metadata_phase()
+
+    if args.phase in ("detect-pdf", "all"):
+        run_detect_pdf_phase()
+
     logger.info("=== Pipeline normativo DIGEMID finalizado ===")
 
 

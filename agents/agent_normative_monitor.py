@@ -111,6 +111,15 @@ NORMATIVE_NUMBER_PATTERN = re.compile(
     r"\b(?:N[°Oº.]?|N\.º|NO)\s*\d{1,4}[-/](20\d{2})(?:[-/][A-Z0-9]+)*\b|\b\d{1,4}[-/](20\d{2})(?:[-/][A-Z0-9]+)*\b",
     re.IGNORECASE,
 )
+PDF_KEY_PATTERNS = [
+    ("RM", re.compile(r"\bRM[_\-]?(\d{1,4})[-_](20\d{2})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+    ("DS", re.compile(r"\bDS[_\-]?(\d{1,4})[-_](20\d{2})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+    ("RD", re.compile(r"\bRD[_\-]?(\d{1,4})[-_](20\d{2})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+    ("RS", re.compile(r"\bRS[_\-]?(\d{1,4})[-_](20\d{2})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+    ("DL", re.compile(r"\bDL[_\-]?(\d{1,4})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+    ("DU", re.compile(r"\bDU[_\-]?(\d{1,4})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+    ("LEY", re.compile(r"\bLEY[_\-]?(\d{1,6})(?:[-_]?([A-Z0-9]+))?", re.IGNORECASE)),
+]
 
 
 def is_pdf_url(url: str | None) -> bool:
@@ -176,6 +185,40 @@ def looks_like_normative_title(text: str | None, url: str | None = None) -> bool
 def has_normative_number(text: str | None, url: str | None = None) -> bool:
     combined = f"{text or ''} {url or ''}"
     return bool(NORMATIVE_NUMBER_PATTERN.search(combined))
+
+
+def title_starts_with_description(text: str | None) -> bool:
+    normalized = normalize_text_basic(text)
+    return normalized.startswith("descripcion:") or normalized.startswith("descripción:")
+
+
+def extract_key_from_pdf_url(file_url: str | None) -> str | None:
+    if not file_url:
+        return None
+
+    candidate = urlparse(file_url).path.rsplit("/", 1)[-1]
+    candidate = candidate.rsplit(".", 1)[0]
+    candidate_upper = candidate.upper()
+
+    for prefix, pattern in PDF_KEY_PATTERNS:
+        match = pattern.search(candidate_upper)
+        if not match:
+            continue
+
+        number = str(int(match.group(1))) if match.group(1).isdigit() else match.group(1)
+
+        if prefix == "LEY":
+            return f"LEY-{number}"
+
+        year = match.group(2) if match.lastindex and match.lastindex >= 2 else None
+        suffix = normalize_suffix(match.group(3) if match.lastindex and match.lastindex >= 3 else None)
+
+        if year:
+            return f"{prefix}-{number}-{year}" + (f"-{suffix}" if suffix else "")
+
+        return f"{prefix}-{number}" + (f"-{suffix}" if suffix else "")
+
+    return None
 
 
 def source_section_in_url(url: str | None, source_section: str) -> bool:
@@ -275,6 +318,11 @@ class NormativeMonitorAgent:
             "User-Agent": "RegAlert-DIGEMID-NormativeMonitor/1.0",
         }
         self.sources = self._load_sources()
+        self.rejection_stats = {
+            "rejected_description_only": 0,
+            "rejected_pdf_direct_without_title": 0,
+            "rejected_key_mismatch_pdf": 0,
+        }
 
     def _load_sources(self) -> list[dict]:
         with self.config_path.open("r", encoding="utf-8") as handle:
@@ -321,7 +369,11 @@ class NormativeMonitorAgent:
         non_pdf_texts = [
             clean_text(anchor.get_text(" "))
             for anchor in anchors
-            if not is_pdf_url(anchor.get("href", "")) and is_meaningful_text(anchor.get_text(" "))
+            if (
+                not is_pdf_url(anchor.get("href", ""))
+                and is_meaningful_text(anchor.get_text(" "))
+                and not title_starts_with_description(anchor.get_text(" "))
+            )
         ]
 
         if non_pdf_texts:
@@ -333,7 +385,7 @@ class NormativeMonitorAgent:
 
         for anchor in anchors:
             text = clean_text(anchor.get_text(" "))
-            if is_meaningful_text(text):
+            if is_meaningful_text(text) and not title_starts_with_description(text):
                 return text
 
         return ""
@@ -385,6 +437,8 @@ class NormativeMonitorAgent:
             return False
         if is_generic_category_title(title):
             return False
+        if title_starts_with_description(title):
+            return False
         if is_listing_or_category_url(detail_url):
             return False
         if not has_date and not title_has_number:
@@ -401,6 +455,7 @@ class NormativeMonitorAgent:
             return (
                 (has_date or title_has_number)
                 and title_is_normative
+                and normalize_text_basic(title).startswith("decreto supremo")
                 and section_priority_match(title, detail_url or "", source_section)
             )
 
@@ -431,22 +486,49 @@ class NormativeMonitorAgent:
 
         title = self.choose_title(container)
         if not title:
+            if file_url:
+                self.rejection_stats["rejected_pdf_direct_without_title"] += 1
             return None
 
         context_text = clean_text(container.get_text(" "))
         date_display = extract_date_display(context_text) or extract_date_display(title)
-        if not self.has_minimum_evidence(title, context_text, detail_url, source, date_display):
+        if title_starts_with_description(title):
+            self.rejection_stats["rejected_description_only"] += 1
             return None
 
+        if not self.has_minimum_evidence(title, context_text, detail_url, source, date_display):
+            if file_url and not date_display and not has_normative_number(title, detail_url):
+                self.rejection_stats["rejected_pdf_direct_without_title"] += 1
+            return None
+
+        pdf_key = extract_key_from_pdf_url(file_url or detail_url)
+        if source["source_section"] == "decreto-supremo":
+            detail_path = urlparse(detail_url).path.lower()
+            detail_is_preferred = bool(
+                re.search(r"/normas-legales/\d{4}/decreto-supremo-", detail_path)
+            )
+            title_is_official = normalize_text_basic(title).startswith("decreto supremo") and has_normative_number(
+                title,
+                detail_url,
+            )
+
+            if file_url and not detail_is_preferred and not title_is_official:
+                self.rejection_stats["rejected_pdf_direct_without_title"] += 1
+                return None
+
         published_date = normalize_date(date_display)
-        document_key = generate_normative_document_key(
+        generated_key = generate_normative_document_key(
             title=title,
             detail_url=detail_url,
             source_section=source["source_section"],
             published_date=published_date,
         )
+        document_key = pdf_key or generated_key
 
         if not document_key:
+            return None
+        if pdf_key and generated_key != pdf_key and has_normative_number(title, detail_url):
+            self.rejection_stats["rejected_key_mismatch_pdf"] += 1
             return None
 
         file_name = extract_file_name(file_url)
@@ -578,6 +660,11 @@ class NormativeMonitorAgent:
         documents_by_key: dict[str, dict] = {}
 
         for source in self.sources:
+            self.rejection_stats = {
+                "rejected_description_only": 0,
+                "rejected_pdf_direct_without_title": 0,
+                "rejected_key_mismatch_pdf": 0,
+            }
             total_links_detected = 0
             total_candidates_before_filter = 0
             total_candidates_after_filter = 0
@@ -620,12 +707,15 @@ class NormativeMonitorAgent:
                         break
 
                 logger.info(
-                    "Fuente procesada: %s | total_links_detected=%s | total_candidates_before_filter=%s | total_candidates_after_filter=%s | total_returned=%s",
+                    "Fuente procesada: %s | total_links_detected=%s | total_candidates_before_filter=%s | total_candidates_after_filter=%s | total_returned=%s | rejected_description_only=%s | rejected_pdf_direct_without_title=%s | rejected_key_mismatch_pdf=%s",
                     source["label"],
                     total_links_detected,
                     total_candidates_before_filter,
                     total_candidates_after_filter,
                     total_returned,
+                    self.rejection_stats["rejected_description_only"],
+                    self.rejection_stats["rejected_pdf_direct_without_title"],
+                    self.rejection_stats["rejected_key_mismatch_pdf"],
                 )
             except Exception as error:
                 logger.exception("Error procesando fuente normativa %s: %s", source["label"], error)

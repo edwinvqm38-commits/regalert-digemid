@@ -244,6 +244,8 @@ LAYOUT_PAGE_TABLE = "digemid_documento_layout_paginas"
 EXTRACTION_METHOD = "rule_based_v1"
 LAYOUT_EXTRACTION_METHOD = "layout_rule_based_v1"
 ROWSPAN_EXTRACTION_METHOD = "layout_rowspan_table_v1"
+NARRATIVE_EXTRACTION_METHOD = "narrative_illegal_product_v1"
+COMPARATIVE_PROFILE = "comparative_characteristics_v1"
 DEFAULT_STATUSES = [
     "text_extracted",
     "text_extracted_no_products",
@@ -423,6 +425,29 @@ FALSIFIED_HEADER_LABELS = {
     "department": ["DEPARTAMENTO"],
 }
 
+NARRATIVE_ILLEGAL_PATTERNS = [
+    "COMERCIALIZACION ILEGAL",
+    "COMERCIALIZACIÓN ILEGAL",
+    "NO CUENTA CON REGISTRO SANITARIO",
+    "PRODUCTO SIN REGISTRO SANITARIO",
+    "PRESUNTA FALSIFICACION",
+    "PRESUNTA FALSIFICACIÓN",
+    "PRODUCTO SOSPECHOSO",
+    "NO CORRESPONDE A UNA PRESENTACION COMERCIALIZADA",
+    "NO CORRESPONDE A UNA PRESENTACIÓN COMERCIALIZADA",
+]
+
+COMPARATIVE_ROW_KEYS = [
+    "FRASCO",
+    "CAJA",
+    "ETIQUETA",
+    "CONCENTRACIONES",
+    "FORMA FARMACEUTICA",
+    "FORMA FARMACÉUTICA",
+    "ALMACENAMIENTO",
+    "IDIOMA DEL ROTULADO",
+]
+
 
 def load_env():
     load_dotenv()
@@ -473,18 +498,21 @@ def normalize_for_matching(value: str | None) -> str:
     return normalized.strip()
 
 
-def get_documents_to_process(supabase, limit: int, force: bool) -> list[dict]:
+def get_documents_to_process(supabase, limit: int, force: bool, document_key: str | None = None) -> list[dict]:
     statuses = DEFAULT_STATUSES + (FORCE_EXTRA_STATUSES if force else [])
-    response = (
+    query = (
         supabase
         .table("digemid_documentos")
         .select("id, document_key, title, process_status")
         .eq("source_type", "alerta")
-        .in_("process_status", statuses)
         .order("published_date", desc=True)
         .limit(limit)
-        .execute()
     )
+    if document_key:
+        query = query.eq("document_key", document_key)
+    else:
+        query = query.in_("process_status", statuses)
+    response = query.execute()
     return response.data or []
 
 
@@ -717,6 +745,217 @@ def has_falsified_markers(lines: list[str]) -> bool:
     return has_header and has_name and has_lot and has_manufacturer_country
 
 
+def has_narrative_illegal_markers(lines: list[str]) -> bool:
+    normalized_lines = [normalize_for_matching(line) for line in lines]
+    return any(
+        any(pattern in line for pattern in NARRATIVE_ILLEGAL_PATTERNS)
+        for line in normalized_lines
+    )
+
+
+def extract_recommended_actions(lines: list[str]) -> list[str]:
+    markers = ["RECOMENDACIONES", "SE RECOMIENDA", "SE EXHORTA"]
+    end_markers = ["LIMA,", "FUENTE:", "ACCIONES ADOPTADAS", "NOTA:"]
+    actions: list[str] = []
+    collecting = False
+
+    for line in lines:
+        normalized = normalize_for_matching(line)
+        if not collecting and any(marker in normalized for marker in markers):
+            collecting = True
+            continue
+
+        if collecting:
+            if any(marker in normalized for marker in end_markers):
+                break
+            text = normalize_text(line)
+            if text:
+                actions.append(text)
+            if len(actions) >= 12:
+                break
+
+    return actions
+
+
+def extract_comparative_characteristics(lines: list[str]) -> tuple[dict, bool]:
+    rows: list[dict] = []
+    for line in lines:
+        normalized = normalize_for_matching(line)
+        for key in COMPARATIVE_ROW_KEYS:
+            key_norm = normalize_for_matching(key)
+            if key_norm not in normalized:
+                continue
+
+            raw = normalize_text(line)
+            after = re.split(rf"(?i){re.escape(key)}\s*[:\-]?\s*", raw, maxsplit=1)
+            detail = after[1].strip() if len(after) > 1 else ""
+            if not detail and "  " in raw:
+                cells = split_table_cells(raw)
+                if len(cells) > 1:
+                    detail = " | ".join(cells[1:])
+
+            rows.append({
+                "row_key": key_norm,
+                "raw_line": raw,
+                "detail": detail or None,
+            })
+            break
+
+    return {
+        "profile": COMPARATIVE_PROFILE,
+        "rows": rows,
+    }, bool(rows)
+
+
+def extract_narrative_illegal_product(
+    document: dict,
+    lines: list[str],
+    full_text: str,
+    alert_number: str | None,
+    alert_type: str,
+) -> tuple[list[dict], dict]:
+    normalized_text = normalize_for_matching(full_text)
+    if not has_narrative_illegal_markers(lines):
+        return [], {
+            "table_detected": False,
+            "comparative_table_detected": False,
+            "manual_review_required": False,
+            "reason": "Sin patrones narrativos de comercializacion ilegal",
+        }
+
+    comparative_table, comparative_detected = extract_comparative_characteristics(lines)
+    recommendations = extract_recommended_actions(lines)
+
+    product_name = None
+    if "OPDIVO" in normalized_text:
+        product_name = "OPDIVO"
+    else:
+        m = re.search(r"(?i)\bproducto\s+([A-Z0-9][A-Z0-9\-\s]{2,40})\b", full_text)
+        if m:
+            product_name = normalize_text(m.group(1))
+
+    active_ingredient = None
+    if "NIVOLUMAB" in normalized_text:
+        active_ingredient = "nivolumab"
+    else:
+        m = re.search(r"(?i)(principio activo|dci)\s*[:\-]?\s*([A-Za-z0-9\-\s]{3,80})", full_text)
+        if m:
+            active_ingredient = normalize_text(m.group(2))
+
+    concentration = None
+    m_conc = re.search(r"(?i)\b\d{1,4}\s*mg\s*/\s*\d{1,4}\s*m[lL]\b", full_text)
+    if m_conc:
+        concentration = normalize_text(m_conc.group(0))
+
+    dosage_values: list[str] = []
+    if re.search(r"(?i)soluci[oó]n\s+inyectable", full_text):
+        dosage_values.append("solución inyectable")
+    if re.search(r"(?i)\bpolvo\b", full_text):
+        dosage_values.append("polvo")
+    dosage_form = " / ".join(dosage_values) if dosage_values else None
+    dosage_observation = None
+    if len(dosage_values) > 1:
+        dosage_observation = "El comparativo muestra más de una forma farmacéutica reportada."
+
+    sanitary_registration = None
+    m_rs = re.search(r"\b[A-Z]{1,3}\s*-\s*\d{4,6}\b", full_text)
+    if m_rs:
+        sanitary_registration = normalize_text(m_rs.group(0)).replace(" ", "")
+
+    holder = None
+    m_holder = re.search(
+        r"(?i)(titular del registro sanitario)\s*[:\-]?\s*([^\n\.]{4,180})",
+        full_text,
+    )
+    if m_holder:
+        holder = normalize_text(m_holder.group(2))
+
+    manufacturer = None
+    m_man = re.search(r"(?i)\bfabricante\s*[:\-]?\s*([^\n]{4,220})", full_text)
+    if m_man:
+        manufacturer = normalize_text(m_man.group(1))
+
+    manufacturer_country = None
+    country_candidates = []
+    if re.search(r"(?i)estados unidos", full_text):
+        country_candidates.append("Estados Unidos de América")
+    if re.search(r"(?i)puerto rico", full_text):
+        country_candidates.append("Puerto Rico")
+    if country_candidates:
+        manufacturer_country = " / ".join(country_candidates)
+
+    alert_reason = "comercialización ilegal / producto sin registro sanitario en Perú"
+    if "PRESUNTA FALSIFIC" in normalized_text:
+        alert_reason += " / presunta falsificación"
+
+    risk_summary = None
+    m_risk = re.search(
+        r"(?i)(no cuenta con registro sanitario|producto sin registro sanitario|producto sospechoso|presunta falsificaci[oó]n)[^\n\.]{0,240}",
+        full_text,
+    )
+    if m_risk:
+        risk_summary = normalize_text(m_risk.group(0))
+
+    critical_fields = [product_name, sanitary_registration, holder, manufacturer]
+    confidence = 0.62 + (0.08 * sum(1 for item in critical_fields if item))
+    confidence = round(min(confidence, 0.95), 2)
+
+    metadata = {
+        "source": "page_text_concat",
+        "alert_profile": NARRATIVE_EXTRACTION_METHOD,
+        "active_ingredient": active_ingredient,
+        "concentration": concentration,
+        "dosage_form": dosage_form,
+        "dosage_observation": dosage_observation,
+        "alert_reason": alert_reason,
+        "risk_summary": risk_summary,
+        "recommended_actions": recommendations,
+        "comparative_characteristics": comparative_table,
+    }
+
+    raw_block_lines = [
+        line for line in lines
+        if any(
+            marker in normalize_for_matching(line)
+            for marker in ["COMERCIALIZACION ILEGAL", "NO CUENTA CON REGISTRO SANITARIO", "OPDIVO", "NIVOLUMAB"]
+        )
+    ][:40]
+
+    product = build_partial_product(
+        document,
+        alert_number,
+        alert_type,
+        raw_block_lines,
+        {
+            "product_name": product_name,
+            "sanitary_registration": sanitary_registration,
+            "registration_holder": holder,
+            "manufacturer": manufacturer,
+            "manufacturer_country": manufacturer_country,
+            "analytical_result": risk_summary,
+            "extraction_method": NARRATIVE_EXTRACTION_METHOD,
+            "confidence": confidence,
+            "metadata": metadata,
+        },
+        confidence=confidence,
+    )
+
+    if not product_name:
+        return [], {
+            "table_detected": False,
+            "comparative_table_detected": comparative_detected,
+            "manual_review_required": True,
+            "reason": "Perfil narrativo detectado, pero sin producto confiable",
+        }
+
+    return [product], {
+        "table_detected": comparative_detected,
+        "comparative_table_detected": comparative_detected,
+        "manual_review_required": confidence < 0.75,
+        "reason": "Extraccion narrativa completada",
+    }
+
+
 def select_extractor(alert_type: str, lines: list[str]) -> str:
     if alert_type == "retiro_mercado_control_calidad" or has_control_quality_markers(lines):
         return "retiro_mercado"
@@ -730,6 +969,9 @@ def select_extractor(alert_type: str, lines: list[str]) -> str:
         or has_falsified_markers(lines)
     ):
         return "falsificados"
+
+    if has_narrative_illegal_markers(lines):
+        return "narrativo_ilegal"
 
     return "ninguno"
 
@@ -3205,6 +3447,14 @@ def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dic
             alert_number,
             alert_type,
         )
+    elif extractor_selected == "narrativo_ilegal":
+        products, diagnostics = extract_narrative_illegal_product(
+            document,
+            lines,
+            full_text,
+            alert_number,
+            alert_type,
+        )
     else:
         header_map, header_index = detect_header_map(lines, 0)
         preview_lines = get_preview_lines(lines, header_index)
@@ -3270,6 +3520,12 @@ def extract_products_from_text(document: dict, full_text: str) -> tuple[list[dic
         "alert_number": alert_number,
         "alert_type": alert_type,
         "extractor_selected": extractor_selected,
+        "alert_profile": NARRATIVE_EXTRACTION_METHOD if extractor_selected == "narrativo_ilegal" else EXTRACTION_METHOD,
+        "extraction_method_used": (
+            products[0].get("extraction_method")
+            if products and products[0].get("extraction_method")
+            else EXTRACTION_METHOD
+        ),
         "normalized_match_text": normalize_for_matching(f"{title or ''} {full_text[:1200]}"),
         **diagnostics,
     }
@@ -3348,12 +3604,13 @@ def main():
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--document-key", type=str, default=None)
     args = parser.parse_args()
 
     load_env()
 
     supabase = get_supabase()
-    documents = get_documents_to_process(supabase, args.limit, args.force)
+    documents = get_documents_to_process(supabase, args.limit, args.force, args.document_key)
 
     logger.info("Documentos encontrados para extraer productos: %s", len(documents))
 
@@ -3384,6 +3641,14 @@ def main():
                 "Documento %s | extractor seleccionado: %s",
                 document_key,
                 summary.get("extractor_selected"),
+            )
+            logger.info(
+                "Documento %s | alert_profile: %s | products_extracted: %s | comparative_table_detected: %s | manual_review_required: %s",
+                document_key,
+                summary.get("alert_profile"),
+                len(products),
+                summary.get("comparative_table_detected", False),
+                summary.get("manual_review_required", False),
             )
             if preview_lines:
                 logger.info(
@@ -3459,15 +3724,21 @@ def main():
             replace_products_for_document(supabase, document_id, products)
 
             if products:
+                extraction_method_used = summary.get("extraction_method_used") or EXTRACTION_METHOD
+                process_message = (
+                    "Extracción narrativa completada con narrative_illegal_product_v1"
+                    if extraction_method_used == NARRATIVE_EXTRACTION_METHOD
+                    else (
+                        f"Extraccion estructurada completada con {extraction_method_used}. "
+                        f"Productos: {len(products)}. "
+                        f"Tipo: {summary['alert_type']}."
+                    )
+                )
                 update_document_status(
                     supabase,
                     document_id,
                     "structured_extracted",
-                    (
-                        f"Extraccion estructurada completada con {EXTRACTION_METHOD}. "
-                        f"Productos: {len(products)}. "
-                        f"Tipo: {summary['alert_type']}."
-                    ),
+                    process_message,
                 )
             else:
                 logger.info(
@@ -3481,8 +3752,13 @@ def main():
                     "text_extracted_no_products",
                     (
                         f"No se detectaron tablas de productos con {EXTRACTION_METHOD}. "
-                        f"Tipo: {summary['alert_type']}."
-                    ),
+                        f"Tipo: {summary['alert_type']}. "
+                        + (
+                            "manual_review_expected_v1"
+                            if summary.get("extractor_selected") == "narrativo_ilegal"
+                            else ""
+                        )
+                    ).strip(),
                 )
                 docs_without_products += 1
 

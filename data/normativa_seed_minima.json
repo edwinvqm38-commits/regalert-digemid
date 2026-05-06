@@ -1,0 +1,170 @@
+[
+  {
+    "document_key": "LEY-29459",
+    "source_type": "norma",
+    "source_section": "normativa-base",
+    "tipo_norma": "Ley",
+    "numero": "29459",
+    "anio": 2009,
+    "titulo": "Ley de los productos farmacéuticos, dispositivos médicos y productos sanitarios",
+    "fecha_publicacion": "2009-11-25",
+    "entidad_emisora": "Congreso de la República",
+    "fuente_oficial": "Gob.pe",
+    "source_url": "https://www.gob.pe/institucion/congreso-de-la-republica/normas-legales/2813441-29459",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["marco_legal", "productos_farmaceuticos", "dispositivos_medicos", "productos_sanitarios", "calidad", "seguridad", "uso_racional"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  },
+  {
+    "document_key": "DS-014-2011-SA",
+    "source_type": "norma",
+    "source_section": "normas-legales/decreto-supremo",
+    "tipo_norma": "Decreto Supremo",
+    "numero": "014-2011-SA",
+    "anio": 2011,
+    "titulo": "Aprueban Reglamento de Establecimientos Farmacéuticos",
+    "fecha_publicacion": "2011-07-27",
+    "entidad_emisora": "MINSA",
+    "fuente_oficial": "DIGEMID",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/normas-legales/2011/decreto-supremo-no-014-2011-sa/",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["establecimientos_farmaceuticos", "boticas", "farmacias", "director_tecnico", "almacenamiento", "dispensacion", "inspeccion"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  },
+  {
+    "document_key": "DS-016-2011-SA",
+    "source_type": "norma",
+    "source_section": "normas-legales/decreto-supremo",
+    "tipo_norma": "Decreto Supremo",
+    "numero": "016-2011-SA",
+    "anio": 2011,
+    "titulo": "Aprueban Reglamento para el Registro, Control y Vigilancia Sanitaria de Productos Farmacéuticos, Dispositivos Médicos y Productos Sanitarios",
+    "fecha_publicacion": "2011-07-27",
+    "entidad_emisora": "MINSA",
+    "fuente_oficial": "DIGEMID",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/normas-legales/2011/decreto-supremo-no-016-2011-sa/",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["registro_sanitario", "control", "vigilancia_sanitaria", "productos_farmaceuticos", "dispositivos_medicos", "productos_sanitarios"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  },
+  {
+    "document_key": "RM-554-2022-MINSA",
+    "source_type": "norma",
+    "source_section": "normas-legales/resolucion-ministerial",
+    "tipo_norma": "Resolución Ministerial",
+    "numero": "554-2022-MINSA",
+    "anio": 2022,
+    "titulo": "Aprueban el Documento Técnico: Manual de Buenas Prácticas de Oficina Farmacéutica",
+    "fecha_publicacion": "2022-07-27",
+    "entidad_emisora": "MINSA",
+    "fuente_oficial": "DIGEMID",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/normas-legales/2022/resolucion-ministerial-n-554-2022-minsa/",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["buenas_practicas_oficina_farmaceutica", "almacenamiento", "dispensacion", "farmacovigilancia", "seguimiento_farmacoterapeutico", "poes"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  },
+  {
+    "document_key": "RM-810-2024-MINSA",
+    "source_type": "norma",
+    "source_section": "normas-legales/resolucion-ministerial",
+    "tipo_norma": "Resolución Ministerial",
+    "numero": "810-2024-MINSA",
+    "anio": 2024,
+    "titulo": "Modifican el Documento Técnico: Manual de Buenas Prácticas de Oficina Farmacéutica",
+    "fecha_publicacion": "2024-11-23",
+    "entidad_emisora": "MINSA",
+    "fuente_oficial": "DIGEMID",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/normas-legales/2024/resolucion-ministerial-n-810-2024-minsa/",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["buenas_practicas_oficina_farmaceutica", "modificacion", "implementacion", "fiscalizacion", "poes"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  },
+  {
+    "document_key": "DS-008-2025-SA",
+    "source_type": "norma",
+    "source_section": "normas-legales/decreto-supremo",
+    "tipo_norma": "Decreto Supremo",
+    "numero": "008-2025-SA",
+    "anio": 2025,
+    "titulo": "Decreto Supremo que modifica artículos del Reglamento de Establecimientos Farmacéuticos, aprobado por Decreto Supremo N° 014-2011-SA, en el marco de la mejora de los niveles de eficiencia de la gestión del Estado",
+    "fecha_publicacion": "2025-06-10",
+    "entidad_emisora": "MINSA",
+    "fuente_oficial": "DIGEMID",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/normas-legales/2025/decreto-supremo-n-008-2025-sa/",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["establecimientos_farmaceuticos", "modificacion_reglamentaria", "boticas", "farmacias", "gestion_estado"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  },
+  {
+    "document_key": "LEY-32033",
+    "source_type": "norma",
+    "source_section": "normas-legales/leyes",
+    "tipo_norma": "Ley",
+    "numero": "32033",
+    "anio": 2024,
+    "titulo": "Ley que garantiza y promueve el acceso y uso a los medicamentos genéricos en Denominación Común Internacional (DCI) y fortalece la regulación de los productos farmacéuticos y dispositivos médicos en beneficio de los pacientes y usuarios",
+    "fecha_publicacion": "2024-05-20",
+    "entidad_emisora": "Congreso de la República",
+    "fuente_oficial": "DIGEMID",
+    "source_url": "https://www.digemid.minsa.gob.pe/webDigemid/normas-legales/2024/ley-n-32033/",
+    "pdf_url": null,
+    "botica_relevance": {
+      "botica": true,
+      "bpoof": true,
+      "poes": true,
+      "temas": ["medicamentos_genericos", "denominacion_comun_internacional", "acceso", "dispensacion", "productos_farmaceuticos"]
+    },
+    "raw": {
+      "seed_status": "metadata_inicial_confirmada",
+      "pendiente": "Descargar PDF oficial y extraer texto por pagina"
+    }
+  }
+]

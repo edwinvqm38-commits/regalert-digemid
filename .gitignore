@@ -17,3 +17,7 @@ tmp/
 supabase/.temp/tmp/
 
 .claude/
+
+# Permitir semillas versionadas del proyecto
+!data/*.json
+!data/**/*.json

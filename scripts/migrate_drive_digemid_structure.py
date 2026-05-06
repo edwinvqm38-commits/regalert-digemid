@@ -135,6 +135,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--pending-only", action="store_true")
     parser.add_argument("--source-type", default="alerta", choices=["alerta"])
     parser.add_argument("--limit", type=int)
     parser.add_argument("--document-key")
@@ -530,7 +531,13 @@ def drive_upsert_json_file(
     )
 
 
-def get_documents(supabase, source_type: str, limit: int | None, document_key: str | None) -> list[dict]:
+def get_documents(
+    supabase,
+    source_type: str,
+    limit: int | None,
+    document_key: str | None,
+    pending_only: bool,
+) -> list[dict]:
     query = (
         supabase.table("digemid_documentos")
         .select(SUPABASE_SELECT_FIELDS)
@@ -539,6 +546,8 @@ def get_documents(supabase, source_type: str, limit: int | None, document_key: s
         .not_.is_("drive_file_id", "null")
         .order("published_date", desc=False)
     )
+    if pending_only:
+        query = query.is_("raw->drive_structure", "null")
     if document_key:
         query = query.eq("document_key", document_key)
     if limit:
@@ -1007,6 +1016,7 @@ def main():
             source_type=args.source_type,
             limit=args.limit,
             document_key=args.document_key,
+            pending_only=args.pending_only,
         )
         logger.info("Documentos encontrados para migracion: %s", len(rows))
 
@@ -1037,6 +1047,7 @@ def main():
             "mode": args.mode,
             "source_type": args.source_type,
             "document_key_filter": args.document_key,
+            "pending_only": args.pending_only,
             "limit": args.limit,
             "migration_version": MIGRATION_VERSION,
             "generated_at": datetime.now(timezone.utc).isoformat(),

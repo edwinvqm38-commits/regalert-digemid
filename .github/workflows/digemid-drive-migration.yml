@@ -19,6 +19,14 @@ on:
         description: "Limite de documentos a procesar (opcional)"
         required: false
         type: string
+      pending_only:
+        description: "Procesar solo alertas aun no migradas a drive_structure"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   drive-migration:
@@ -65,6 +73,10 @@ jobs:
 
           if [[ -n "${{ inputs.limit }}" ]]; then
             CMD+=(--limit "${{ inputs.limit }}")
+          fi
+
+          if [[ "${{ inputs.pending_only }}" == "true" ]]; then
+            CMD+=(--pending-only)
           fi
 
           printf 'Ejecutando: %q ' "${CMD[@]}"

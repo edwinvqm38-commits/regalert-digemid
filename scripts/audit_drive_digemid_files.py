@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -55,15 +56,25 @@ def normalize_for_matching(value: str | None) -> str:
 def env_json_to_file(env_name: str, fallback_path_env: str | None = None) -> tuple[Path, bool]:
     raw_value = os.getenv(env_name)
     if raw_value:
+        raw_value_stripped = raw_value.strip()
+        if raw_value_stripped.startswith("{") or raw_value_stripped.startswith("["):
+            json.loads(raw_value_stripped)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".json",
+                delete=False,
+            ) as temp_file:
+                temp_file.write(raw_value_stripped)
+                return Path(temp_file.name), True
+
         candidate = Path(raw_value)
         if candidate.exists():
             return candidate, False
 
-        temp_dir = Path(".tmp_audit")
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_path = temp_dir / f"{env_name.lower()}.json"
-        temp_path.write_text(raw_value, encoding="utf-8")
-        return temp_path, True
+        raise ValueError(
+            f"{env_name} no parece JSON valido ni una ruta existente"
+        )
 
     if fallback_path_env:
         fallback = os.getenv(fallback_path_env)

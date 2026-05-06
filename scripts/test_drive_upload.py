@@ -22,7 +22,7 @@ def get_drive_service():
     if not Path(json_path).exists():
         raise FileNotFoundError(f"No existe el JSON: {json_path}")
 
-    scopes = ["https://www.googleapis.com/auth/drive.file"]
+    scopes = ["https://www.googleapis.com/auth/drive"]
 
     credentials = service_account.Credentials.from_service_account_file(
         json_path,

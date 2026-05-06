@@ -135,7 +135,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--pending-only", action="store_true")
+    parser.add_argument(
+        "--pending-only",
+        action="store_true",
+        help="Procesa solo documentos sin raw.drive_structure",
+    )
     parser.add_argument("--source-type", default="alerta", choices=["alerta"])
     parser.add_argument("--limit", type=int)
     parser.add_argument("--document-key")
@@ -178,6 +182,11 @@ def iso_date(value) -> str | None:
     if not value:
         return None
     return str(value)[:10]
+
+
+def has_drive_structure(row: dict) -> bool:
+    raw = row.get("raw")
+    return isinstance(raw, dict) and bool(raw.get("drive_structure"))
 
 
 def make_document_folder_name(document_key: str) -> str:
@@ -546,14 +555,25 @@ def get_documents(
         .not_.is_("drive_file_id", "null")
         .order("published_date", desc=False)
     )
-    if pending_only:
-        query = query.is_("raw->drive_structure", "null")
     if document_key:
         query = query.eq("document_key", document_key)
-    if limit:
+    if limit and not (pending_only and not document_key):
         query = query.limit(limit)
     response = query.execute()
-    return response.data or []
+    rows = response.data or []
+
+    if pending_only:
+        total_candidates = len(rows)
+        rows = [row for row in rows if not has_drive_structure(row)]
+        logger.info(
+            "Pending-only activo: %s documentos pendientes de %s documentos candidatos.",
+            len(rows),
+            total_candidates,
+        )
+        if limit:
+            rows = rows[:limit]
+
+    return rows
 
 
 def get_existing_assets(supabase, document_id: str) -> list[dict]:
@@ -794,6 +814,7 @@ def write_report_files(mode: str, report_payload: dict):
         "",
         f"- Mode: `{mode}`",
         f"- Source type: `{report_payload['source_type']}`",
+        f"- Pending only: `{report_payload['pending_only']}`",
         f"- Documents considered: **{summary['documents_considered']}**",
         f"- Documents processed: **{summary['documents_processed']}**",
         f"- Documents skipped: **{summary['documents_skipped']}**",

@@ -11,6 +11,13 @@ on:
         options:
           - dry-run
           - apply
+      source_type:
+        description: "Source type a procesar"
+        required: false
+        default: "alerta"
+        type: choice
+        options:
+          - alerta
       document_key:
         description: "Document key especifico (opcional)"
         required: false
@@ -20,8 +27,8 @@ on:
         required: false
         type: string
       pending_only:
-        description: "Procesar solo alertas aun no migradas a drive_structure"
-        required: true
+        description: "Procesar solo documentos pendientes sin drive_structure"
+        required: false
         default: "false"
         type: choice
         options:
@@ -59,7 +66,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CMD=(python scripts/migrate_drive_digemid_structure.py --source-type alerta)
+          CMD=(python scripts/migrate_drive_digemid_structure.py --source-type "${{ inputs.source_type }}")
 
           if [[ "${{ inputs.mode }}" == "apply" ]]; then
             CMD+=(--apply)

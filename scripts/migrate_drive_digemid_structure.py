@@ -193,6 +193,15 @@ def build_drive_folder_url(folder_id: str) -> str:
     return f"https://drive.google.com/drive/folders/{folder_id}"
 
 
+def build_document_paths(year: int, document_folder_name: str) -> dict[str, str]:
+    document_path = f"DIGEMID/01_ALERTAS/{year}/{document_folder_name}"
+    return {
+        "planned_document_path": document_path,
+        "planned_original_folder_path": f"{document_path}/00_ORIGINAL",
+        "planned_manifest_path": f"{document_path}/99_MANIFEST/manifest.json",
+    }
+
+
 def drive_get_file(service, file_id: str) -> dict:
     return (
         service.files()
@@ -229,13 +238,21 @@ def drive_find_child(service, parent_id: str, name: str, mime_type: str | None =
     return files[0] if files else None
 
 
-def drive_ensure_folder(service, parent_id: str, folder_name: str, apply_changes: bool, operations: list[dict]) -> dict:
+def drive_ensure_folder(
+    service,
+    parent_id: str,
+    folder_name: str,
+    apply_changes: bool,
+    operations: list[dict],
+    planned_path: str | None = None,
+) -> dict:
     if not parent_id:
         operations.append(
             {
                 "action": "create_folder",
                 "folder_name": folder_name,
                 "parent_id": None,
+                "planned_path": planned_path,
             }
         )
         return {
@@ -254,6 +271,7 @@ def drive_ensure_folder(service, parent_id: str, folder_name: str, apply_changes
                 "folder_name": folder_name,
                 "folder_id": existing.get("id"),
                 "parent_id": parent_id,
+                "planned_path": planned_path,
             }
         )
         return existing
@@ -263,6 +281,7 @@ def drive_ensure_folder(service, parent_id: str, folder_name: str, apply_changes
             "action": "create_folder",
             "folder_name": folder_name,
             "parent_id": parent_id,
+            "planned_path": planned_path,
         }
     )
     if not apply_changes:
@@ -289,13 +308,22 @@ def drive_ensure_folder(service, parent_id: str, folder_name: str, apply_changes
     )
 
 
-def ensure_folder_path(service, root_folder_id: str, year: int, document_folder_name: str, apply_changes: bool, operations: list[dict]) -> tuple[dict, dict]:
+def ensure_folder_path(
+    service,
+    root_folder_id: str,
+    year: int,
+    document_folder_name: str,
+    apply_changes: bool,
+    operations: list[dict],
+    planned_paths: dict[str, str],
+) -> tuple[dict, dict]:
     alertas_folder = drive_ensure_folder(
         service,
         root_folder_id,
         "01_ALERTAS",
         apply_changes,
         operations,
+        planned_path="DIGEMID/01_ALERTAS",
     )
     year_folder = drive_ensure_folder(
         service,
@@ -303,6 +331,7 @@ def ensure_folder_path(service, root_folder_id: str, year: int, document_folder_
         str(year),
         apply_changes,
         operations,
+        planned_path=f"DIGEMID/01_ALERTAS/{year}",
     )
     document_folder = drive_ensure_folder(
         service,
@@ -310,17 +339,25 @@ def ensure_folder_path(service, root_folder_id: str, year: int, document_folder_
         document_folder_name,
         apply_changes,
         operations,
+        planned_path=planned_paths["planned_document_path"],
     )
 
     subfolders = {}
     current_parent = document_folder["id"]
     for subfolder_name in SUBFOLDERS:
+        if subfolder_name == "00_ORIGINAL":
+            planned_subfolder_path = planned_paths["planned_original_folder_path"]
+        elif subfolder_name == "99_MANIFEST":
+            planned_subfolder_path = planned_paths["planned_manifest_path"].rsplit("/", 1)[0]
+        else:
+            planned_subfolder_path = f"{planned_paths['planned_document_path']}/{subfolder_name}"
         subfolders[subfolder_name] = drive_ensure_folder(
             service,
             current_parent,
             subfolder_name,
             apply_changes,
             operations,
+            planned_path=planned_subfolder_path,
         )
         current_parent = document_folder["id"]
 
@@ -334,6 +371,7 @@ def drive_copy_file(
     target_name: str,
     apply_changes: bool,
     operations: list[dict],
+    planned_path: str | None = None,
 ) -> dict:
     if not target_folder_id:
         operations.append(
@@ -342,6 +380,7 @@ def drive_copy_file(
                 "source_file_id": source_file_id,
                 "target_folder_id": None,
                 "file_name": target_name,
+                "planned_path": planned_path,
             }
         )
         return {
@@ -363,6 +402,7 @@ def drive_copy_file(
                 "target_folder_id": target_folder_id,
                 "file_name": target_name,
                 "file_id": existing.get("id"),
+                "planned_path": planned_path,
             }
         )
         return existing
@@ -373,6 +413,7 @@ def drive_copy_file(
             "source_file_id": source_file_id,
             "target_folder_id": target_folder_id,
             "file_name": target_name,
+            "planned_path": planned_path,
         }
     )
     if not apply_changes:
@@ -405,6 +446,7 @@ def drive_upsert_json_file(
     payload: dict,
     apply_changes: bool,
     operations: list[dict],
+    planned_path: str | None = None,
 ) -> dict:
     if not folder_id:
         operations.append(
@@ -412,6 +454,7 @@ def drive_upsert_json_file(
                 "action": "create_manifest",
                 "target_folder_id": None,
                 "file_name": file_name,
+                "planned_path": planned_path,
             }
         )
         return {
@@ -434,6 +477,7 @@ def drive_upsert_json_file(
                 "target_folder_id": folder_id,
                 "file_name": file_name,
                 "file_id": existing.get("id"),
+                "planned_path": planned_path,
             }
         )
         if not apply_changes:
@@ -459,6 +503,7 @@ def drive_upsert_json_file(
             "action": "create_manifest",
             "target_folder_id": folder_id,
             "file_name": file_name,
+            "planned_path": planned_path,
         }
     )
     if not apply_changes:
@@ -758,14 +803,29 @@ def write_report_files(mode: str, report_payload: dict):
         lines.append(f"### {item['document_key']}")
         lines.append(f"- Status: `{item['status']}`")
         lines.append(f"- Year: `{item.get('year')}`")
+        lines.append(f"- Title: `{item.get('title') or ''}`")
         lines.append(f"- Original drive_file_id: `{item.get('original_drive_file_id')}`")
+        lines.append(f"- Planned document path: `{item.get('planned_document_path') or ''}`")
+        lines.append(f"- Planned PDF name: `{item.get('planned_pdf_name') or ''}`")
+        lines.append(f"- Planned manifest path: `{item.get('planned_manifest_path') or ''}`")
         lines.append(f"- Document folder id: `{item.get('document_folder_id') or 'pending/dry-run'}`")
+        if mode == "dry-run":
+            lines.append(
+                "- Nota: En dry-run los IDs reales de carpetas nuevas pueden aparecer como pending/null porque no se crean carpetas."
+            )
         if item.get("error"):
             lines.append(f"- Error: `{item['error']}`")
         lines.append("- Planned operations:")
         for op in item.get("operations", []):
             op_parts = [op.get("action", "unknown")]
-            for key in ("folder_name", "file_name", "asset_tipo", "asset_subtipo", "drive_file_id"):
+            for key in (
+                "folder_name",
+                "file_name",
+                "asset_tipo",
+                "asset_subtipo",
+                "drive_file_id",
+                "planned_path",
+            ):
                 if op.get(key):
                     op_parts.append(f"{key}={op[key]}")
             lines.append(f"  - {'; '.join(op_parts)}")
@@ -788,6 +848,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
     year = infer_year(row)
     document_folder_name = make_document_folder_name(document_key)
     copied_pdf_name = make_pdf_copy_name(row)
+    planned_paths = build_document_paths(year, document_folder_name)
     migrated_at_iso = datetime.now(timezone.utc).isoformat()
 
     original_drive_file = drive_get_file(service, row["drive_file_id"])
@@ -798,6 +859,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         document_folder_name,
         apply_changes,
         operations,
+        planned_paths,
     )
     original_subfolder = subfolders["00_ORIGINAL"]
     manifest_subfolder = subfolders["99_MANIFEST"]
@@ -809,6 +871,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         copied_pdf_name,
         apply_changes,
         operations,
+        planned_path=f"{planned_paths['planned_original_folder_path']}/{copied_pdf_name}",
     )
     manifest_payload = build_manifest(
         row,
@@ -825,6 +888,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         manifest_payload,
         apply_changes,
         operations,
+        planned_path=planned_paths["planned_manifest_path"],
     )
 
     existing_assets = get_existing_assets(supabase, row["id"])
@@ -873,6 +937,10 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         "status": "applied" if apply_changes else "planned",
         "title": row.get("title"),
         "original_drive_file_id": row.get("drive_file_id"),
+        "planned_document_path": planned_paths["planned_document_path"],
+        "planned_original_folder_path": planned_paths["planned_original_folder_path"],
+        "planned_manifest_path": planned_paths["planned_manifest_path"],
+        "planned_pdf_name": copied_pdf_name,
         "document_folder_id": document_folder.get("id"),
         "copied_pdf_drive_file_id": copied_pdf.get("id"),
         "manifest_file_id": manifest_file.get("id"),

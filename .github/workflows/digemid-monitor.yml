@@ -58,3 +58,49 @@ jobs:
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
           GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json
+
+      - name: Validar variables para migracion Drive
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
+          GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json
+        run: |
+          set -euo pipefail
+
+          required_vars=(
+            SUPABASE_URL
+            SUPABASE_SERVICE_ROLE_KEY
+            GOOGLE_DRIVE_FOLDER_ID
+            GOOGLE_OAUTH_CLIENT_JSON_PATH
+            GOOGLE_OAUTH_TOKEN_PATH
+          )
+
+          for var_name in "${required_vars[@]}"; do
+            if [[ -z "${!var_name:-}" ]]; then
+              echo "Falta variable critica para migracion Drive: ${var_name}" >&2
+              exit 1
+            fi
+          done
+
+          if [[ ! -f "$GOOGLE_OAUTH_CLIENT_JSON_PATH" ]]; then
+            echo "No existe GOOGLE_OAUTH_CLIENT_JSON_PATH: $GOOGLE_OAUTH_CLIENT_JSON_PATH" >&2
+            exit 1
+          fi
+
+          if [[ ! -f "$GOOGLE_OAUTH_TOKEN_PATH" ]]; then
+            echo "No existe GOOGLE_OAUTH_TOKEN_PATH: $GOOGLE_OAUTH_TOKEN_PATH" >&2
+            exit 1
+          fi
+
+      - name: Migrar alertas pendientes a estructura Drive
+        run: |
+          python scripts/migrate_drive_digemid_structure.py --source-type alerta --apply --pending-only --limit 5
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
+          GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json

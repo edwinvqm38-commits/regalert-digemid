@@ -696,7 +696,7 @@ def make_pdf_asset_payload(
         "width_px": None,
         "height_px": None,
         "page_number": None,
-        "bbox": None,
+        "bbox": {},
         "metadatos": {
             "original_drive_file_id": row.get("drive_file_id"),
             "document_folder_id": document_folder_id,
@@ -725,7 +725,7 @@ def make_manifest_asset_payload(row: dict, manifest_file: dict) -> dict:
         "width_px": None,
         "height_px": None,
         "page_number": None,
-        "bbox": None,
+        "bbox": {},
         "metadatos": {
             "migration_version": MIGRATION_VERSION,
         },
@@ -1051,3 +1051,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

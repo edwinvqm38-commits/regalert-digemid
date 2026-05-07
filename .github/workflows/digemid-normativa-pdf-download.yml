@@ -1,0 +1,99 @@
+name: DIGEMID - Normativa PDF Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecucion"
+        required: true
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - apply
+      document_key:
+        description: "Document key normativo a procesar"
+        required: false
+        default: "RM-554-2022-MINSA"
+        type: string
+      force:
+        description: "Forzar reproceso aunque no este en pending_download"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  normativa-pdf-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Preparar credenciales Google OAuth
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/google"
+
+          cat > "$RUNNER_TEMP/google/google_oauth_client.json" <<'EOF'
+          ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
+          EOF
+
+          cat > "$RUNNER_TEMP/google/google_oauth_token.json" <<'EOF'
+          ${{ secrets.GOOGLE_OAUTH_TOKEN_JSON }}
+          EOF
+
+      - name: Ejecutar descarga normativa PDF a Drive
+        shell: bash
+        env:
+          GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
+          GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/download_normativa_pdfs_to_drive.py --document-key "${{ inputs.document_key }}")
+
+          if [[ "${{ inputs.mode }}" == "apply" ]]; then
+            CMD+=(--apply)
+          else
+            CMD+=(--dry-run)
+          fi
+
+          if [[ "${{ inputs.force }}" == "true" ]]; then
+            CMD+=(--force)
+          fi
+
+          printf 'Ejecutando: %q ' "${CMD[@]}"
+          printf '\n'
+          "${CMD[@]}"
+
+      - name: Subir reportes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: normativa-pdf-download
+          path: |
+            reports/normativa_pdf_download_dry_run.md
+            reports/normativa_pdf_download_result.md
+            reports/normativa_pdf_download_result.json
+          if-no-files-found: error

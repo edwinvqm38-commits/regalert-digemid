@@ -115,6 +115,10 @@ def simplify_page_text(raw_text: str) -> str:
     return normalize_text(normalize_page_text(raw_text))
 
 
+def has_useful_text(text: str) -> bool:
+    return bool(normalize_text(text))
+
+
 def deep_merge_dicts(base: dict, patch: dict) -> dict:
     result = deepcopy(base)
     for key, value in patch.items():
@@ -326,8 +330,14 @@ def process_asset(
         "asset_subtipo": asset.get("asset_subtipo"),
         "file_name": asset.get("file_name"),
         "drive_file_id": asset.get("drive_file_id"),
+        "status": "pending",
+        "requires_ocr": False,
+        "ocr_reason": None,
         "pdf_size_bytes": None,
         "pages_total": 0,
+        "pages_with_text": 0,
+        "pages_without_text": 0,
+        "skipped_empty_pages": 0,
         "pages_inserted": 0,
         "pages_updated": 0,
         "pages_reused": 0,
@@ -340,6 +350,7 @@ def process_asset(
     drive_file_id = normalize_text(asset.get("drive_file_id"))
     if not drive_file_id:
         asset_result["errors"].append("Asset sin drive_file_id")
+        asset_result["status"] = "error"
         return asset_result
 
     pdf_bytes = download_drive_file_bytes(service, drive_file_id)
@@ -355,6 +366,24 @@ def process_asset(
         source_asset_subtipo=source_asset_subtipo,
     )
     asset_result["pages_total"] = len(pages)
+    asset_result["pages_with_text"] = sum(
+        1 for page in pages if has_useful_text(page["text_normalized"])
+    )
+    asset_result["pages_without_text"] = (
+        asset_result["pages_total"] - asset_result["pages_with_text"]
+    )
+    asset_result["total_text_chars"] = sum(
+        len(page["text_normalized"])
+        for page in pages
+        if has_useful_text(page["text_normalized"])
+    )
+
+    if asset_result["pages_total"] > 0 and asset_result["total_text_chars"] == 0:
+        asset_result["requires_ocr"] = True
+        asset_result["ocr_reason"] = "PDF sin capa de texto extraible"
+        asset_result["status"] = "ocr_required"
+        asset_result["skipped_empty_pages"] = asset_result["pages_total"]
+        return asset_result
 
     existing_pages = get_existing_pages_by_asset(
         supabase=supabase,
@@ -363,6 +392,18 @@ def process_asset(
     )
 
     for page in pages:
+        if not has_useful_text(page["text_normalized"]):
+            asset_result["skipped_empty_pages"] += 1
+            operations.append(
+                {
+                    "action": "skip_empty_page",
+                    "source_asset_id": asset["id"],
+                    "page_number": page["page_number"],
+                    "reason": "empty_text",
+                }
+            )
+            continue
+
         page_number = page["page_number"]
         payload = build_page_payload(norma_id=norma_id, asset=asset, page=page)
         existing = existing_pages.get(page_number)
@@ -375,7 +416,6 @@ def process_asset(
                 force=force,
                 operations=operations,
             )
-            asset_result["total_text_chars"] += len(page["text_normalized"])
             if action == "inserted":
                 asset_result["pages_inserted"] += 1
             elif action == "updated":
@@ -391,6 +431,15 @@ def process_asset(
                 f"pagina {page_number}: {exc}"
             )
 
+    if asset_result["errors"]:
+        asset_result["status"] = "error"
+    elif asset_result["pages_with_text"] > 0 and asset_result["pages_without_text"] > 0:
+        asset_result["requires_ocr"] = True
+        asset_result["ocr_reason"] = "PDF con paginas mixtas: algunas sin texto extraible"
+        asset_result["status"] = "partial_text"
+    else:
+        asset_result["status"] = "text_extracted"
+
     return asset_result
 
 
@@ -400,24 +449,32 @@ def summarize_results(asset_results: list[dict]) -> dict:
         "pdf_assets_processed": 0,
         "total_pages_extracted": 0,
         "total_text_chars": 0,
+        "pages_with_text": 0,
+        "pages_without_text": 0,
+        "skipped_empty_pages": 0,
         "pages_inserted": 0,
         "pages_updated": 0,
         "pages_reused": 0,
         "pages_planned_insert": 0,
         "pages_planned_update": 0,
+        "requires_ocr": False,
         "errors_count": 0,
     }
     for item in asset_results:
         has_errors = bool(item.get("errors"))
-        if not has_errors:
+        if not has_errors and item.get("status") != "ocr_required":
             summary["pdf_assets_processed"] += 1
         summary["total_pages_extracted"] += item.get("pages_total", 0)
         summary["total_text_chars"] += item.get("total_text_chars", 0)
+        summary["pages_with_text"] += item.get("pages_with_text", 0)
+        summary["pages_without_text"] += item.get("pages_without_text", 0)
+        summary["skipped_empty_pages"] += item.get("skipped_empty_pages", 0)
         summary["pages_inserted"] += item.get("pages_inserted", 0)
         summary["pages_updated"] += item.get("pages_updated", 0)
         summary["pages_reused"] += item.get("pages_reused", 0)
         summary["pages_planned_insert"] += item.get("pages_planned_insert", 0)
         summary["pages_planned_update"] += item.get("pages_planned_update", 0)
+        summary["requires_ocr"] = summary["requires_ocr"] or bool(item.get("requires_ocr"))
         summary["errors_count"] += len(item.get("errors", []))
     return summary
 
@@ -430,11 +487,15 @@ def build_norma_update_payload(norma_row: dict, summary: dict, text_extracted_at
         "pdf_assets_processed": summary["pdf_assets_processed"],
         "total_pages_extracted": summary["total_pages_extracted"],
         "total_text_chars": summary["total_text_chars"],
+        "pages_with_text": summary["pages_with_text"],
+        "pages_without_text": summary["pages_without_text"],
+        "ocr_required": summary["requires_ocr"],
         "errors_count": summary["errors_count"],
     }
     merged_raw = deep_merge_dicts(existing_raw, raw_patch)
     return {
         "raw": merged_raw,
+        "ocr_required": summary["requires_ocr"],
         "process_status": status,
         "updated_at": text_extracted_at,
     }
@@ -458,6 +519,10 @@ def write_report_files(mode: str, report_payload: dict):
         f"- PDF assets processed ok: **{summary.get('pdf_assets_processed', 0)}**",
         f"- Total pages extracted: **{summary.get('total_pages_extracted', 0)}**",
         f"- Total text chars: **{summary.get('total_text_chars', 0)}**",
+        f"- Pages with text / without text: **{summary.get('pages_with_text', 0)} / {summary.get('pages_without_text', 0)}**",
+        f"- Skipped empty pages: **{summary.get('skipped_empty_pages', 0)}**",
+        f"- Requires OCR: `{summary.get('requires_ocr', False)}`",
+        f"- Planned process_status: `{report_payload.get('planned_process_status')}`",
         f"- Pages inserted/updated/reused: **{summary.get('pages_inserted', 0)} / {summary.get('pages_updated', 0)} / {summary.get('pages_reused', 0)}**",
         f"- Planned inserts/updates: **{summary.get('pages_planned_insert', 0)} / {summary.get('pages_planned_update', 0)}**",
         f"- Errors: **{summary.get('errors_count', 0)}**",
@@ -472,8 +537,15 @@ def write_report_files(mode: str, report_payload: dict):
         )
         lines.append(f"- file_name: `{item.get('file_name') or ''}`")
         lines.append(f"- drive_file_id: `{item.get('drive_file_id') or ''}`")
+        lines.append(f"- status: `{item.get('status')}`")
+        lines.append(f"- requires_ocr: `{item.get('requires_ocr')}`")
+        lines.append(f"- ocr_reason: `{item.get('ocr_reason') or ''}`")
         lines.append(f"- pdf_size_bytes: `{item.get('pdf_size_bytes')}`")
         lines.append(f"- pages_total: `{item.get('pages_total')}`")
+        lines.append(
+            f"- pages_with_text / pages_without_text: `{item.get('pages_with_text')}` / `{item.get('pages_without_text')}`"
+        )
+        lines.append(f"- skipped_empty_pages: `{item.get('skipped_empty_pages')}`")
         lines.append(
             f"- pages inserted/updated/reused: `{item.get('pages_inserted')}` / `{item.get('pages_updated')}` / `{item.get('pages_reused')}`"
         )
@@ -543,8 +615,22 @@ def process_norma(service, supabase, norma_row: dict, apply_changes: bool, force
 
     summary = summarize_results(asset_results)
     text_extracted_at = datetime.now(timezone.utc).isoformat()
-    all_assets_ok = summary["errors_count"] == 0 and summary["pdf_assets_processed"] == summary["pdf_assets_total"]
-    process_status = "text_extracted" if all_assets_ok else "text_extraction_partial"
+    assets_with_text = sum(1 for item in asset_results if item.get("pages_with_text", 0) > 0)
+    assets_without_text = sum(
+        1
+        for item in asset_results
+        if item.get("pages_total", 0) > 0 and item.get("total_text_chars", 0) == 0
+    )
+    all_assets_ok = summary["errors_count"] == 0 and assets_with_text == summary["pdf_assets_total"]
+
+    if summary["total_text_chars"] == 0 and summary["total_pages_extracted"] > 0:
+        process_status = "ocr_required"
+    elif assets_with_text > 0 and (assets_without_text > 0 or summary["errors_count"] > 0):
+        process_status = "text_extraction_partial"
+    elif all_assets_ok:
+        process_status = "text_extracted"
+    else:
+        process_status = "text_extraction_partial"
 
     operations.append(
         {
@@ -569,6 +655,7 @@ def process_norma(service, supabase, norma_row: dict, apply_changes: bool, force
         "title": norma_row.get("titulo"),
         "force": force,
         "mode": "apply" if apply_changes else "dry-run",
+        "planned_process_status": process_status,
         "summary": summary,
         "assets": asset_results,
         "operations": operations,

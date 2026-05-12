@@ -21,3 +21,9 @@ supabase/.temp/tmp/
 # Permitir semillas versionadas del proyecto
 !data/*.json
 !data/**/*.json
+
+# Local DIGEMID generated files
+.secrets/
+.tessdata/
+exports/
+reports/

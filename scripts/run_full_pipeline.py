@@ -48,17 +48,17 @@ def run_step(name: str, command: list[str], failed_steps: list[str]) -> None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--enrich-limit", type=int, default=50)
-    parser.add_argument("--drive-limit", type=int, default=50)
+    parser.add_argument("--storage-backup-limit", type=int, default=50)
     parser.add_argument("--text-limit", type=int, default=50)
     parser.add_argument("--layout-limit", type=int, default=50)
     parser.add_argument("--structured-limit", type=int, default=50)
     parser.add_argument("--skip-monitor", action="store_true")
     parser.add_argument("--skip-enrich", action="store_true")
-    parser.add_argument("--skip-drive", action="store_true")
+    parser.add_argument("--skip-storage-backup", action="store_true")
     parser.add_argument("--skip-text-extract", action="store_true")
     parser.add_argument("--skip-layout-extract", action="store_true")
     parser.add_argument("--skip-structured-extract", action="store_true")
-    parser.add_argument("--drive-dry-run", action="store_true")
+    parser.add_argument("--storage-backup-dry-run", action="store_true")
     args = parser.parse_args()
 
     python = sys.executable
@@ -85,20 +85,20 @@ def main():
             failed_steps,
         )
 
-    if not args.skip_drive:
-        drive_command = [
+    if not args.skip_storage_backup:
+        backup_command = [
             python,
-            "scripts/upload_pdfs_to_drive.py",
+            "scripts/backup_pdfs_to_storage.py",
             "--limit",
-            str(args.drive_limit),
+            str(args.storage_backup_limit),
         ]
 
-        if args.drive_dry_run:
-            drive_command.append("--dry-run")
+        if args.storage_backup_dry_run:
+            backup_command.append("--dry-run")
 
         run_step(
-            "Subir PDFs pendientes a Google Drive",
-            drive_command,
+            "Respaldar PDFs pendientes en Supabase Storage",
+            backup_command,
             failed_steps,
         )
 

@@ -60,7 +60,7 @@ def get_pending_documents(supabase, limit: int) -> list[dict]:
         .eq("source_type", "alerta")
         .eq("has_file", True)
         .not_.is_("file_url", "null")
-        .is_("storage_backup_path", "null")
+        .is_("file_storage_path", "null")
         .order("published_date", desc=True)
         .limit(limit)
         .execute()
@@ -134,7 +134,7 @@ def main():
                 )
 
             supabase.table(TABLE_NAME).update(
-                {"storage_backup_path": object_path}
+                {"file_storage_path": object_path}
             ).eq("id", doc["id"]).execute()
 
             logger.info("Respaldado %s -> %s", document_key, object_path)

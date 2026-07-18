@@ -59,3 +59,33 @@ class NotifyAgent:
         response.raise_for_status()
 
         logger.info("Notificación enviada a Telegram.")
+
+    def send_pipeline_failure_alert(self, failed_steps: list[str]) -> None:
+        """Notifica cuando uno o más pasos del pipeline fallan."""
+        if not failed_steps:
+            return
+
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+
+        lines = [
+            "⚠️ <b>Pipeline DIGEMID: pasos fallidos</b>",
+            "",
+        ]
+        for step_name in failed_steps:
+            lines.append(f"• {html.escape(step_name)}")
+        lines.append("")
+        lines.append("Revisar logs en GitHub Actions.")
+
+        payload = {
+            "chat_id": self.chat_id,
+            "text": "\n".join(lines),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=20)
+            response.raise_for_status()
+            logger.info("Alerta de fallo enviada a Telegram.")
+        except Exception:
+            logger.exception("No se pudo enviar la alerta de fallo a Telegram.")

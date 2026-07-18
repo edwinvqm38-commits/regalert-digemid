@@ -34,19 +34,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Preparar credenciales Google OAuth
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/google"
-
-          cat > "$RUNNER_TEMP/google/google_oauth_client.json" <<'EOF'
-          ${{ secrets.GOOGLE_OAUTH_CLIENT_JSON }}
-          EOF
-
-          cat > "$RUNNER_TEMP/google/google_oauth_token.json" <<'EOF'
-          ${{ secrets.GOOGLE_OAUTH_TOKEN_JSON }}
-          EOF
-
       - name: Ejecutar pipeline completo DIGEMID
         run: |
           python scripts/run_full_pipeline.py
@@ -55,52 +42,3 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
-          GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json
-
-      - name: Validar variables para migracion Drive
-        shell: bash
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
-          GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json
-        run: |
-          set -euo pipefail
-
-          required_vars=(
-            SUPABASE_URL
-            SUPABASE_SERVICE_ROLE_KEY
-            GOOGLE_DRIVE_FOLDER_ID
-            GOOGLE_OAUTH_CLIENT_JSON_PATH
-            GOOGLE_OAUTH_TOKEN_PATH
-          )
-
-          for var_name in "${required_vars[@]}"; do
-            if [[ -z "${!var_name:-}" ]]; then
-              echo "Falta variable critica para migracion Drive: ${var_name}" >&2
-              exit 1
-            fi
-          done
-
-          if [[ ! -f "$GOOGLE_OAUTH_CLIENT_JSON_PATH" ]]; then
-            echo "No existe GOOGLE_OAUTH_CLIENT_JSON_PATH: $GOOGLE_OAUTH_CLIENT_JSON_PATH" >&2
-            exit 1
-          fi
-
-          if [[ ! -f "$GOOGLE_OAUTH_TOKEN_PATH" ]]; then
-            echo "No existe GOOGLE_OAUTH_TOKEN_PATH: $GOOGLE_OAUTH_TOKEN_PATH" >&2
-            exit 1
-          fi
-
-      - name: Migrar alertas pendientes a estructura Drive
-        run: |
-          python scripts/migrate_drive_digemid_structure.py --source-type alerta --apply --pending-only --limit 5
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
-          GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
-          GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json

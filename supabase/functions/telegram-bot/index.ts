@@ -90,6 +90,24 @@ function isAllowed(chatId: string): boolean {
   return allowed.includes(chatId);
 }
 
+const KEYBOARD_LABEL_COMMANDS: Record<string, string> = {
+  "🚨 Últimas alertas": "/ultimas",
+  "🔎 Buscar": "/buscar",
+  "🤖 Consulta IA": "/consulta",
+  "ℹ️ Ayuda": "/ayuda",
+};
+
+function persistentKeyboard() {
+  return {
+    keyboard: [
+      ["🚨 Últimas alertas", "🔎 Buscar"],
+      ["🤖 Consulta IA", "ℹ️ Ayuda"],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
+}
+
 function mainMenu() {
   return {
     inline_keyboard: [
@@ -712,22 +730,41 @@ async function callClaude(userContent: string): Promise<string> {
   return textBlock?.text ?? "";
 }
 
-async function answerConsulta(question: string): Promise<string> {
+function consultaSources(chunks: any[]) {
+  const seen = new Set<string>();
+  const sources: { documentKey: string; url: string }[] = [];
+
+  for (const chunk of chunks) {
+    if (!chunk.detail_url || seen.has(chunk.detail_url)) continue;
+    seen.add(chunk.detail_url);
+    sources.push({ documentKey: chunk.document_key, url: chunk.detail_url });
+  }
+
+  return sources;
+}
+
+async function answerConsulta(
+  question: string,
+): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
   const chunks = await searchConsultaChunks(question);
 
   if (!chunks.length) {
-    return "No encontré documentos relacionados con esa consulta en la base de datos.";
+    return {
+      answer: "No encontré documentos relacionados con esa consulta en la base de datos.",
+      sources: [],
+    };
   }
 
   const context = buildConsultaContext(chunks);
   const userContent = `Contexto:\n\n${context}\n\nPregunta: ${question}`;
+  const sources = consultaSources(chunks);
 
   if (DEEPSEEK_API_KEY) {
-    return await callDeepseek(userContent);
+    return { answer: await callDeepseek(userContent), sources };
   }
 
   if (ANTHROPIC_API_KEY) {
-    return await callClaude(userContent);
+    return { answer: await callClaude(userContent), sources };
   }
 
   throw new Error("Falta configurar DEEPSEEK_API_KEY o ANTHROPIC_API_KEY");
@@ -755,6 +792,11 @@ async function handleCommand(
 ) {
   const trimmed = text.trim();
 
+  const mappedCommand = KEYBOARD_LABEL_COMMANDS[trimmed];
+  if (mappedCommand) {
+    return await handleCommand(chatId, userId, mappedCommand);
+  }
+
   if (trimmed === "/start" || trimmed === "/menu") {
     await logConsulta({
       chatId,
@@ -762,6 +804,10 @@ async function handleCommand(
       command: trimmed === "/menu" ? "/menu" : "/start",
       status: "ok",
     });
+
+    if (trimmed === "/start") {
+      await sendMessage(chatId, "👋 Bienvenido a RegAlert DIGEMID.", persistentKeyboard());
+    }
 
     return await sendMessage(
       chatId,
@@ -945,18 +991,28 @@ async function handleCommand(
     }
 
     try {
-      const answer = await answerConsulta(question);
+      const { answer, sources } = await answerConsulta(question);
 
       await logConsulta({
         chatId,
         userId,
         command: "/consulta",
         queryText: question,
-        resultCount: answer ? 1 : 0,
+        resultCount: sources.length,
         status: "ok",
       });
 
-      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}`);
+      const sourceButtons = sources.length
+        ? {
+          inline_keyboard: sources
+            .slice(0, 3)
+            .map((source) => [
+              { text: `📄 Ver fuente ${source.documentKey}`, url: source.url },
+            ]),
+        }
+        : undefined;
+
+      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}`, sourceButtons);
     } catch (error) {
       console.error("CONSULTA_ERROR:", error);
 

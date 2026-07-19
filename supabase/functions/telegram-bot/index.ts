@@ -12,6 +12,16 @@ const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+const ADMIN_CHAT_IDS = Deno.env.get("ADMIN_CHAT_IDS") ?? "";
+
+const NIVEL_LIMITES_DIARIOS: Record<string, number | null> = {
+  gratis: 5,
+  basico: 30,
+  consultoria: 100,
+  empresarial: null,
+};
+
+const LIMITE_DIARIO_GLOBAL = 300;
 
 const CONSULTA_SYSTEM_PROMPT = `Eres un asistente que responde preguntas sobre alertas y \
 normativa de DIGEMID (Peru) usando UNICAMENTE el texto de los documentos que \
@@ -44,6 +54,7 @@ type TelegramUpdate = {
     message_id: number;
     chat: {
       id: number | string;
+      type?: string;
       first_name?: string;
       username?: string;
     };
@@ -65,6 +76,7 @@ type TelegramUpdate = {
       message_id: number;
       chat: {
         id: number | string;
+        type?: string;
       };
     };
     data?: string;
@@ -99,6 +111,15 @@ function isAllowed(chatId: string): boolean {
     .filter((item: string) => item.length > 0);
 
   return allowed.includes(chatId);
+}
+
+function isAdmin(chatId: string): boolean {
+  const admins = ADMIN_CHAT_IDS
+    .split(",")
+    .map((item: string) => item.trim())
+    .filter((item: string) => item.length > 0);
+
+  return admins.includes(chatId);
 }
 
 const KEYBOARD_LABEL_COMMANDS: Record<string, string> = {
@@ -206,6 +227,16 @@ async function editMessage(
     disable_web_page_preview: false,
     reply_markup: replyMarkup,
   });
+}
+
+async function getBotIdentity(): Promise<{ username: string; id: number } | null> {
+  try {
+    const response = await fetch(`${TELEGRAM_API}/getMe`);
+    const data = await response.json();
+    return data.ok ? { username: data.result.username, id: data.result.id } : null;
+  } catch {
+    return null;
+  }
 }
 
 async function answerCallback(callbackId: string) {
@@ -770,6 +801,48 @@ async function suggestSimilarAlerts(question: string, limit = 3) {
   }[];
 }
 
+function getLimaStartOfDayIso(): string {
+  // Lima (America/Lima) es UTC-5 todo el año, sin horario de verano.
+  const { isoDate } = getLimaDateParts();
+  return `${isoDate}T05:00:00.000Z`;
+}
+
+async function contarConsultasHoy(chatId?: string): Promise<number> {
+  let query = supabase
+    .from("digemid_bot_consultas")
+    .select("id", { count: "exact", head: true })
+    .eq("command", "/consulta")
+    .gte("created_at", getLimaStartOfDayIso());
+
+  if (chatId) {
+    query = query.eq("telegram_chat_id", chatId);
+  }
+
+  const { count, error } = await query;
+
+  if (error) throw error;
+
+  return count ?? 0;
+}
+
+async function getNivelUsuario(chatId: string): Promise<string> {
+  const { data, error } = await supabase
+    .from("digemid_suscripciones")
+    .select("nivel, estado, fecha_fin")
+    .eq("telegram_chat_id", chatId)
+    .maybeSingle();
+
+  if (error || !data || data.estado !== "activo") {
+    return "gratis";
+  }
+
+  if (data.fecha_fin && data.fecha_fin < getLimaDateParts().isoDate) {
+    return "gratis";
+  }
+
+  return data.nivel;
+}
+
 async function answerConsulta(
   question: string,
 ): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
@@ -825,12 +898,13 @@ async function handleCommand(
   chatId: string,
   userId: string | undefined,
   text: string,
+  chatType: string,
 ) {
   const trimmed = text.trim();
 
   const mappedCommand = KEYBOARD_LABEL_COMMANDS[trimmed];
   if (mappedCommand) {
-    return await handleCommand(chatId, userId, mappedCommand);
+    return await handleCommand(chatId, userId, mappedCommand, chatType);
   }
 
   if (trimmed === "/start" || trimmed === "/menu") {
@@ -1018,16 +1092,8 @@ async function handleCommand(
   if (trimmed === "/chatid") {
     await logConsulta({ chatId, userId, command: "/chatid", status: "ok" });
 
-    let botIdentity = "desconocido";
-    try {
-      const meResponse = await fetch(`${TELEGRAM_API}/getMe`);
-      const meData = await meResponse.json();
-      if (meData.ok) {
-        botIdentity = `@${meData.result.username} (id ${meData.result.id})`;
-      }
-    } catch {
-      // ignore identity lookup failures, chat_id is still useful
-    }
+    const identity = await getBotIdentity();
+    const botIdentity = identity ? `@${identity.username} (id ${identity.id})` : "desconocido";
 
     return await sendMessage(
       chatId,
@@ -1035,7 +1101,91 @@ async function handleCommand(
     );
   }
 
+  if (trimmed.startsWith("/activar")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const parts = trimmed.split(/\s+/).slice(1);
+    const [targetChatId, nivel, diasStr, metodoPago] = parts;
+
+    if (!targetChatId || !nivel || !diasStr) {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/activar chat_id nivel dias [metodo_pago]</code>\n\nEjemplo:\n<code>/activar 123456789 basico 30 yape</code>\n\nNiveles: gratis, basico, consultoria, empresarial",
+      );
+    }
+
+    if (!(nivel in NIVEL_LIMITES_DIARIOS)) {
+      return await sendMessage(chatId, "⚠️ Nivel inválido. Usa: gratis, basico, consultoria o empresarial.");
+    }
+
+    const dias = parseInt(diasStr, 10);
+
+    if (!Number.isFinite(dias) || dias <= 0) {
+      return await sendMessage(chatId, "⚠️ Los días deben ser un número entero positivo.");
+    }
+
+    const { isoDate } = getLimaDateParts();
+    const fechaFin = shiftIsoDate(isoDate, dias);
+
+    const { error } = await supabase.from("digemid_suscripciones").upsert(
+      {
+        telegram_chat_id: targetChatId,
+        nivel,
+        estado: "activo",
+        fecha_inicio: isoDate,
+        fecha_fin: fechaFin,
+        metodo_pago: metodoPago ?? null,
+      },
+      { onConflict: "telegram_chat_id" },
+    );
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al activar: ${escapeHtml(error.message)}`);
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ Activado <b>${escapeHtml(nivel)}</b> para <code>${escapeHtml(targetChatId)}</code> hasta <b>${escapeHtml(fechaFin)}</b>.`,
+    );
+  }
+
+  if (trimmed.startsWith("/desactivar")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const parts = trimmed.split(/\s+/).slice(1);
+    const [targetChatId] = parts;
+
+    if (!targetChatId) {
+      return await sendMessage(chatId, "Uso:\n<code>/desactivar chat_id</code>");
+    }
+
+    const { error } = await supabase
+      .from("digemid_suscripciones")
+      .update({ estado: "cancelado" })
+      .eq("telegram_chat_id", targetChatId);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al desactivar: ${escapeHtml(error.message)}`);
+    }
+
+    return await sendMessage(chatId, `✅ Suscripción de <code>${escapeHtml(targetChatId)}</code> cancelada.`);
+  }
+
   if (trimmed.startsWith("/consulta")) {
+    if (chatType !== "private") {
+      const identity = await getBotIdentity();
+      const link = identity ? `\n\nEscríbeme por privado: https://t.me/${identity.username}` : "";
+
+      return await sendMessage(
+        chatId,
+        `🤖 Las consultas con IA solo funcionan en el chat privado con el bot, para que cada quien vea sus propias respuestas.${link}`,
+      );
+    }
+
     const question = trimmed.replace("/consulta", "").trim();
 
     if (!question) {
@@ -1046,6 +1196,44 @@ async function handleCommand(
     }
 
     try {
+      const nivel = await getNivelUsuario(chatId);
+      const limiteUsuario = NIVEL_LIMITES_DIARIOS[nivel] ?? NIVEL_LIMITES_DIARIOS.gratis;
+
+      const [consultasHoyUsuario, consultasHoyGlobal] = await Promise.all([
+        limiteUsuario === null ? Promise.resolve(0) : contarConsultasHoy(chatId),
+        contarConsultasHoy(),
+      ]);
+
+      if (consultasHoyGlobal >= LIMITE_DIARIO_GLOBAL) {
+        await logConsulta({
+          chatId,
+          userId,
+          command: "/consulta",
+          queryText: question,
+          status: "limite_global",
+        });
+
+        return await sendMessage(
+          chatId,
+          "⚠️ Se alcanzó el límite diario de consultas del sistema. Intenta de nuevo mañana.",
+        );
+      }
+
+      if (limiteUsuario !== null && consultasHoyUsuario >= limiteUsuario) {
+        await logConsulta({
+          chatId,
+          userId,
+          command: "/consulta",
+          queryText: question,
+          status: "limite_usuario",
+        });
+
+        return await sendMessage(
+          chatId,
+          `⚠️ Alcanzaste tu límite diario de <b>${limiteUsuario}</b> consultas (plan <b>${escapeHtml(nivel)}</b>).\n\nEscríbenos si quieres aumentar tu límite diario.`,
+        );
+      }
+
       const { answer, sources } = await answerConsulta(question);
 
       await logConsulta({
@@ -1226,6 +1414,10 @@ serve(async (req: Request) => {
       update.message?.from?.id ?? update.callback_query?.from?.id ?? "",
     );
 
+    const chatType = String(
+      update.message?.chat.type ?? update.callback_query?.message?.chat.type ?? "private",
+    );
+
     if (!chatId) {
       return new Response("Sin chat_id", { status: 200 });
     }
@@ -1243,7 +1435,7 @@ serve(async (req: Request) => {
     }
 
     const text = update.message?.text ?? "/start";
-    await handleCommand(chatId, userId, text);
+    await handleCommand(chatId, userId, text, chatType);
 
     return new Response("OK", { status: 200 });
   } catch (error) {

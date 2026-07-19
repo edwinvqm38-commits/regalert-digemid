@@ -1,7 +1,9 @@
 import logging
+import os
 import sys
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -18,8 +20,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def log_bot_identity():
+    """Identifica que bot esta usando este token (no expone el token, solo su username)."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+
+    if not token:
+        return
+
+    response = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=20)
+
+    if response.ok:
+        bot_info = response.json().get("result", {})
+        logger.info(
+            "Este script usa el bot: @%s (id %s)",
+            bot_info.get("username"),
+            bot_info.get("id"),
+        )
+    else:
+        logger.error("No se pudo identificar el bot: %s", response.text)
+
+
 def main():
     load_dotenv()
+    log_bot_identity()
 
     fake_doc = {
         "document_key": "PRUEBA-000-2026",

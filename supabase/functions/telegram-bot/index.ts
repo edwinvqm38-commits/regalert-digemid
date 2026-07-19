@@ -843,6 +843,76 @@ async function getNivelUsuario(chatId: string): Promise<string> {
   return data.nivel;
 }
 
+function formatResumenUsuarios(totalUsuarios: number, suscripciones: any[]): string {
+  const hoy = getLimaDateParts().isoDate;
+
+  const conteoPorEstado: Record<string, number> = {};
+  const conteoPorNivel: Record<string, number> = {};
+  const pendientes: any[] = [];
+
+  for (const sub of suscripciones) {
+    const vencida = sub.estado === "activo" && sub.fecha_fin && sub.fecha_fin < hoy;
+    const estadoEfectivo = vencida ? "vencido" : sub.estado;
+
+    conteoPorEstado[estadoEfectivo] = (conteoPorEstado[estadoEfectivo] ?? 0) + 1;
+
+    if (estadoEfectivo === "activo") {
+      conteoPorNivel[sub.nivel] = (conteoPorNivel[sub.nivel] ?? 0) + 1;
+    }
+
+    if (estadoEfectivo === "pendiente_pago" || estadoEfectivo === "vencido") {
+      pendientes.push({ ...sub, estadoEfectivo });
+    }
+  }
+
+  const lines = [
+    "👥 <b>Resumen de usuarios</b>",
+    "",
+    `Usuarios que han usado el bot: <b>${totalUsuarios}</b>`,
+    `Suscripciones registradas: <b>${suscripciones.length}</b>`,
+    "",
+    "<b>Por estado</b>",
+    `✅ Activos: ${conteoPorEstado.activo ?? 0}`,
+    `⏳ Pendientes de pago: ${conteoPorEstado.pendiente_pago ?? 0}`,
+    `⚠️ Vencidos: ${conteoPorEstado.vencido ?? 0}`,
+    `🚫 Cancelados: ${conteoPorEstado.cancelado ?? 0}`,
+  ];
+
+  const nivelesPagados = ["basico", "consultoria", "empresarial"].filter(
+    (nivel) => conteoPorNivel[nivel],
+  );
+
+  if (nivelesPagados.length) {
+    lines.push("", "<b>Activos por nivel</b>");
+    for (const nivel of nivelesPagados) {
+      lines.push(`• ${escapeHtml(nivel)}: ${conteoPorNivel[nivel]}`);
+    }
+  }
+
+  lines.push("", "<b>Pendientes de seguimiento</b>");
+
+  if (!pendientes.length) {
+    lines.push("✅ Nadie pendiente de pago o vencido por ahora.");
+  } else {
+    for (const sub of pendientes.slice(0, 20)) {
+      const etiqueta = sub.estadoEfectivo === "vencido" ? "venció" : "pendiente desde";
+      const referencia = sub.telegram_username
+        ? `@${sub.telegram_username}`
+        : sub.telegram_chat_id;
+
+      lines.push(
+        `• <code>${escapeHtml(referencia)}</code> — ${escapeHtml(sub.nivel)} (${etiqueta} ${escapeHtml(sub.fecha_fin ?? "sin fecha")})`,
+      );
+    }
+
+    if (pendientes.length > 20) {
+      lines.push(`… y ${pendientes.length - 20} más.`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 async function answerConsulta(
   question: string,
 ): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
@@ -1149,6 +1219,27 @@ async function handleCommand(
       chatId,
       `✅ Activado <b>${escapeHtml(nivel)}</b> para <code>${escapeHtml(targetChatId)}</code> hasta <b>${escapeHtml(fechaFin)}</b>.`,
     );
+  }
+
+  if (trimmed === "/usuarios") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const [{ count: totalUsuarios }, { data: suscripciones, error: suscripcionesError }] =
+      await Promise.all([
+        supabase.from("digemid_bot_usuarios").select("id", { count: "exact", head: true }),
+        supabase
+          .from("digemid_suscripciones")
+          .select("telegram_chat_id, telegram_username, nivel, estado, fecha_fin")
+          .order("fecha_fin", { ascending: true }),
+      ]);
+
+    if (suscripcionesError) {
+      return await sendMessage(chatId, `⚠️ Error al consultar usuarios: ${escapeHtml(suscripcionesError.message)}`);
+    }
+
+    return await sendMessage(chatId, formatResumenUsuarios(totalUsuarios ?? 0, suscripciones ?? []));
   }
 
   if (trimmed.startsWith("/desactivar")) {

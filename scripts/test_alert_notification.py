@@ -44,6 +44,9 @@ def main():
     load_dotenv()
     log_bot_identity()
 
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    logger.info("TELEGRAM_CHAT_ID recibido: %r (longitud %d)", chat_id, len(chat_id))
+
     fake_doc = {
         "document_key": "PRUEBA-000-2026",
         "title": "[PRUEBA] Este es un mensaje de prueba - no es una alerta oficial de DIGEMID",

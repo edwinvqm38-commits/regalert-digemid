@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 
-from anthropic import Anthropic
+import requests
 from dotenv import load_dotenv
 from supabase import create_client
 
@@ -15,7 +15,8 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5"
+CLAUDE_MODEL = "claude-haiku-4-5"
+DEEPSEEK_MODEL = "deepseek-chat"
 MAX_CHUNKS = 4
 
 SYSTEM_PROMPT = """Eres un asistente que responde preguntas sobre alertas y \
@@ -81,6 +82,55 @@ def build_context(chunks: list[dict]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+def call_deepseek(api_key: str, user_content: str) -> str:
+    response = requests.post(
+        "https://api.deepseek.com/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}"},
+        json={
+            "model": DEEPSEEK_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": 1024,
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    return response.json()["choices"][0]["message"]["content"]
+
+
+def call_claude(user_content: str) -> str:
+    from anthropic import Anthropic
+
+    client = Anthropic()
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_content}],
+    )
+
+    return next((block.text for block in response.content if block.type == "text"), "")
+
+
+def call_llm(user_content: str) -> str:
+    """Usa DeepSeek si hay credito cargado (DEEPSEEK_API_KEY); si no, Claude.
+
+    Cuando se agote el credito de DeepSeek, basta con quitar/vencer esa
+    variable de entorno para que vuelva a usar Claude sin tocar codigo."""
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+
+    if deepseek_key:
+        logger.info("Usando DeepSeek (%s)", DEEPSEEK_MODEL)
+        return call_deepseek(deepseek_key, user_content)
+
+    logger.info("Usando Claude (%s)", CLAUDE_MODEL)
+    return call_claude(user_content)
+
+
 def ask(question: str, dry_run: bool = False) -> str:
     supabase = get_supabase()
     chunks = search_chunks(supabase, question)
@@ -93,19 +143,9 @@ def ask(question: str, dry_run: bool = False) -> str:
     if dry_run:
         return f"[dry-run] Contexto recuperado ({len(chunks)} fragmentos):\n\n{context}"
 
-    client = Anthropic()
+    user_content = f"Contexto:\n\n{context}\n\nPregunta: {question}"
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f"Contexto:\n\n{context}\n\nPregunta: {question}",
-        }],
-    )
-
-    return next((block.text for block in response.content if block.type == "text"), "")
+    return call_llm(user_content)
 
 
 def main():

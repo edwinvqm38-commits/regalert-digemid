@@ -10,6 +10,19 @@ const SUPABASE_SERVICE_ROLE_KEY =
 
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
+const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
+const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+
+const CONSULTA_SYSTEM_PROMPT = `Eres un asistente que responde preguntas sobre alertas y \
+normativa de DIGEMID (Peru) usando UNICAMENTE el texto de los documentos que \
+se te entregan como contexto.
+
+Reglas estrictas:
+- No inventes datos que no esten en el contexto.
+- Si el contexto no contiene la respuesta, dilo explicitamente en vez de adivinar.
+- Cita siempre el numero de alerta/norma y la fecha del documento.
+- No reemplazas al Director Tecnico ni a la autoridad sanitaria; tu respuesta \
+es informativa, no una decision regulatoria.`;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
@@ -307,6 +320,9 @@ function helpText() {
     "",
     "<b>/buscar texto</b>",
     "Busca alertas por palabra clave. Ejemplo: /buscar retiro",
+    "",
+    "<b>/consulta pregunta</b>",
+    "Responde en lenguaje natural citando la alerta/norma fuente. Ejemplo: /consulta que paso con el Opdivo falsificado",
     "",
     "<b>/detalle 50-2026</b>",
     "Consulta una alerta por número o código.",
@@ -608,6 +624,104 @@ async function searchAlerts(query: string) {
   return data ?? [];
 }
 
+async function searchConsultaChunks(query: string, limit = 4) {
+  const { data, error } = await supabase
+    .from("digemid_documento_paginas")
+    .select(
+      "text_content, page_number, digemid_documentos(document_key, title, published_date, detail_url)",
+    )
+    .textSearch("text_content", query, { type: "websearch", config: "spanish" })
+    .limit(limit);
+
+  if (error) throw error;
+
+  return data ?? [];
+}
+
+function buildConsultaContext(chunks: any[]) {
+  return chunks
+    .map((chunk) => {
+      const doc = chunk.digemid_documentos ?? {};
+      return [
+        `[Documento ${doc.document_key} - ${doc.title} - ${doc.published_date} - pagina ${chunk.page_number}]`,
+        chunk.text_content,
+        `Link oficial: ${doc.detail_url}`,
+      ].join("\n");
+    })
+    .join("\n\n---\n\n");
+}
+
+async function callDeepseek(userContent: string): Promise<string> {
+  const response = await fetch("https://api.deepseek.com/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "deepseek-chat",
+      messages: [
+        { role: "system", content: CONSULTA_SYSTEM_PROMPT },
+        { role: "user", content: userContent },
+      ],
+      max_tokens: 1024,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`DeepSeek error ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
+async function callClaude(userContent: string): Promise<string> {
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5",
+      max_tokens: 1024,
+      system: CONSULTA_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userContent }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Claude error ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const textBlock = (data.content ?? []).find((block: any) => block.type === "text");
+  return textBlock?.text ?? "";
+}
+
+async function answerConsulta(question: string): Promise<string> {
+  const chunks = await searchConsultaChunks(question);
+
+  if (!chunks.length) {
+    return "No encontré documentos relacionados con esa consulta en la base de datos.";
+  }
+
+  const context = buildConsultaContext(chunks);
+  const userContent = `Contexto:\n\n${context}\n\nPregunta: ${question}`;
+
+  if (DEEPSEEK_API_KEY) {
+    return await callDeepseek(userContent);
+  }
+
+  if (ANTHROPIC_API_KEY) {
+    return await callClaude(userContent);
+  }
+
+  throw new Error("Falta configurar DEEPSEEK_API_KEY o ANTHROPIC_API_KEY");
+}
+
 async function getAlertDetail(alertNumber: string) {
   const cleanNumber = alertNumber.trim();
 
@@ -806,6 +920,50 @@ async function handleCommand(
       formatAlertList(`🔎 <b>Resultados para:</b> ${escapeHtml(query)}`, rows),
       alertasMenu(),
     );
+  }
+
+  if (trimmed.startsWith("/consulta")) {
+    const question = trimmed.replace("/consulta", "").trim();
+
+    if (!question) {
+      return await sendMessage(
+        chatId,
+        "🤖 Escribe una pregunta despues de /consulta.\n\nEjemplo:\n<code>/consulta que paso con el Opdivo falsificado</code>",
+        alertasMenu(),
+      );
+    }
+
+    try {
+      const answer = await answerConsulta(question);
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: answer ? 1 : 0,
+        status: "ok",
+      });
+
+      return await sendMessage(chatId, `🤖 ${escapeHtml(answer)}`, alertasMenu());
+    } catch (error) {
+      console.error("CONSULTA_ERROR:", error);
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        status: "error",
+        raw: { error: String(error) },
+      });
+
+      return await sendMessage(
+        chatId,
+        "⚠️ No pude procesar la consulta en este momento. Intenta de nuevo en unos minutos.",
+        alertasMenu(),
+      );
+    }
   }
 
   return await sendMessage(

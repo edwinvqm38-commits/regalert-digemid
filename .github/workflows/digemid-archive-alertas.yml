@@ -1,0 +1,56 @@
+name: DIGEMID - Archivar Alertas Viejas
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecucion"
+        required: true
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - apply
+      older_than_months:
+        description: "Archivar alertas publicadas hace mas de N meses"
+        required: false
+        default: "12"
+        type: string
+
+jobs:
+  archive-alertas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ejecutar archivado de alertas
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/archive_old_alertas.py --older-than-months "${{ inputs.older_than_months }}")
+
+          if [[ "${{ inputs.mode }}" == "apply" ]]; then
+            CMD+=(--apply)
+          fi
+
+          printf 'Ejecutando: %q ' "${CMD[@]}"
+          printf '\n'
+          "${CMD[@]}"

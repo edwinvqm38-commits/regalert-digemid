@@ -56,6 +56,10 @@ class NotifyAgent:
         }
 
         response = requests.post(url, json=payload, timeout=20)
+
+        if not response.ok:
+            logger.error("Respuesta de Telegram: %s", response.text)
+
         response.raise_for_status()
 
         logger.info("Notificación enviada a Telegram.")

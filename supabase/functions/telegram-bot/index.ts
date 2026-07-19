@@ -743,15 +743,40 @@ function consultaSources(chunks: any[]) {
   return sources;
 }
 
+async function suggestSimilarAlerts(question: string, limit = 3) {
+  const { data, error } = await supabase.rpc("sugerir_alertas_similares", {
+    query_texto: question,
+    limite: limit,
+  });
+
+  if (error) throw error;
+
+  return (data ?? []) as {
+    document_key: string;
+    title: string;
+    published_date: string;
+    detail_url: string;
+  }[];
+}
+
 async function answerConsulta(
   question: string,
 ): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
   const chunks = await searchConsultaChunks(question);
 
   if (!chunks.length) {
+    const suggestions = await suggestSimilarAlerts(question);
+
+    if (!suggestions.length) {
+      return {
+        answer: "No encontré documentos relacionados con esa consulta en la base de datos.",
+        sources: [],
+      };
+    }
+
     return {
-      answer: "No encontré documentos relacionados con esa consulta en la base de datos.",
-      sources: [],
+      answer: "No encontré una coincidencia exacta para tu pregunta. ¿Quizás te refieres a alguna de estas alertas?",
+      sources: suggestions.map((s) => ({ documentKey: s.document_key, url: s.detail_url })),
     };
   }
 
@@ -985,8 +1010,7 @@ async function handleCommand(
     if (!question) {
       return await sendMessage(
         chatId,
-        "🤖 Escribe una pregunta despues de /consulta.\n\nEjemplo:\n<code>/consulta que paso con el Opdivo falsificado</code>",
-        alertasMenu(),
+        "🤖 <b>Consulta IA</b>\n\nEscribe tu pregunta despues de /consulta y te respondo citando la alerta o norma oficial.\n\nEjemplo:\n<code>/consulta que paso con el Opdivo falsificado</code>",
       );
     }
 

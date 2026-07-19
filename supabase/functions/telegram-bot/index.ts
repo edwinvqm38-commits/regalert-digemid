@@ -22,7 +22,9 @@ Reglas estrictas:
 - Si el contexto no contiene la respuesta, dilo explicitamente en vez de adivinar.
 - Cita siempre el numero de alerta/norma y la fecha del documento.
 - No reemplazas al Director Tecnico ni a la autoridad sanitaria; tu respuesta \
-es informativa, no una decision regulatoria.`;
+es informativa, no una decision regulatoria.
+- Para resaltar nombres de productos, numeros de alerta/norma y terminos clave, \
+usa negrita en formato HTML de Telegram: <b>texto</b>. No uses markdown (**texto**).`;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
@@ -63,6 +65,16 @@ function escapeHtml(value: unknown): string {
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
+}
+
+function formatConsultaAnswer(rawAnswer: string): string {
+  // Escapa todo primero (seguridad), y despues convierte negrita en
+  // cualquiera de los dos formatos que el modelo pueda haber usado:
+  // markdown (**texto**) o HTML real (<b>texto</b>, que quedo escapado).
+  const escaped = escapeHtml(rawAnswer);
+  return escaped
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/&lt;b&gt;(.+?)&lt;\/b&gt;/g, "<b>$1</b>");
 }
 
 function isAllowed(chatId: string): boolean {
@@ -944,7 +956,7 @@ async function handleCommand(
         status: "ok",
       });
 
-      return await sendMessage(chatId, `🤖 ${escapeHtml(answer)}`, alertasMenu());
+      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}`);
     } catch (error) {
       console.error("CONSULTA_ERROR:", error);
 

@@ -625,13 +625,13 @@ async function searchAlerts(query: string) {
 }
 
 async function searchConsultaChunks(query: string, limit = 4) {
-  const { data, error } = await supabase
-    .from("digemid_documento_paginas")
-    .select(
-      "text_content, page_number, digemid_documentos(document_key, title, published_date, detail_url)",
-    )
-    .textSearch("text_content", query, { type: "websearch", config: "spanish" })
-    .limit(limit);
+  // buscar_paginas_texto filtra palabras vacias y ordena por relevancia -
+  // websearch_to_tsquery exige que aparezcan todas las palabras, lo cual
+  // falla con preguntas en lenguaje natural (ej. "que paso con...").
+  const { data, error } = await supabase.rpc("buscar_paginas_texto", {
+    query_texto: query,
+    limite: limit,
+  });
 
   if (error) throw error;
 
@@ -641,11 +641,10 @@ async function searchConsultaChunks(query: string, limit = 4) {
 function buildConsultaContext(chunks: any[]) {
   return chunks
     .map((chunk) => {
-      const doc = chunk.digemid_documentos ?? {};
       return [
-        `[Documento ${doc.document_key} - ${doc.title} - ${doc.published_date} - pagina ${chunk.page_number}]`,
+        `[Documento ${chunk.document_key} - ${chunk.title} - ${chunk.published_date} - pagina ${chunk.page_number}]`,
         chunk.text_content,
-        `Link oficial: ${doc.detail_url}`,
+        `Link oficial: ${chunk.detail_url}`,
       ].join("\n");
     })
     .join("\n\n---\n\n");

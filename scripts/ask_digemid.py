@@ -47,22 +47,18 @@ def get_supabase():
 
 
 def search_chunks(supabase, query: str, limit: int = MAX_CHUNKS) -> list[dict]:
-    """Busqueda simple por palabra clave sobre el texto ya extraido.
+    """Busqueda por palabra clave sobre el texto ya extraido, via RPC
+    buscar_paginas_texto (filtra palabras vacias y ordena por relevancia -
+    websearch_to_tsquery/plainto_tsquery exigen que aparezcan todas las
+    palabras, lo cual falla con preguntas en lenguaje natural).
 
     No es busqueda semantica (no hay embeddings todavia) - suficiente para
     validar el flujo end-to-end con costo casi nulo. Se puede mejorar despues
     con pgvector si hace falta precision semantica."""
-    response = (
-        supabase
-        .table("digemid_documento_paginas")
-        .select(
-            "text_content, page_number, "
-            "digemid_documentos(document_key, title, published_date, detail_url)"
-        )
-        .text_search("text_content", query, options={"type": "websearch", "config": "spanish"})
-        .limit(limit)
-        .execute()
-    )
+    response = supabase.rpc(
+        "buscar_paginas_texto",
+        {"query_texto": query, "limite": limit},
+    ).execute()
 
     return response.data or []
 
@@ -71,12 +67,11 @@ def build_context(chunks: list[dict]) -> str:
     blocks = []
 
     for chunk in chunks:
-        doc = chunk.get("digemid_documentos") or {}
         blocks.append(
-            f"[Documento {doc.get('document_key')} - {doc.get('title')} - "
-            f"{doc.get('published_date')} - pagina {chunk.get('page_number')}]\n"
+            f"[Documento {chunk.get('document_key')} - {chunk.get('title')} - "
+            f"{chunk.get('published_date')} - pagina {chunk.get('page_number')}]\n"
             f"{chunk.get('text_content')}\n"
-            f"Link oficial: {doc.get('detail_url')}"
+            f"Link oficial: {chunk.get('detail_url')}"
         )
 
     return "\n\n---\n\n".join(blocks)

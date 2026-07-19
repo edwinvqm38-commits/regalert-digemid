@@ -1015,6 +1015,15 @@ async function handleCommand(
     );
   }
 
+  if (trimmed === "/chatid") {
+    await logConsulta({ chatId, userId, command: "/chatid", status: "ok" });
+
+    return await sendMessage(
+      chatId,
+      `🆔 El chat_id de este chat/grupo es:\n\n<code>${escapeHtml(chatId)}</code>\n\nCópialo para usarlo como TELEGRAM_CHAT_ID.`,
+    );
+  }
+
   if (trimmed.startsWith("/consulta")) {
     const question = trimmed.replace("/consulta", "").trim();
 

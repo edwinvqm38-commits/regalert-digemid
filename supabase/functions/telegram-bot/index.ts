@@ -1018,9 +1018,20 @@ async function handleCommand(
   if (trimmed === "/chatid") {
     await logConsulta({ chatId, userId, command: "/chatid", status: "ok" });
 
+    let botIdentity = "desconocido";
+    try {
+      const meResponse = await fetch(`${TELEGRAM_API}/getMe`);
+      const meData = await meResponse.json();
+      if (meData.ok) {
+        botIdentity = `@${meData.result.username} (id ${meData.result.id})`;
+      }
+    } catch {
+      // ignore identity lookup failures, chat_id is still useful
+    }
+
     return await sendMessage(
       chatId,
-      `🆔 El chat_id de este chat/grupo es:\n\n<code>${escapeHtml(chatId)}</code>\n\nCópialo para usarlo como TELEGRAM_CHAT_ID.`,
+      `🆔 El chat_id de este chat/grupo es:\n\n<code>${escapeHtml(chatId)}</code>\n\nCópialo para usarlo como TELEGRAM_CHAT_ID.\n\n🤖 Este bot es: <b>${escapeHtml(botIdentity)}</b>`,
     );
   }
 

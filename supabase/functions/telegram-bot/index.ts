@@ -1156,6 +1156,39 @@ async function answerConsulta(
   throw new Error("Falta configurar DEEPSEEK_API_KEY o ANTHROPIC_API_KEY");
 }
 
+async function solicitarPlan(
+  chatId: string,
+  userId: string | undefined,
+  nivelSolicitado: string,
+): Promise<void> {
+  await logConsulta({ chatId, userId, command: "/suscribirme", queryText: nivelSolicitado, status: "ok" });
+
+  const admins = ADMIN_CHAT_IDS
+    .split(",")
+    .map((item: string) => item.trim())
+    .filter((item: string) => item.length > 0);
+
+  const { data: usuario } = await supabase
+    .from("digemid_bot_usuarios")
+    .select("nombre, telefono, username")
+    .eq("telegram_chat_id", chatId)
+    .maybeSingle();
+
+  const nombreMostrado = usuario?.nombre || "Usuario";
+
+  for (const adminId of admins) {
+    await sendMessage(
+      adminId,
+      `💳 <b>Solicitud de suscripción</b>\n\nNombre: ${escapeHtml(nombreMostrado)}\nTeléfono: ${escapeHtml(usuario?.telefono ?? "sin dato")}\nchat_id: <code>${escapeHtml(chatId)}</code>\nPlan solicitado: <b>${escapeHtml(nivelSolicitado)}</b> (S/${NIVEL_PRECIOS[nivelSolicitado]}/mes)\n\nUsa <code>/activar ${escapeHtml(chatId)} ${escapeHtml(nivelSolicitado)} 30</code> para activarlo.`,
+    );
+  }
+
+  await sendMessage(
+    chatId,
+    `✅ Solicitud enviada. En breve te contactamos para coordinar el pago y activar tu plan <b>${escapeHtml(nivelSolicitado)}</b> (S/${NIVEL_PRECIOS[nivelSolicitado]}/mes).`,
+  );
+}
+
 async function activarSuscripcion(
   targetChatId: string,
   nivel: string,
@@ -1219,13 +1252,20 @@ async function handleCommand(
     });
 
     if (esComandoStart) {
-      const codigoInvitacion = trimmed.startsWith("/start ") ? trimmed.slice(7).trim() : "";
-
-      if (codigoInvitacion) {
-        await consumirInvitacion(codigoInvitacion, chatId);
-      }
+      const payload = trimmed.startsWith("/start ") ? trimmed.slice(7).trim() : "";
 
       await sendMessage(chatId, "👋 Bienvenido a RegAlert DIGEMID.", persistentKeyboard());
+
+      if (payload.startsWith("plan_")) {
+        // Deep-link desde la landing page: /start plan_basico, plan_consultoria...
+        const nivelSolicitado = payload.slice(5).toLowerCase();
+
+        if (nivelSolicitado in NIVEL_PRECIOS && nivelSolicitado !== "gratis") {
+          await solicitarPlan(chatId, userId, nivelSolicitado);
+        }
+      } else if (payload) {
+        await consumirInvitacion(payload, chatId);
+      }
     }
 
     return await sendMessage(
@@ -1420,32 +1460,7 @@ async function handleCommand(
       );
     }
 
-    await logConsulta({ chatId, userId, command: "/suscribirme", queryText: nivelSolicitado, status: "ok" });
-
-    const admins = ADMIN_CHAT_IDS
-      .split(",")
-      .map((item: string) => item.trim())
-      .filter((item: string) => item.length > 0);
-
-    const { data: usuario } = await supabase
-      .from("digemid_bot_usuarios")
-      .select("nombre, telefono, username")
-      .eq("telegram_chat_id", chatId)
-      .maybeSingle();
-
-    const nombreMostrado = usuario?.nombre || "Usuario";
-
-    for (const adminId of admins) {
-      await sendMessage(
-        adminId,
-        `💳 <b>Solicitud de suscripción</b>\n\nNombre: ${escapeHtml(nombreMostrado)}\nTeléfono: ${escapeHtml(usuario?.telefono ?? "sin dato")}\nchat_id: <code>${escapeHtml(chatId)}</code>\nPlan solicitado: <b>${escapeHtml(nivelSolicitado)}</b> (S/${NIVEL_PRECIOS[nivelSolicitado]}/mes)\n\nUsa <code>/activar ${escapeHtml(chatId)} ${escapeHtml(nivelSolicitado)} 30</code> para activarlo.`,
-      );
-    }
-
-    return await sendMessage(
-      chatId,
-      `✅ Solicitud enviada. En breve te contactamos para activar tu plan <b>${escapeHtml(nivelSolicitado)}</b>.`,
-    );
+    return await solicitarPlan(chatId, userId, nivelSolicitado);
   }
 
   if (trimmed.startsWith("/activar")) {

@@ -239,6 +239,44 @@ async function getBotIdentity(): Promise<{ username: string; id: number } | null
   }
 }
 
+async function consumirInvitacion(codigo: string, chatId: string): Promise<void> {
+  const { data: invitacion, error } = await supabase
+    .from("digemid_bot_invitaciones")
+    .select("id, telefono, nombre, estado")
+    .eq("codigo", codigo)
+    .maybeSingle();
+
+  if (error || !invitacion || invitacion.estado !== "pendiente") {
+    return;
+  }
+
+  await supabase
+    .from("digemid_bot_invitaciones")
+    .update({ estado: "usado", telegram_chat_id: chatId, used_at: new Date().toISOString() })
+    .eq("id", invitacion.id);
+
+  if (invitacion.telefono) {
+    await supabase
+      .from("digemid_bot_usuarios")
+      .update({ telefono: invitacion.telefono })
+      .eq("telegram_chat_id", chatId);
+  }
+
+  const admins = ADMIN_CHAT_IDS
+    .split(",")
+    .map((item: string) => item.trim())
+    .filter((item: string) => item.length > 0);
+
+  const nombreMostrado = invitacion.nombre || "Usuario nuevo";
+
+  for (const adminId of admins) {
+    await sendMessage(
+      adminId,
+      `🆕 <b>Nuevo usuario registrado</b>\n\nNombre: ${escapeHtml(nombreMostrado)}\nTeléfono: ${escapeHtml(invitacion.telefono ?? "sin dato")}\nchat_id: <code>${escapeHtml(chatId)}</code>\n\nUsa <code>/activar ${escapeHtml(chatId)} nivel dias</code> para darle un plan.`,
+    );
+  }
+}
+
 async function answerCallback(callbackId: string) {
   return await telegram("answerCallbackQuery", {
     callback_query_id: callbackId,
@@ -977,15 +1015,23 @@ async function handleCommand(
     return await handleCommand(chatId, userId, mappedCommand, chatType);
   }
 
-  if (trimmed === "/start" || trimmed === "/menu") {
+  const esComandoStart = trimmed === "/start" || trimmed.startsWith("/start ");
+
+  if (esComandoStart || trimmed === "/menu") {
     await logConsulta({
       chatId,
       userId,
-      command: trimmed === "/menu" ? "/menu" : "/start",
+      command: esComandoStart ? "/start" : "/menu",
       status: "ok",
     });
 
-    if (trimmed === "/start") {
+    if (esComandoStart) {
+      const codigoInvitacion = trimmed.startsWith("/start ") ? trimmed.slice(7).trim() : "";
+
+      if (codigoInvitacion) {
+        await consumirInvitacion(codigoInvitacion, chatId);
+      }
+
       await sendMessage(chatId, "👋 Bienvenido a RegAlert DIGEMID.", persistentKeyboard());
     }
 
@@ -1240,6 +1286,52 @@ async function handleCommand(
     }
 
     return await sendMessage(chatId, formatResumenUsuarios(totalUsuarios ?? 0, suscripciones ?? []));
+  }
+
+  if (trimmed.startsWith("/invitar")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const parts = trimmed.split(/\s+/).slice(1);
+    const telefono = parts[0];
+    const nombre = parts.slice(1).join(" ").trim();
+
+    if (!telefono) {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/invitar telefono nombre</code>\n\nEjemplo:\n<code>/invitar +51987654321 Juan Perez</code>",
+      );
+    }
+
+    const codigo = crypto.randomUUID().replace(/-/g, "").slice(0, 10);
+
+    const { error: invitacionError } = await supabase.from("digemid_bot_invitaciones").insert({
+      codigo,
+      telefono,
+      nombre: nombre || null,
+      creado_por: chatId,
+    });
+
+    if (invitacionError) {
+      return await sendMessage(chatId, `⚠️ Error al crear invitación: ${escapeHtml(invitacionError.message)}`);
+    }
+
+    const identity = await getBotIdentity();
+
+    if (!identity) {
+      return await sendMessage(chatId, "⚠️ No pude generar el enlace (no se pudo identificar al bot).");
+    }
+
+    const telegramLink = `https://t.me/${identity.username}?start=${codigo}`;
+    const telefonoLimpio = telefono.replace(/\D/g, "");
+    const mensajeWhatsapp = `Hola${nombre ? " " + nombre : ""}! Aquí tienes acceso al bot de alertas DIGEMID: ${telegramLink}`;
+    const waLink = `https://wa.me/${telefonoLimpio}?text=${encodeURIComponent(mensajeWhatsapp)}`;
+
+    return await sendMessage(
+      chatId,
+      `✅ Invitación creada${nombre ? ` para <b>${escapeHtml(nombre)}</b>` : ""} (${escapeHtml(telefono)}).\n\n📲 Envíaselo por WhatsApp con un clic:\n${escapeHtml(waLink)}\n\n🔗 O el enlace directo de Telegram:\n${escapeHtml(telegramLink)}\n\nTe aviso apenas toque "Iniciar".`,
+    );
   }
 
   if (trimmed.startsWith("/desactivar")) {

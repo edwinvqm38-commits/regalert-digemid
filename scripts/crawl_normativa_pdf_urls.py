@@ -42,17 +42,19 @@ def get_supabase():
     return create_client(url, key)
 
 
-def get_normas_sin_pdf(supabase, limit: int) -> list[dict]:
-    response = (
+def get_normas_sin_pdf(supabase, limit: int, document_key: str | None = None) -> list[dict]:
+    query = (
         supabase.table(NORMAS_TABLE)
         .select("id, document_key, source_url")
-        .or_("pdf_url.is.null,pdf_url.eq.")
         .not_.is_("source_url", "null")
         .neq("source_url", "")
-        .order("anio", desc=True)
-        .limit(limit)
-        .execute()
     )
+    if document_key:
+        query = query.eq("document_key", document_key)
+    else:
+        query = query.or_("pdf_url.is.null,pdf_url.eq.").order("anio", desc=True)
+
+    response = query.limit(limit).execute()
     return response.data or []
 
 

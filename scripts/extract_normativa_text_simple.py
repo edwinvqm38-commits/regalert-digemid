@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 PAGE_TABLE = "digemid_norma_paginas"
 NORMAS_TABLE = "digemid_normas"
+STORAGE_BUCKET = "digemid-documentos"
 DELAY_BETWEEN_DESCARGAS_SEGUNDOS = 4.0
 MAX_REINTENTOS_429 = 3
 UMBRAL_BAJA_CALIDAD = 0.5
@@ -64,19 +65,26 @@ def contar_universo(supabase) -> tuple[int, int]:
     return (total.count or 0), (con_texto.count or 0)
 
 
-def get_pending_normas(supabase, limit: int) -> list[dict]:
-    response = (
+def get_pending_normas(supabase, limit: int, document_key: str | None = None) -> list[dict]:
+    query = (
         supabase.table(NORMAS_TABLE)
         .select("id, document_key, pdf_url, file_name")
         .not_.is_("pdf_url", "null")
         .neq("pdf_url", "")
-        .order("anio", desc=True)
-        .limit(limit)
-        .execute()
     )
+    if document_key:
+        query = query.eq("document_key", document_key)
+    else:
+        query = query.order("anio", desc=True)
+
+    response = query.limit(limit).execute()
     normas = response.data or []
     if not normas:
         return []
+
+    # Con un document_key explícito reprocesamos aunque ya tenga páginas.
+    if document_key:
+        return normas
 
     norma_ids = [n["id"] for n in normas]
     paginas = (
@@ -117,6 +125,16 @@ def download_pdf(url: str, local_path: Path) -> Path:
         return local_path
 
     raise RuntimeError(f"No se pudo descargar {url} tras {MAX_REINTENTOS_429} intentos (429)")
+
+
+def respaldar_pdf(supabase, object_path: str, local_path: Path) -> None:
+    """Sube el PDF ya descargado a Supabase Storage como evidencia durable."""
+    with local_path.open("rb") as file_obj:
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            object_path,
+            file_obj,
+            file_options={"content-type": "application/pdf", "upsert": "true"},
+        )
 
 
 def normalize_text(text: str) -> str:
@@ -183,6 +201,8 @@ def enviar_progreso_telegram(total: int, con_texto: int, procesadas_ahora: int, 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--document-key", default=None,
+                        help="Reprocesar SOLO esta norma (borra sus páginas y las regenera).")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-telegram", action="store_true")
     args = parser.parse_args()
@@ -191,7 +211,7 @@ def main():
     supabase = get_supabase()
 
     total_universo, con_texto_antes = contar_universo(supabase)
-    normas = get_pending_normas(supabase, args.limit)
+    normas = get_pending_normas(supabase, args.limit, args.document_key)
     logger.info(
         "Universo: %s normas | con texto: %s | pendientes con pdf_url en este lote: %s",
         total_universo, con_texto_antes, len(normas),
@@ -216,8 +236,24 @@ def main():
                 procesadas += 1
                 continue
 
+            # Si reprocesamos una norma específica, borramos sus páginas viejas
+            # para regenerarlas con el pipeline de alta calidad (sin duplicar).
+            if args.document_key:
+                supabase.table(PAGE_TABLE).delete().eq("norma_id", norma["id"]).execute()
+
             local_path = temp_dir / file_name
             download_pdf(pdf_url, local_path)
+
+            # Respaldo del PDF como evidencia durable (reusa el archivo ya descargado).
+            object_path = f"normas/{document_key}/{file_name}"
+            try:
+                respaldar_pdf(supabase, object_path, local_path)
+                supabase.table(NORMAS_TABLE).update(
+                    {"file_storage_path": object_path}
+                ).eq("id", norma["id"]).execute()
+            except Exception:
+                logger.exception("No se pudo respaldar el PDF de %s (se continúa con el texto).", document_key)
+
             extracciones = extract_pdf(str(local_path))
 
             baja = write_pages(supabase, norma["id"], extracciones)

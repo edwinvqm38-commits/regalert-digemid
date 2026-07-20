@@ -37,7 +37,9 @@ se te entregan como contexto.
 Reglas estrictas:
 - No inventes datos que no esten en el contexto.
 - Si el contexto no contiene la respuesta, dilo explicitamente en vez de adivinar.
-- Cita siempre el numero de alerta/norma y la fecha del documento.
+- Cita siempre el documento (numero de alerta o codigo de norma), su fecha y la \
+PAGINA donde esta el sustento. Cada bloque del contexto indica su document_key y \
+su numero de pagina.
 - No reemplazas al Director Tecnico ni a la autoridad sanitaria; tu respuesta \
 es informativa, no una decision regulatoria.
 - Para resaltar nombres de productos, numeros de alerta/norma y terminos clave, \
@@ -50,9 +52,10 @@ rapido en un celular:
 
 [2 a 4 lineas de detalle de apoyo, con terminos clave en <b>negrita</b>]
 
-📌 Fuente: <b>[numero de alerta/norma]</b> — [fecha del documento]
+📌 Fuente: <b>[numero de alerta o codigo de norma]</b> — [fecha], pag. [numero de pagina]
 
-No agregues secciones adicionales ni encabezados fuera de esta estructura.`;
+No agregues secciones adicionales ni encabezados fuera de esta estructura. El link \
+oficial del documento se muestra aparte en un boton, no lo incluyas en el texto.`;
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
@@ -901,12 +904,16 @@ async function callClaude(userContent: string): Promise<string> {
 
 function consultaSources(chunks: any[]) {
   const seen = new Set<string>();
-  const sources: { documentKey: string; url: string }[] = [];
+  const sources: { documentKey: string; url: string; page: number }[] = [];
 
   for (const chunk of chunks) {
     if (!chunk.detail_url || seen.has(chunk.detail_url)) continue;
     seen.add(chunk.detail_url);
-    sources.push({ documentKey: chunk.document_key, url: chunk.detail_url });
+    sources.push({
+      documentKey: chunk.document_key,
+      url: chunk.detail_url,
+      page: chunk.page_number ?? 0,
+    });
   }
 
   return sources;
@@ -1785,7 +1792,7 @@ async function handleCommand(
           inline_keyboard: sources
             .slice(0, 3)
             .map((source) => [
-              { text: `📄 Ver fuente ${source.documentKey}`, url: source.url },
+              { text: `📄 ${source.documentKey}${source.page ? " (pág. " + source.page + ")" : ""}`, url: source.url },
             ]),
         }
         : undefined;
@@ -1859,7 +1866,7 @@ async function handleCallback(update: TelegramUpdate) {
           inline_keyboard: sources
             .slice(0, 3)
             .map((source) => [
-              { text: `📄 Ver fuente ${source.documentKey}`, url: source.url },
+              { text: `📄 ${source.documentKey}${source.page ? " (pág. " + source.page + ")" : ""}`, url: source.url },
             ]),
         }
         : undefined;

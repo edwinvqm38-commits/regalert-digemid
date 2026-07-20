@@ -1,4 +1,4 @@
-name: DIGEMID - Extraer Texto Normativa (directo)
+name: DIGEMID - Extraer Texto Normativa (alta calidad)
 
 on:
   workflow_dispatch:
@@ -14,21 +14,37 @@ on:
       limit:
         description: "Maximo de normas a procesar"
         required: false
-        default: "50"
+        default: "20"
         type: string
+
+  # Corrida lenta automatica: ~20 normas al dia, 10:30 a. m. Peru (15:30 UTC).
+  schedule:
+    - cron: "30 15 * * *"
+
+concurrency:
+  group: digemid-normativa-text
+  cancel-in-progress: false
 
 jobs:
   extraer-texto:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
 
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
+
+      - name: Instalar Tesseract OCR (español)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -41,13 +57,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Descubrir PDFs de normas sin enlace directo
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            MODE="apply"; LIMIT="20"
+          else
+            MODE="${{ inputs.mode }}"; LIMIT="${{ inputs.limit }}"
+          fi
+
+          CMD=(python scripts/crawl_normativa_pdf_urls.py --limit "$LIMIT")
+          if [[ "$MODE" != "apply" ]]; then
+            CMD+=(--dry-run)
+          fi
+          printf 'Ejecutando: %q ' "${CMD[@]}"; printf '\n'
+          "${CMD[@]}"
+
       - name: Extraer texto de normativa
         shell: bash
         run: |
           set -euo pipefail
-          CMD=(python scripts/extract_normativa_text_simple.py --limit "${{ inputs.limit }}")
+          # En corridas programadas (schedule) siempre aplica; el disparo manual respeta el modo.
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            MODE="apply"
+            LIMIT="20"
+          else
+            MODE="${{ inputs.mode }}"
+            LIMIT="${{ inputs.limit }}"
+          fi
 
-          if [[ "${{ inputs.mode }}" != "apply" ]]; then
+          CMD=(python scripts/extract_normativa_text_simple.py --limit "$LIMIT")
+          if [[ "$MODE" != "apply" ]]; then
             CMD+=(--dry-run)
           fi
 

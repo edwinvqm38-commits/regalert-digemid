@@ -1,7 +1,7 @@
 """Envia un archivo (ej. una guia/prospecto) al chat de Telegram del admin.
 
 Uso:
-    python scripts/send_telegram_document.py docs/GUIA_BOT_REGALERT.md \
+    python scripts/send_telegram_document.py docs/GUIA_ADMIN_REGALERT.md \
         --caption "Guia rapida del bot"
 """
 

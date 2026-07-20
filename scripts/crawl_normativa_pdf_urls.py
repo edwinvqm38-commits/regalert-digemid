@@ -113,13 +113,15 @@ def elegir_pdf(html: str, base_url: str) -> str | None:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--document-key", default=None,
+                        help="Rastrear SOLO esta norma (busca su PDF aunque ya tenga pdf_url).")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     load_env()
     supabase = get_supabase()
 
-    normas = get_normas_sin_pdf(supabase, args.limit)
+    normas = get_normas_sin_pdf(supabase, args.limit, args.document_key)
     logger.info("Normas sin pdf_url a rastrear: %s", len(normas))
 
     encontrados = 0

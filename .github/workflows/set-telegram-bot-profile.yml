@@ -1,0 +1,31 @@
+name: Configurar perfil del bot de Telegram
+
+on:
+  workflow_dispatch:
+
+jobs:
+  configurar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv
+
+      - name: Configurar descripcion y comandos del bot
+        run: python scripts/set_telegram_bot_profile.py

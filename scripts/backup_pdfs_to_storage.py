@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import time
 from pathlib import Path
 
 import requests
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 BUCKET_NAME = "digemid-documentos"
 TABLE_NAME = "digemid_documentos"
+DELAY_BETWEEN_DESCARGAS_SEGUNDOS = 2.0
+MAX_REINTENTOS_429 = 3
 
 
 def load_env():
@@ -82,15 +85,30 @@ def sanitize_file_name(document_key: str | None, file_name: str | None) -> str:
 def download_pdf(file_url: str, local_path: Path) -> Path:
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
-    response = requests.get(
-        file_url,
-        timeout=90,
-        headers={"User-Agent": "RegAlert-DIGEMID-StorageBackup/1.0"},
-    )
-    response.raise_for_status()
-    local_path.write_bytes(response.content)
+    for intento in range(1, MAX_REINTENTOS_429 + 1):
+        response = requests.get(
+            file_url,
+            timeout=90,
+            headers={"User-Agent": "RegAlert-DIGEMID-StorageBackup/1.0"},
+        )
 
-    return local_path
+        if response.status_code == 429 and intento < MAX_REINTENTOS_429:
+            espera = float(response.headers.get("Retry-After", 10 * intento))
+            logger.warning(
+                "429 al descargar %s (intento %s/%s). Esperando %.1fs antes de reintentar.",
+                file_url,
+                intento,
+                MAX_REINTENTOS_429,
+                espera,
+            )
+            time.sleep(espera)
+            continue
+
+        response.raise_for_status()
+        local_path.write_bytes(response.content)
+        return local_path
+
+    raise RuntimeError(f"No se pudo descargar {file_url} tras {MAX_REINTENTOS_429} intentos (429)")
 
 
 def main():
@@ -111,7 +129,10 @@ def main():
     backed_up = 0
     errors = 0
 
-    for doc in documents:
+    for index, doc in enumerate(documents):
+        if index > 0:
+            time.sleep(DELAY_BETWEEN_DESCARGAS_SEGUNDOS)
+
         document_key = doc.get("document_key")
         file_url = doc.get("file_url")
         file_name = sanitize_file_name(document_key, doc.get("file_name"))

@@ -147,25 +147,31 @@ function persistentKeyboard() {
   };
 }
 
-function mainMenu() {
-  return {
-    inline_keyboard: [
-      [{ text: "🚨 Alertas DIGEMID", callback_data: "menu:alertas" }],
-      [
-        { text: "🆕 Últimas", callback_data: "alertas:ultimas" },
-        { text: "📅 Hoy", callback_data: "alertas:hoy" },
-      ],
-      [
-        { text: "📆 Semana", callback_data: "alertas:semana" },
-        { text: "🕒 Recientes", callback_data: "alertas:recientes" },
-      ],
-      [
-        { text: "🗓️ Este mes", callback_data: "alertas:mes" },
-        { text: "🔎 Buscar", callback_data: "alertas:buscar_info" },
-      ],
-      [{ text: "ℹ️ Ayuda", callback_data: "menu:ayuda" }],
+function mainMenu(incluirDemo = false) {
+  const filas: any[] = [];
+
+  if (incluirDemo) {
+    filas.push([{ text: "🧪 Probar una consulta de ejemplo", callback_data: "demo:ejemplo" }]);
+  }
+
+  filas.push(
+    [{ text: "🚨 Alertas DIGEMID", callback_data: "menu:alertas" }],
+    [
+      { text: "🆕 Últimas", callback_data: "alertas:ultimas" },
+      { text: "📅 Hoy", callback_data: "alertas:hoy" },
     ],
-  };
+    [
+      { text: "📆 Semana", callback_data: "alertas:semana" },
+      { text: "🕒 Recientes", callback_data: "alertas:recientes" },
+    ],
+    [
+      { text: "🗓️ Este mes", callback_data: "alertas:mes" },
+      { text: "🔎 Buscar", callback_data: "alertas:buscar_info" },
+    ],
+    [{ text: "ℹ️ Ayuda", callback_data: "menu:ayuda" }],
+  );
+
+  return { inline_keyboard: filas };
 }
 
 function alertasMenu() {
@@ -188,6 +194,19 @@ function alertasMenu() {
     ],
   };
 }
+
+function planesKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "Solicitar Básico — S/29/mes", callback_data: "plan:basico" }],
+      [{ text: "Solicitar Consultoría — S/79/mes", callback_data: "plan:consultoria" }],
+      [{ text: "Solicitar Empresarial — S/199/mes", callback_data: "plan:empresarial" }],
+    ],
+  };
+}
+
+const PLANES_TEXTO_CORTO =
+  "• <b>Básico</b> S/29 — 30 consultas/día\n• <b>Consultoría</b> S/79 — 100/día\n• <b>Empresarial</b> S/199 — sin límite";
 
 async function telegram(method: string, payload: Record<string, unknown>) {
   const response = await fetch(`${TELEGRAM_API}/${method}`, {
@@ -1270,8 +1289,10 @@ async function handleCommand(
 
     return await sendMessage(
       chatId,
-      mainMenuText(),
-      mainMenu(),
+      esComandoStart
+        ? `${mainMenuText()}\n\n💡 <b>¿Primera vez?</b> Toca "Probar una consulta de ejemplo" y mira cómo respondo con la fuente oficial citada.`
+        : mainMenuText(),
+      mainMenu(esComandoStart),
     );
   }
 
@@ -1743,7 +1764,8 @@ async function handleCommand(
 
         return await sendMessage(
           chatId,
-          `⚠️ Alcanzaste tu límite diario de <b>${limiteUsuario}</b> consultas (plan <b>${escapeHtml(nivel)}</b>).\n\nEscríbenos si quieres aumentar tu límite diario.`,
+          `⚠️ Alcanzaste tu límite diario de <b>${limiteUsuario}</b> consultas (plan <b>${escapeHtml(nivel)}</b>).\n\nTus alertas automáticas siguen llegando igual. Si quieres más consultas con IA:\n\n${PLANES_TEXTO_CORTO}`,
+          planesKeyboard(),
         );
       }
 
@@ -1768,7 +1790,16 @@ async function handleCommand(
         }
         : undefined;
 
-      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}`, sourceButtons);
+      let pie = "";
+      if (limiteUsuario !== null) {
+        const restantes = Math.max(0, limiteUsuario - (consultasHoyUsuario + 1));
+        pie = `\n\n<i>Te quedan ${restantes} de ${limiteUsuario} consultas hoy (plan ${escapeHtml(nivel)}).</i>`;
+        if (restantes === 0) {
+          pie += `\n💡 ¿Necesitas más? Escribe <code>/suscribirme basico</code>`;
+        }
+      }
+
+      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
     } catch (error) {
       console.error("CONSULTA_ERROR:", error);
 
@@ -1807,6 +1838,52 @@ async function handleCallback(update: TelegramUpdate) {
   console.log("HANDLE_CALLBACK_CHAT_ID:", chatId);
 
   if (!chatId) {
+    return;
+  }
+
+  const callbackUserId = String(callback.from?.id ?? "");
+
+  if (data === "demo:ejemplo") {
+    const preguntaEjemplo = "que alertas hay sobre productos falsificados";
+
+    await sendMessage(
+      chatId,
+      `🧪 <b>Demo</b> — Te muestro cómo respondo a:\n<i>"${escapeHtml(preguntaEjemplo)}"</i>`,
+    );
+
+    try {
+      const { answer, sources } = await answerConsulta(preguntaEjemplo);
+
+      const sourceButtons = sources.length
+        ? {
+          inline_keyboard: sources
+            .slice(0, 3)
+            .map((source) => [
+              { text: `📄 Ver fuente ${source.documentKey}`, url: source.url },
+            ]),
+        }
+        : undefined;
+
+      await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}`, sourceButtons);
+      return await sendMessage(
+        chatId,
+        "✅ Así de fácil. Ahora prueba tú: escribe <code>/consulta</code> seguido de tu pregunta.",
+      );
+    } catch (_error) {
+      return await sendMessage(
+        chatId,
+        "Escribe <code>/consulta</code> seguido de tu pregunta y te respondo citando la fuente oficial.",
+      );
+    }
+  }
+
+  if (data.startsWith("plan:")) {
+    const nivelSolicitado = data.slice(5).toLowerCase();
+
+    if (nivelSolicitado in NIVEL_PRECIOS && nivelSolicitado !== "gratis") {
+      return await solicitarPlan(chatId, callbackUserId, nivelSolicitado);
+    }
+
     return;
   }
 

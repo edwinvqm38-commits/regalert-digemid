@@ -1,10 +1,16 @@
 import html
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 import requests
 
 logger = logging.getLogger(__name__)
+
+PRUEBA_LIMITE_ALERTAS = 3
+PRUEBA_LIMITE_DIAS = 14
+
+NIVEL_PRECIOS = {"basico": 29, "consultoria": 79, "empresarial": 199}
 
 
 class NotifyAgent:
@@ -18,6 +24,14 @@ class NotifyAgent:
             raise ValueError(
                 "Faltan variables de entorno TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID"
             )
+
+        self.supabase = None
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if supabase_url and supabase_key:
+            from supabase import create_client
+
+            self.supabase = create_client(supabase_url, supabase_key)
 
     def build_message(self, new_docs: list[dict]) -> str:
         """Construye el mensaje HTML para Telegram."""
@@ -93,3 +107,100 @@ class NotifyAgent:
             logger.info("Alerta de fallo enviada a Telegram.")
         except Exception:
             logger.exception("No se pudo enviar la alerta de fallo a Telegram.")
+
+    def _send_to_chat(self, chat_id: str, text: str, reply_markup: dict | None = None) -> None:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+
+        response = requests.post(
+            f"https://api.telegram.org/bot{self.token}/sendMessage", json=payload, timeout=20
+        )
+        if not response.ok:
+            logger.warning("No se pudo enviar DM a %s: %s", chat_id, response.text)
+
+    def _usuarios_elegibles_dm(self) -> tuple[set[str], dict[str, int]]:
+        """Devuelve (chat_ids con suscripcion paga activa, {chat_id: alertas_en_prueba} de los en prueba activa)."""
+        pagados: set[str] = set()
+        en_prueba: dict[str, int] = {}
+
+        hoy = datetime.now(timezone.utc).date().isoformat()
+        suscripciones = (
+            self.supabase.table("digemid_suscripciones")
+            .select("telegram_chat_id, fecha_fin")
+            .eq("estado", "activo")
+            .execute()
+        )
+        for sub in suscripciones.data or []:
+            fecha_fin = sub.get("fecha_fin")
+            if not fecha_fin or fecha_fin >= hoy:
+                pagados.add(sub["telegram_chat_id"])
+
+        en_prueba_rows = (
+            self.supabase.table("digemid_bot_usuarios")
+            .select("telegram_chat_id, prueba_alertas_enviadas")
+            .eq("prueba_estado", "activa")
+            .execute()
+        )
+        for row in en_prueba_rows.data or []:
+            en_prueba[row["telegram_chat_id"]] = row.get("prueba_alertas_enviadas") or 0
+
+        return pagados, en_prueba
+
+    def _mensaje_prueba_terminada(self) -> tuple[str, dict]:
+        texto = (
+            "⏰ <b>Tu prueba gratuita de RegAlert DIGEMID terminó.</b>\n\n"
+            "¿Quieres seguir recibiendo alertas automáticas y consultas con IA? Elige un plan:"
+        )
+        botones = {
+            "inline_keyboard": [
+                [{"text": f"Solicitar Básico — S/{NIVEL_PRECIOS['basico']}/mes", "callback_data": "plan:basico"}],
+                [{"text": f"Solicitar Consultoría — S/{NIVEL_PRECIOS['consultoria']}/mes", "callback_data": "plan:consultoria"}],
+                [{"text": f"Solicitar Empresarial — S/{NIVEL_PRECIOS['empresarial']}/mes", "callback_data": "plan:empresarial"}],
+            ]
+        }
+        return texto, botones
+
+    def send_individual_alerts(self, new_docs: list[dict]) -> None:
+        """Envia las alertas nuevas por privado a suscriptores pagos y usuarios en prueba activa.
+
+        Los usuarios en prueba activa suman a su contador; al llegar a
+        PRUEBA_LIMITE_ALERTAS se cierra la prueba y se les ofrece suscribirse.
+        """
+        if not new_docs or self.supabase is None:
+            return
+
+        texto = self.build_message(new_docs)
+        pagados, en_prueba = self._usuarios_elegibles_dm()
+
+        for chat_id in pagados:
+            self._send_to_chat(chat_id, texto)
+
+        for chat_id, alertas_previas in en_prueba.items():
+            self._send_to_chat(chat_id, texto)
+
+            nuevas_alertas = alertas_previas + len(new_docs)
+            actualizacion = {"prueba_alertas_enviadas": nuevas_alertas}
+
+            if nuevas_alertas >= PRUEBA_LIMITE_ALERTAS:
+                actualizacion["prueba_estado"] = "finalizada"
+
+            self.supabase.table("digemid_bot_usuarios").update(actualizacion).eq(
+                "telegram_chat_id", chat_id
+            ).execute()
+
+            if nuevas_alertas >= PRUEBA_LIMITE_ALERTAS:
+                texto_fin, botones_fin = self._mensaje_prueba_terminada()
+                self._send_to_chat(chat_id, texto_fin, botones_fin)
+
+        logger.info(
+            "DM enviados: %s pagados, %s en prueba (de los cuales %s finalizaron su prueba).",
+            len(pagados),
+            len(en_prueba),
+            sum(1 for cid, prev in en_prueba.items() if prev + len(new_docs) >= PRUEBA_LIMITE_ALERTAS),
+        )

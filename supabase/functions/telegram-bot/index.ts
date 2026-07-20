@@ -13,6 +13,8 @@ const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
 const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const ADMIN_CHAT_IDS = Deno.env.get("ADMIN_CHAT_IDS") ?? "";
+const YAPE_NUMERO = Deno.env.get("YAPE_NUMERO") ?? "";
+const YAPE_TITULAR = Deno.env.get("YAPE_TITULAR") ?? "";
 
 const NIVEL_LIMITES_DIARIOS: Record<string, number | null> = {
   gratis: 5,
@@ -207,6 +209,22 @@ function planesKeyboard() {
     ],
   };
 }
+
+function trialKeyboard(nivelInteres: string) {
+  return {
+    inline_keyboard: [
+      [{ text: "🎁 Empezar prueba gratuita", callback_data: "trial:iniciar" }],
+      [{ text: `💳 Ya quiero el plan (S/${NIVEL_PRECIOS[nivelInteres]}/mes)`, callback_data: `plan:${nivelInteres}` }],
+    ],
+  };
+}
+
+const TRIAL_TEXTO =
+  "🎉 <b>¡Bienvenido a RegAlert DIGEMID!</b>\n\n" +
+  "Antes de suscribirte, prueba gratis:\n" +
+  "✅ Alertas de DIGEMID directo a tu Telegram (no solo cuando preguntas)\n" +
+  "✅ Hasta 5 consultas con IA al día, citando la norma exacta\n\n" +
+  "La prueba dura hasta <b>14 días o 3 alertas</b>, lo que llegue primero.";
 
 const PLANES_TEXTO_CORTO =
   "• <b>Básico</b> S/29 — 30 consultas/día\n• <b>Consultoría</b> S/79 — 100/día\n• <b>Empresarial</b> S/199 — sin límite";
@@ -484,6 +502,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/suscribirme nivel</b>",
     "Pide activar un plan pagado (basico, consultoria o empresarial). Ejemplo: /suscribirme basico",
+    "",
+    "<b>/pague codigo_de_operacion</b>",
+    "Reporta el código de operación de tu Yape luego de pagar un plan. Ejemplo: /pague 000123456",
     "",
     "<b>/detalle 50-2026</b>",
     "Consulta una alerta por número o código.",
@@ -1189,29 +1210,124 @@ async function solicitarPlan(
 ): Promise<void> {
   await logConsulta({ chatId, userId, command: "/suscribirme", queryText: nivelSolicitado, status: "ok" });
 
-  const admins = ADMIN_CHAT_IDS
-    .split(",")
-    .map((item: string) => item.trim())
-    .filter((item: string) => item.length > 0);
-
-  const { data: usuario } = await supabase
+  await supabase
     .from("digemid_bot_usuarios")
-    .select("nombre, telefono, username")
-    .eq("telegram_chat_id", chatId)
-    .maybeSingle();
+    .update({ pago_pendiente_nivel: nivelSolicitado })
+    .eq("telegram_chat_id", chatId);
 
-  const nombreMostrado = usuario?.nombre || "Usuario";
+  const precio = NIVEL_PRECIOS[nivelSolicitado];
 
-  for (const adminId of admins) {
-    await sendMessage(
-      adminId,
-      `💳 <b>Solicitud de suscripción</b>\n\nNombre: ${escapeHtml(nombreMostrado)}\nTeléfono: ${escapeHtml(usuario?.telefono ?? "sin dato")}\nchat_id: <code>${escapeHtml(chatId)}</code>\nPlan solicitado: <b>${escapeHtml(nivelSolicitado)}</b> (S/${NIVEL_PRECIOS[nivelSolicitado]}/mes)\n\nUsa <code>/activar ${escapeHtml(chatId)} ${escapeHtml(nivelSolicitado)} 30</code> para activarlo.`,
+  if (!YAPE_NUMERO) {
+    // Admin aun no configuro el Yape receptor: avisamos y caemos al flujo manual anterior.
+    const admins = ADMIN_CHAT_IDS
+      .split(",")
+      .map((item: string) => item.trim())
+      .filter((item: string) => item.length > 0);
+
+    for (const adminId of admins) {
+      await sendMessage(
+        adminId,
+        `⚠️ Falta configurar YAPE_NUMERO. Solicitud pendiente de <code>${escapeHtml(chatId)}</code> para plan <b>${escapeHtml(nivelSolicitado)}</b>. Usa <code>/activar ${escapeHtml(chatId)} ${escapeHtml(nivelSolicitado)} 30</code> para activarlo manualmente.`,
+      );
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ Solicitud registrada. En breve te contactamos para coordinar el pago y activar tu plan <b>${escapeHtml(nivelSolicitado)}</b> (S/${precio}/mes).`,
     );
   }
 
   await sendMessage(
     chatId,
-    `✅ Solicitud enviada. En breve te contactamos para coordinar el pago y activar tu plan <b>${escapeHtml(nivelSolicitado)}</b> (S/${NIVEL_PRECIOS[nivelSolicitado]}/mes).`,
+    `💳 Para activar el plan <b>${escapeHtml(nivelSolicitado)}</b> (S/${precio}/mes):\n\n` +
+      `1️⃣ Yapea <b>S/${precio}</b> a este número: <b>${escapeHtml(YAPE_NUMERO)}</b>${YAPE_TITULAR ? ` (${escapeHtml(YAPE_TITULAR)})` : ""}\n` +
+      `2️⃣ Cuando termines, escribe aquí:\n<code>/pague codigo_de_operacion</code>\n\n` +
+      `El código de operación te lo muestra Yape al confirmar el pago. En cuanto lo verifiquemos, activamos tu plan.`,
+  );
+}
+
+async function reportarPagoYape(
+  chatId: string,
+  userId: string | undefined,
+  codigoOperacion: string,
+): Promise<void> {
+  const { data: usuario } = await supabase
+    .from("digemid_bot_usuarios")
+    .select("nombre, telefono, pago_pendiente_nivel")
+    .eq("telegram_chat_id", chatId)
+    .maybeSingle();
+
+  const nivel = usuario?.pago_pendiente_nivel;
+
+  if (!nivel || !(nivel in NIVEL_PRECIOS)) {
+    return await sendMessage(
+      chatId,
+      "Primero elige un plan con <code>/suscribirme basico</code> (o consultoria/empresarial) y luego reporta tu pago.",
+    );
+  }
+
+  const monto = NIVEL_PRECIOS[nivel];
+  const nombreMostrado = usuario?.nombre || "Usuario";
+
+  const { data: pago, error } = await supabase
+    .from("digemid_pagos_yape")
+    .insert({
+      chat_id: chatId,
+      nivel,
+      monto_esperado: monto,
+      codigo_operacion: codigoOperacion,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    if (error.code === "23505") {
+      // Codigo de operacion repetido: alguien ya lo registro antes (mismo usuario o
+      // alguien que lo comparte). No se acepta un codigo dos veces.
+      const admins = ADMIN_CHAT_IDS
+        .split(",")
+        .map((item: string) => item.trim())
+        .filter((item: string) => item.length > 0);
+
+      for (const adminId of admins) {
+        await sendMessage(
+          adminId,
+          `⚠️ <b>Código de operación repetido</b>\n\nchat_id <code>${escapeHtml(chatId)}</code> reportó el código <code>${escapeHtml(codigoOperacion)}</code>, que ya estaba registrado. Revisa si es un intento de reusar/compartir un pago.`,
+        );
+      }
+
+      return await sendMessage(
+        chatId,
+        "⚠️ Ese código de operación ya fue registrado antes. Si crees que es un error, contáctanos.",
+      );
+    }
+
+    return await sendMessage(chatId, `⚠️ Error al reportar el pago: ${escapeHtml(error.message)}`);
+  }
+
+  const admins = ADMIN_CHAT_IDS
+    .split(",")
+    .map((item: string) => item.trim())
+    .filter((item: string) => item.length > 0);
+
+  for (const adminId of admins) {
+    await sendMessage(
+      adminId,
+      `💰 <b>Nuevo pago Yape reportado</b>\n\nNombre: ${escapeHtml(nombreMostrado)}\nTeléfono: ${escapeHtml(usuario?.telefono ?? "sin dato")}\nchat_id: <code>${escapeHtml(chatId)}</code>\nPlan: <b>${escapeHtml(nivel)}</b> (S/${monto}/mes)\nCódigo de operación: <code>${escapeHtml(codigoOperacion)}</code>\n\nVerifica en tu Yape que el código y el monto coincidan antes de confirmar.`,
+      {
+        inline_keyboard: [
+          [
+            { text: "✅ Confirmar pago", callback_data: `pago:confirmar:${pago.id}` },
+            { text: "❌ Rechazar", callback_data: `pago:rechazar:${pago.id}` },
+          ],
+        ],
+      },
+    );
+  }
+
+  await sendMessage(
+    chatId,
+    "✅ Recibimos tu código de operación. En cuanto lo verifiquemos, activamos tu plan (normalmente en minutos).",
   );
 }
 
@@ -1287,7 +1403,13 @@ async function handleCommand(
         const nivelSolicitado = payload.slice(5).toLowerCase();
 
         if (nivelSolicitado in NIVEL_PRECIOS && nivelSolicitado !== "gratis") {
-          await solicitarPlan(chatId, userId, nivelSolicitado);
+          await supabase
+            .from("digemid_bot_usuarios")
+            .update({ origen: "landing_page", plan_interes: nivelSolicitado })
+            .eq("telegram_chat_id", chatId);
+
+          await sendMessage(chatId, TRIAL_TEXTO, trialKeyboard(nivelSolicitado));
+          return;
         }
       } else if (payload) {
         await consumirInvitacion(payload, chatId);
@@ -1489,6 +1611,20 @@ async function handleCommand(
     }
 
     return await solicitarPlan(chatId, userId, nivelSolicitado);
+  }
+
+  if (trimmed.startsWith("/pague")) {
+    const codigo = trimmed.replace("/pague", "").trim();
+
+    if (!codigo) {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/pague codigo_de_operacion</code>\n\nEjemplo:\n<code>/pague 000123456</code>",
+      );
+    }
+
+    await logConsulta({ chatId, userId, command: "/pague", queryText: codigo, status: "ok" });
+    return await reportarPagoYape(chatId, userId, codigo);
   }
 
   if (trimmed.startsWith("/activar")) {
@@ -1884,6 +2020,24 @@ async function handleCallback(update: TelegramUpdate) {
     }
   }
 
+  if (data === "trial:iniciar") {
+    await supabase
+      .from("digemid_bot_usuarios")
+      .update({
+        prueba_estado: "activa",
+        prueba_inicio: new Date().toISOString(),
+        prueba_alertas_enviadas: 0,
+      })
+      .eq("telegram_chat_id", chatId);
+
+    return await sendMessage(
+      chatId,
+      "✅ <b>Prueba gratuita activada.</b>\n\nLas próximas alertas de DIGEMID te llegarán aquí automáticamente. " +
+        "Escribe <code>/consulta</code> seguido de tu pregunta cuando quieras (tienes 5 consultas/día).",
+      mainMenu(),
+    );
+  }
+
   if (data.startsWith("plan:")) {
     const nivelSolicitado = data.slice(5).toLowerCase();
 
@@ -1892,6 +2046,67 @@ async function handleCallback(update: TelegramUpdate) {
     }
 
     return;
+  }
+
+  if (data.startsWith("pago:confirmar:") || data.startsWith("pago:rechazar:")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ No autorizado.");
+    }
+
+    const aprobar = data.startsWith("pago:confirmar:");
+    const pagoId = data.split(":")[2];
+
+    const { data: pago, error: pagoError } = await supabase
+      .from("digemid_pagos_yape")
+      .select("id, chat_id, nivel, monto_esperado, estado")
+      .eq("id", pagoId)
+      .maybeSingle();
+
+    if (pagoError || !pago) {
+      return await sendMessage(chatId, "⚠️ No encontré ese pago (¿ya fue procesado?).");
+    }
+
+    if (pago.estado !== "pendiente") {
+      return await sendMessage(chatId, `⚠️ Ese pago ya estaba <b>${escapeHtml(pago.estado)}</b>.`);
+    }
+
+    await supabase
+      .from("digemid_pagos_yape")
+      .update({
+        estado: aprobar ? "confirmado" : "rechazado",
+        confirmado_at: new Date().toISOString(),
+        confirmado_por: chatId,
+      })
+      .eq("id", pagoId);
+
+    if (!aprobar) {
+      await sendMessage(
+        pago.chat_id,
+        "⚠️ No pudimos verificar tu pago. Revisa el código de operación con <code>/pague codigo</code> o contáctanos.",
+      );
+      return await sendMessage(chatId, "❌ Pago rechazado.");
+    }
+
+    await supabase
+      .from("digemid_bot_usuarios")
+      .update({ pago_pendiente_nivel: null })
+      .eq("telegram_chat_id", pago.chat_id);
+
+    const { fechaFin, error } = await activarSuscripcion(pago.chat_id, pago.nivel, 30, "yape");
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Pago confirmado pero hubo un error al activar: ${escapeHtml(error.message)}`);
+    }
+
+    await sendMessage(
+      pago.chat_id,
+      `✅ ¡Tu plan <b>${escapeHtml(pago.nivel)}</b> está activo hasta <b>${escapeHtml(fechaFin)}</b>! Gracias por tu pago.`,
+    );
+
+    return await sendMessage(
+      chatId,
+      `✅ Activado <b>${escapeHtml(pago.nivel)}</b> para <code>${escapeHtml(pago.chat_id)}</code> hasta <b>${escapeHtml(fechaFin)}</b>.`,
+    );
   }
 
   if (data.startsWith("activar:")) {

@@ -1,0 +1,56 @@
+name: DIGEMID - Extraer Texto Normativa (directo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de ejecucion"
+        required: true
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - apply
+      limit:
+        description: "Maximo de normas a procesar"
+        required: false
+        default: "50"
+        type: string
+
+jobs:
+  extraer-texto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Extraer texto de normativa
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/extract_normativa_text_simple.py --limit "${{ inputs.limit }}")
+
+          if [[ "${{ inputs.mode }}" != "apply" ]]; then
+            CMD+=(--dry-run)
+          fi
+
+          printf 'Ejecutando: %q ' "${CMD[@]}"
+          printf '\n'
+          "${CMD[@]}"

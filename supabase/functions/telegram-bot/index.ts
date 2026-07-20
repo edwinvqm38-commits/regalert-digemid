@@ -210,13 +210,31 @@ function planesKeyboard() {
   };
 }
 
+const NOMBRES_PLAN: Record<string, string> = {
+  basico: "Básico",
+  consultoria: "Consultoría",
+  empresarial: "Empresarial",
+};
+
 function trialKeyboard(nivelInteres: string) {
-  return {
-    inline_keyboard: [
-      [{ text: "🎁 Empezar prueba gratuita", callback_data: "trial:iniciar" }],
-      [{ text: `💳 Ya quiero el plan (S/${NIVEL_PRECIOS[nivelInteres]}/mes)`, callback_data: `plan:${nivelInteres}` }],
-    ],
-  };
+  const ordenNiveles = ["basico", "consultoria", "empresarial"];
+  const ordenados = [nivelInteres, ...ordenNiveles.filter((nivel) => nivel !== nivelInteres)];
+
+  const filas: { text: string; callback_data: string }[][] = [
+    [{ text: "🎁 Empezar prueba gratuita", callback_data: "trial:iniciar" }],
+  ];
+
+  for (const nivel of ordenados) {
+    const marca = nivel === nivelInteres ? "⭐ " : "";
+    filas.push([
+      {
+        text: `💳 ${marca}${NOMBRES_PLAN[nivel]} — S/${NIVEL_PRECIOS[nivel]}/mes`,
+        callback_data: `plan:${nivel}`,
+      },
+    ]);
+  }
+
+  return { inline_keyboard: filas };
 }
 
 const TRIAL_TEXTO =
@@ -224,7 +242,8 @@ const TRIAL_TEXTO =
   "Antes de suscribirte, prueba gratis:\n" +
   "✅ Alertas de DIGEMID directo a tu Telegram (no solo cuando preguntas)\n" +
   "✅ Hasta 5 consultas con IA al día, citando la norma exacta\n\n" +
-  "La prueba dura hasta <b>14 días o 3 alertas</b>, lo que llegue primero.";
+  "La prueba dura hasta <b>14 días o 3 alertas</b>, lo que llegue primero.\n\n" +
+  "O, si ya sabes que quieres suscribirte, elige tu plan abajo (⭐ el que elegiste en la web):";
 
 const PLANES_TEXTO_CORTO =
   "• <b>Básico</b> S/29 — 30 consultas/día\n• <b>Consultoría</b> S/79 — 100/día\n• <b>Empresarial</b> S/199 — sin límite";

@@ -1,0 +1,44 @@
+name: Enviar documento a Telegram (admin)
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_path:
+        description: "Ruta del archivo a enviar"
+        required: true
+        default: "docs/GUIA_BOT_REGALERT.md"
+        type: string
+      caption:
+        description: "Texto corto que acompaña el archivo"
+        required: false
+        default: "Guia rapida del bot RegAlert DIGEMID"
+        type: string
+
+jobs:
+  enviar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests python-dotenv
+
+      - name: Enviar documento
+        run: |
+          python scripts/send_telegram_document.py "${{ inputs.file_path }}" --caption "${{ inputs.caption }}"

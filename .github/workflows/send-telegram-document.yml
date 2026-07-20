@@ -6,7 +6,7 @@ on:
       file_path:
         description: "Ruta del archivo a enviar"
         required: true
-        default: "docs/GUIA_BOT_REGALERT.md"
+        default: "docs/GUIA_ADMIN_REGALERT.md"
         type: string
       caption:
         description: "Texto corto que acompaña el archivo"

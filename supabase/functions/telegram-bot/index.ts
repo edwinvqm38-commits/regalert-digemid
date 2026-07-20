@@ -23,6 +23,13 @@ const NIVEL_LIMITES_DIARIOS: Record<string, number | null> = {
 
 const LIMITE_DIARIO_GLOBAL = 300;
 
+const NIVEL_PRECIOS: Record<string, number> = {
+  gratis: 0,
+  basico: 29,
+  consultoria: 79,
+  empresarial: 199,
+};
+
 const CONSULTA_SYSTEM_PROMPT = `Eres un asistente que responde preguntas sobre alertas y \
 normativa de DIGEMID (Peru) usando UNICAMENTE el texto de los documentos que \
 se te entregan como contexto.
@@ -255,10 +262,14 @@ async function consumirInvitacion(codigo: string, chatId: string): Promise<void>
     .update({ estado: "usado", telegram_chat_id: chatId, used_at: new Date().toISOString() })
     .eq("id", invitacion.id);
 
-  if (invitacion.telefono) {
+  if (invitacion.telefono || invitacion.nombre) {
+    const actualizaciones: Record<string, string> = {};
+    if (invitacion.telefono) actualizaciones.telefono = invitacion.telefono;
+    if (invitacion.nombre) actualizaciones.nombre = invitacion.nombre;
+
     await supabase
       .from("digemid_bot_usuarios")
-      .update({ telefono: invitacion.telefono })
+      .update(actualizaciones)
       .eq("telegram_chat_id", chatId);
   }
 
@@ -313,19 +324,34 @@ async function upsertUsuario(update: TelegramUpdate, chatId: string) {
   if (!from) return;
 
   try {
-    await supabase.from("digemid_bot_usuarios").upsert(
-      {
+    const { data: existing } = await supabase
+      .from("digemid_bot_usuarios")
+      .select("id")
+      .eq("telegram_chat_id", chatId)
+      .maybeSingle();
+
+    if (existing) {
+      // No tocamos "nombre" aqui: /renombrar puede haberlo personalizado,
+      // y no queremos que un mensaje cualquiera lo pise con el nombre de Telegram.
+      await supabase
+        .from("digemid_bot_usuarios")
+        .update({
+          telegram_user_id: String(from.id),
+          username: from.username ?? null,
+          estado: "activo",
+          last_seen_at: new Date().toISOString(),
+        })
+        .eq("telegram_chat_id", chatId);
+    } else {
+      await supabase.from("digemid_bot_usuarios").insert({
         telegram_chat_id: chatId,
         telegram_user_id: String(from.id),
         nombre: from.first_name ?? null,
         username: from.username ?? null,
         estado: "activo",
         last_seen_at: new Date().toISOString(),
-      },
-      {
-        onConflict: "telegram_chat_id",
-      },
-    );
+      });
+    }
   } catch (_error) {
     // No bloquea la respuesta del bot.
   }
@@ -400,8 +426,8 @@ function mainMenuText() {
   ].join("\n");
 }
 
-function helpText() {
-  return [
+function helpText(esAdmin = false) {
+  const base = [
     "ℹ️ <b>Comandos disponibles</b>",
     "",
     "<b>/start</b>",
@@ -434,6 +460,9 @@ function helpText() {
     "<b>/consulta pregunta</b>",
     "Responde en lenguaje natural citando la alerta/norma fuente. Ejemplo: /consulta que paso con el Opdivo falsificado",
     "",
+    "<b>/suscribirme nivel</b>",
+    "Pide activar un plan pagado (basico, consultoria o empresarial). Ejemplo: /suscribirme basico",
+    "",
     "<b>/detalle 50-2026</b>",
     "Consulta una alerta por número o código.",
     "",
@@ -464,7 +493,39 @@ function helpText() {
     "Regresa al menú anterior o al menú principal.",
     "",
     "Usa /menu para volver al panel principal.",
-  ].join("\n");
+  ];
+
+  if (!esAdmin) {
+    return base.join("\n");
+  }
+
+  const admin = [
+    "",
+    "🔐 <b>Comandos de administrador</b>",
+    "",
+    "<b>/activar chat_id [nivel dias metodo_pago]</b>",
+    "Activa un plan pagado. Sin nivel/dias, muestra botones rapidos.",
+    "",
+    "<b>/desactivar chat_id</b>",
+    "Cancela la suscripcion de un usuario.",
+    "",
+    "<b>/usuarios</b>",
+    "Resumen: total de usuarios, conteo por estado/nivel y pendientes de pago.",
+    "",
+    "<b>/membresias</b>",
+    "Lista completa de suscripciones con fechas de inicio y fin.",
+    "",
+    "<b>/ingresos</b>",
+    "Ingresos del mes actual, desglosados por plan.",
+    "",
+    "<b>/invitar telefono [nombre]</b>",
+    "Genera un enlace de invitacion para un usuario nuevo (WhatsApp + Telegram).",
+    "",
+    "<b>/renombrar chat_id nombre</b>",
+    "Cambia el nombre mostrado de un usuario.",
+  ];
+
+  return [...base, ...admin].join("\n");
 }
 
 function getLimaDateParts() {
@@ -511,6 +572,15 @@ function getCurrentWeekBounds() {
   const weekEnd = shiftIsoDate(weekStart, 6);
 
   return { weekStart, weekEnd };
+}
+
+function getCurrentMonthBoundsLima() {
+  const { isoDate } = getLimaDateParts();
+  const [year, month] = isoDate.split("-").map(Number);
+  const startIso = `${year}-${String(month).padStart(2, "0")}-01`;
+  const nextIso = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+
+  return { startIso, nextIso };
 }
 
 function formatWeekAlertList(rows: any[], total: number, shownLimit: number) {
@@ -951,6 +1021,105 @@ function formatResumenUsuarios(totalUsuarios: number, suscripciones: any[]): str
   return lines.join("\n");
 }
 
+function referenciaUsuario(sub: any, nombresPorChatId: Map<string, string>): string {
+  const nombre = nombresPorChatId.get(sub.telegram_chat_id);
+
+  if (nombre) return nombre;
+  if (sub.telegram_username) return `@${sub.telegram_username}`;
+
+  return sub.telegram_chat_id;
+}
+
+function formatMembresias(suscripciones: any[], nombresPorChatId: Map<string, string>): string {
+  const hoy = getLimaDateParts().isoDate;
+
+  const grupos: Record<string, any[]> = {
+    activo: [],
+    pendiente_pago: [],
+    vencido: [],
+    cancelado: [],
+  };
+
+  for (const sub of suscripciones) {
+    const vencida = sub.estado === "activo" && sub.fecha_fin && sub.fecha_fin < hoy;
+    const estadoEfectivo = vencida ? "vencido" : sub.estado;
+    (grupos[estadoEfectivo] ?? (grupos[estadoEfectivo] = [])).push(sub);
+  }
+
+  const lines = ["📋 <b>Membresías</b>", ""];
+
+  const secciones: [string, string][] = [
+    ["activo", "✅ Activas"],
+    ["pendiente_pago", "⏳ Pendientes de pago"],
+    ["vencido", "⚠️ Vencidas"],
+    ["cancelado", "🚫 Canceladas"],
+  ];
+
+  for (const [clave, titulo] of secciones) {
+    const items = grupos[clave] ?? [];
+    if (!items.length) continue;
+
+    lines.push(`<b>${titulo}</b>`);
+    for (const sub of items) {
+      const referencia = referenciaUsuario(sub, nombresPorChatId);
+      lines.push(
+        `• <b>${escapeHtml(referencia)}</b> — ${escapeHtml(sub.nivel)} · ${escapeHtml(sub.fecha_inicio ?? "?")} → ${escapeHtml(sub.fecha_fin ?? "sin fecha")}`,
+      );
+    }
+    lines.push("");
+  }
+
+  if (!suscripciones.length) {
+    lines.push("Todavía no hay ninguna suscripción registrada.");
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+function formatIngresos(altas: any[], startIso: string): string {
+  const desglose: Record<string, { cantidad: number; subtotal: number }> = {};
+  let total = 0;
+
+  for (const sub of altas) {
+    const precio = NIVEL_PRECIOS[sub.nivel] ?? 0;
+    if (!desglose[sub.nivel]) desglose[sub.nivel] = { cantidad: 0, subtotal: 0 };
+    desglose[sub.nivel].cantidad += 1;
+    desglose[sub.nivel].subtotal += precio;
+    total += precio;
+  }
+
+  const mesLabel = new Date(`${startIso}T12:00:00Z`).toLocaleDateString("es-PE", {
+    month: "long",
+    year: "numeric",
+    timeZone: "America/Lima",
+  });
+
+  const lines = [
+    `💰 <b>Ingresos de ${escapeHtml(mesLabel)}</b>`,
+    "",
+    `<b>Total: S/ ${total.toFixed(2)}</b>`,
+    "",
+  ];
+
+  const nivelesOrden = ["basico", "consultoria", "empresarial"];
+  const huboAltas = nivelesOrden.some((nivel) => desglose[nivel]);
+
+  if (!huboAltas) {
+    lines.push("Todavía no hay altas ni renovaciones pagadas este mes.");
+  } else {
+    lines.push("<b>Por plan</b>");
+    for (const nivel of nivelesOrden) {
+      const info = desglose[nivel];
+      if (!info) continue;
+      lines.push(
+        `• ${escapeHtml(nivel)}: ${info.cantidad} × S/ ${NIVEL_PRECIOS[nivel]} = <b>S/ ${info.subtotal.toFixed(2)}</b>`,
+      );
+    }
+  }
+
+  return lines.join("\n");
+}
+
 async function answerConsulta(
   question: string,
 ): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
@@ -985,6 +1154,30 @@ async function answerConsulta(
   }
 
   throw new Error("Falta configurar DEEPSEEK_API_KEY o ANTHROPIC_API_KEY");
+}
+
+async function activarSuscripcion(
+  targetChatId: string,
+  nivel: string,
+  dias: number,
+  metodoPago?: string,
+): Promise<{ fechaFin: string; error: { message: string } | null }> {
+  const { isoDate } = getLimaDateParts();
+  const fechaFin = shiftIsoDate(isoDate, dias);
+
+  const { error } = await supabase.from("digemid_suscripciones").upsert(
+    {
+      telegram_chat_id: targetChatId,
+      nivel,
+      estado: "activo",
+      fecha_inicio: isoDate,
+      fecha_fin: fechaFin,
+      metodo_pago: metodoPago ?? null,
+    },
+    { onConflict: "telegram_chat_id" },
+  );
+
+  return { fechaFin, error };
 }
 
 async function getAlertDetail(alertNumber: string) {
@@ -1045,7 +1238,7 @@ async function handleCommand(
   if (trimmed === "/ayuda") {
     await logConsulta({ chatId, userId, command: "/ayuda", status: "ok" });
 
-    return await sendMessage(chatId, helpText(), mainMenu());
+    return await sendMessage(chatId, helpText(isAdmin(chatId)), mainMenu());
   }
 
   if (trimmed === "/alertas") {
@@ -1217,6 +1410,44 @@ async function handleCommand(
     );
   }
 
+  if (trimmed.startsWith("/suscribirme")) {
+    const nivelSolicitado = trimmed.replace("/suscribirme", "").trim().toLowerCase();
+
+    if (!nivelSolicitado || !(nivelSolicitado in NIVEL_PRECIOS) || nivelSolicitado === "gratis") {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/suscribirme basico</code>\n\nPlanes disponibles:\n• <b>basico</b> — S/29/mes (30 consultas/día)\n• <b>consultoria</b> — S/79/mes (100 consultas/día)\n• <b>empresarial</b> — S/199/mes (sin límite)",
+      );
+    }
+
+    await logConsulta({ chatId, userId, command: "/suscribirme", queryText: nivelSolicitado, status: "ok" });
+
+    const admins = ADMIN_CHAT_IDS
+      .split(",")
+      .map((item: string) => item.trim())
+      .filter((item: string) => item.length > 0);
+
+    const { data: usuario } = await supabase
+      .from("digemid_bot_usuarios")
+      .select("nombre, telefono, username")
+      .eq("telegram_chat_id", chatId)
+      .maybeSingle();
+
+    const nombreMostrado = usuario?.nombre || "Usuario";
+
+    for (const adminId of admins) {
+      await sendMessage(
+        adminId,
+        `💳 <b>Solicitud de suscripción</b>\n\nNombre: ${escapeHtml(nombreMostrado)}\nTeléfono: ${escapeHtml(usuario?.telefono ?? "sin dato")}\nchat_id: <code>${escapeHtml(chatId)}</code>\nPlan solicitado: <b>${escapeHtml(nivelSolicitado)}</b> (S/${NIVEL_PRECIOS[nivelSolicitado]}/mes)\n\nUsa <code>/activar ${escapeHtml(chatId)} ${escapeHtml(nivelSolicitado)} 30</code> para activarlo.`,
+      );
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ Solicitud enviada. En breve te contactamos para activar tu plan <b>${escapeHtml(nivelSolicitado)}</b>.`,
+    );
+  }
+
   if (trimmed.startsWith("/activar")) {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -1225,10 +1456,24 @@ async function handleCommand(
     const parts = trimmed.split(/\s+/).slice(1);
     const [targetChatId, nivel, diasStr, metodoPago] = parts;
 
-    if (!targetChatId || !nivel || !diasStr) {
+    if (!targetChatId) {
       return await sendMessage(
         chatId,
-        "Uso:\n<code>/activar chat_id nivel dias [metodo_pago]</code>\n\nEjemplo:\n<code>/activar 123456789 basico 30 yape</code>\n\nNiveles: gratis, basico, consultoria, empresarial",
+        "Uso:\n<code>/activar chat_id [nivel dias metodo_pago]</code>\n\nEjemplo:\n<code>/activar 123456789 basico 30 yape</code>\n\nO solo <code>/activar chat_id</code> para elegir el plan con botones.",
+      );
+    }
+
+    if (!nivel || !diasStr) {
+      return await sendMessage(
+        chatId,
+        `¿Qué plan le doy a <code>${escapeHtml(targetChatId)}</code>?`,
+        {
+          inline_keyboard: [
+            [{ text: "Básico (S/29) — 30 días", callback_data: `activar:${targetChatId}:basico:30` }],
+            [{ text: "Consultoría (S/79) — 30 días", callback_data: `activar:${targetChatId}:consultoria:30` }],
+            [{ text: "Empresarial (S/199) — 30 días", callback_data: `activar:${targetChatId}:empresarial:30` }],
+          ],
+        },
       );
     }
 
@@ -1242,20 +1487,7 @@ async function handleCommand(
       return await sendMessage(chatId, "⚠️ Los días deben ser un número entero positivo.");
     }
 
-    const { isoDate } = getLimaDateParts();
-    const fechaFin = shiftIsoDate(isoDate, dias);
-
-    const { error } = await supabase.from("digemid_suscripciones").upsert(
-      {
-        telegram_chat_id: targetChatId,
-        nivel,
-        estado: "activo",
-        fecha_inicio: isoDate,
-        fecha_fin: fechaFin,
-        metodo_pago: metodoPago ?? null,
-      },
-      { onConflict: "telegram_chat_id" },
-    );
+    const { fechaFin, error } = await activarSuscripcion(targetChatId, nivel, dias, metodoPago);
 
     if (error) {
       return await sendMessage(chatId, `⚠️ Error al activar: ${escapeHtml(error.message)}`);
@@ -1286,6 +1518,58 @@ async function handleCommand(
     }
 
     return await sendMessage(chatId, formatResumenUsuarios(totalUsuarios ?? 0, suscripciones ?? []));
+  }
+
+  if (trimmed === "/membresias") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { data: suscripciones, error: suscripcionesError } = await supabase
+      .from("digemid_suscripciones")
+      .select("telegram_chat_id, telegram_username, nivel, estado, fecha_inicio, fecha_fin")
+      .order("fecha_fin", { ascending: true });
+
+    if (suscripcionesError) {
+      return await sendMessage(chatId, `⚠️ Error al consultar membresías: ${escapeHtml(suscripcionesError.message)}`);
+    }
+
+    const chatIds = [...new Set((suscripciones ?? []).map((s) => s.telegram_chat_id))];
+    const nombresPorChatId = new Map<string, string>();
+
+    if (chatIds.length) {
+      const { data: usuarios } = await supabase
+        .from("digemid_bot_usuarios")
+        .select("telegram_chat_id, nombre")
+        .in("telegram_chat_id", chatIds);
+
+      for (const u of usuarios ?? []) {
+        if (u.nombre) nombresPorChatId.set(u.telegram_chat_id, u.nombre);
+      }
+    }
+
+    return await sendMessage(chatId, formatMembresias(suscripciones ?? [], nombresPorChatId));
+  }
+
+  if (trimmed === "/ingresos") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { startIso, nextIso } = getCurrentMonthBoundsLima();
+
+    const { data: altas, error: ingresosError } = await supabase
+      .from("digemid_suscripciones")
+      .select("nivel")
+      .neq("nivel", "gratis")
+      .gte("fecha_inicio", startIso)
+      .lt("fecha_inicio", nextIso);
+
+    if (ingresosError) {
+      return await sendMessage(chatId, `⚠️ Error al calcular ingresos: ${escapeHtml(ingresosError.message)}`);
+    }
+
+    return await sendMessage(chatId, formatIngresos(altas ?? [], startIso));
   }
 
   if (trimmed.startsWith("/invitar")) {
@@ -1330,7 +1614,38 @@ async function handleCommand(
 
     return await sendMessage(
       chatId,
-      `✅ Invitación creada${nombre ? ` para <b>${escapeHtml(nombre)}</b>` : ""} (${escapeHtml(telefono)}).\n\n📲 Envíaselo por WhatsApp con un clic:\n${escapeHtml(waLink)}\n\n🔗 O el enlace directo de Telegram:\n${escapeHtml(telegramLink)}\n\nTe aviso apenas toque "Iniciar".`,
+      `✅ Invitación creada${nombre ? ` para <b>${escapeHtml(nombre)}</b>` : ""} (${escapeHtml(telefono)}).\n\n📲 Envíaselo por WhatsApp con un clic:\n${escapeHtml(waLink)}\n\n🔗 O el enlace directo de Telegram:\n${escapeHtml(telegramLink)}\n\nTe aviso apenas toque \"Iniciar\".`,
+    );
+  }
+
+  if (trimmed.startsWith("/renombrar")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const parts = trimmed.split(/\s+/).slice(1);
+    const targetChatId = parts[0];
+    const nuevoNombre = parts.slice(1).join(" ").trim();
+
+    if (!targetChatId || !nuevoNombre) {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/renombrar chat_id nuevo nombre</code>\n\nEjemplo:\n<code>/renombrar 123456789 Juan Perez</code>",
+      );
+    }
+
+    const { error } = await supabase
+      .from("digemid_bot_usuarios")
+      .update({ nombre: nuevoNombre })
+      .eq("telegram_chat_id", targetChatId);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al renombrar: ${escapeHtml(error.message)}`);
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ <code>${escapeHtml(targetChatId)}</code> ahora se llama <b>${escapeHtml(nuevoNombre)}</b>.`,
     );
   }
 
@@ -1480,6 +1795,30 @@ async function handleCallback(update: TelegramUpdate) {
     return;
   }
 
+  if (data.startsWith("activar:")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ No autorizado.");
+    }
+
+    const [, targetChatId, nivel, diasStr] = data.split(":");
+    const dias = parseInt(diasStr, 10);
+
+    if (!targetChatId || !nivel || !Number.isFinite(dias)) {
+      return await sendMessage(chatId, "⚠️ Botón inválido, intenta de nuevo con /activar.");
+    }
+
+    const { fechaFin, error } = await activarSuscripcion(targetChatId, nivel, dias);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al activar: ${escapeHtml(error.message)}`);
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ Activado <b>${escapeHtml(nivel)}</b> para <code>${escapeHtml(targetChatId)}</code> hasta <b>${escapeHtml(fechaFin)}</b>.`,
+    );
+  }
+
   if (data === "menu:principal") {
     return await sendMessage(chatId, mainMenuText(), mainMenu());
   }
@@ -1493,7 +1832,7 @@ async function handleCallback(update: TelegramUpdate) {
   }
 
   if (data === "menu:ayuda") {
-    return await sendMessage(chatId, helpText(), mainMenu());
+    return await sendMessage(chatId, helpText(isAdmin(chatId)), mainMenu());
   }
 
   if (data === "alertas:ultimas") {

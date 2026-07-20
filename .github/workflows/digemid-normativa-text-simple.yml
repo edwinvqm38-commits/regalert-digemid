@@ -16,6 +16,11 @@ on:
         required: false
         default: "20"
         type: string
+      document_key:
+        description: "Reprocesar SOLO esta norma (opcional, ej. RM-554-2022-MINSA)"
+        required: false
+        default: ""
+        type: string
 
   # Corrida lenta automatica: ~20 normas al dia, 10:30 a. m. Peru (15:30 UTC).
   schedule:
@@ -71,6 +76,9 @@ jobs:
           if [[ "$MODE" != "apply" ]]; then
             CMD+=(--dry-run)
           fi
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--document-key "${{ inputs.document_key }}")
+          fi
           printf 'Ejecutando: %q ' "${CMD[@]}"; printf '\n'
           "${CMD[@]}"
 
@@ -90,6 +98,9 @@ jobs:
           CMD=(python scripts/extract_normativa_text_simple.py --limit "$LIMIT")
           if [[ "$MODE" != "apply" ]]; then
             CMD+=(--dry-run)
+          fi
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--document-key "${{ inputs.document_key }}")
           fi
 
           printf 'Ejecutando: %q ' "${CMD[@]}"

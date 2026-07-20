@@ -58,14 +58,22 @@ def get_normas_sin_pdf(supabase, limit: int, document_key: str | None = None) ->
     return response.data or []
 
 
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
+    "Referer": "https://www.digemid.minsa.gob.pe/",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
 def fetch_html(url: str) -> str | None:
     for intento in range(1, MAX_REINTENTOS_429 + 1):
         try:
-            response = requests.get(
-                url,
-                timeout=60,
-                headers={"User-Agent": "Mozilla/5.0 RegAlert-DIGEMID-NormativaCrawler/1.0"},
-            )
+            response = requests.get(url, timeout=60, headers=BROWSER_HEADERS)
         except Exception as error:
             logger.warning("Error de red en %s: %s", url, error)
             return None

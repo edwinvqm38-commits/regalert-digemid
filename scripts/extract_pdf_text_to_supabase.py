@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 PAGE_TABLE_NAME = "digemid_documento_paginas"
 TEXT_METHOD = "pymupdf"
+DELAY_BETWEEN_DESCARGAS_SEGUNDOS = 2.0
+MAX_REINTENTOS_429 = 3
 
 
 def load_env():
@@ -91,17 +94,32 @@ def download_pdf(file_url: str, local_path: Path) -> Path:
 
     logger.info("Descargando PDF: %s", file_url)
 
-    response = requests.get(
-        file_url,
-        timeout=90,
-        headers={
-            "User-Agent": "RegAlert-DIGEMID-PDFTextExtractor/1.0",
-        },
-    )
-    response.raise_for_status()
-    local_path.write_bytes(response.content)
+    for intento in range(1, MAX_REINTENTOS_429 + 1):
+        response = requests.get(
+            file_url,
+            timeout=90,
+            headers={
+                "User-Agent": "RegAlert-DIGEMID-PDFTextExtractor/1.0",
+            },
+        )
 
-    return local_path
+        if response.status_code == 429 and intento < MAX_REINTENTOS_429:
+            espera = float(response.headers.get("Retry-After", 10 * intento))
+            logger.warning(
+                "429 al descargar %s (intento %s/%s). Esperando %.1fs antes de reintentar.",
+                file_url,
+                intento,
+                MAX_REINTENTOS_429,
+                espera,
+            )
+            time.sleep(espera)
+            continue
+
+        response.raise_for_status()
+        local_path.write_bytes(response.content)
+        return local_path
+
+    raise RuntimeError(f"No se pudo descargar {file_url} tras {MAX_REINTENTOS_429} intentos (429)")
 
 
 def extract_pages_from_pdf(local_path: Path) -> list[dict]:
@@ -261,7 +279,10 @@ def main():
     error_count = 0
     temp_dir = Path("tmp") / "pdf_text_extract"
 
-    for row in rows:
+    for index, row in enumerate(rows):
+        if index > 0:
+            time.sleep(DELAY_BETWEEN_DESCARGAS_SEGUNDOS)
+
         document_id = row["id"]
         document_key = row.get("document_key") or str(document_id)
         file_url = row.get("file_url")

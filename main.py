@@ -39,6 +39,7 @@ def run_pipeline() -> None:
 
     notifier = NotifyAgent()
     notifier.send_summary(new_docs)
+    notifier.send_individual_alerts(new_docs)
 
     logger.info("--- Proceso finalizado correctamente ---")
 

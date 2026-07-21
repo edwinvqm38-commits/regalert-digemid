@@ -2,6 +2,11 @@ name: DIGEMID - Enviar alerta de ejemplo a usuarios en prueba
 
 on:
   workflow_dispatch:
+    inputs:
+      chat_id:
+        description: "Opcional: chat_id especifico a donde enviar (ignora el filtro de prueba activa)"
+        required: false
+        type: string
 
 jobs:
   enviar:
@@ -12,6 +17,7 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      EJEMPLO_CHAT_ID: ${{ inputs.chat_id }}
 
     steps:
       - name: Descargar repositorio

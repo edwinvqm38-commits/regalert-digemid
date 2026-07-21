@@ -216,9 +216,11 @@ const NOMBRES_PLAN: Record<string, string> = {
   empresarial: "Empresarial",
 };
 
-function trialKeyboard(nivelInteres: string) {
+function trialKeyboard(nivelInteres?: string) {
   const ordenNiveles = ["basico", "consultoria", "empresarial"];
-  const ordenados = [nivelInteres, ...ordenNiveles.filter((nivel) => nivel !== nivelInteres)];
+  const ordenados = nivelInteres
+    ? [nivelInteres, ...ordenNiveles.filter((nivel) => nivel !== nivelInteres)]
+    : ordenNiveles;
 
   const filas: { text: string; callback_data: string }[][] = [
     [{ text: "🎁 Empezar prueba gratuita", callback_data: "trial:iniciar" }],
@@ -239,11 +241,15 @@ function trialKeyboard(nivelInteres: string) {
 
 const TRIAL_TEXTO =
   "🎉 <b>¡Bienvenido a RegAlert DIGEMID!</b>\n\n" +
-  "Antes de suscribirte, prueba gratis:\n" +
+  "Para usar el bot necesitas elegir una opción:\n" +
   "✅ Alertas de DIGEMID directo a tu Telegram (no solo cuando preguntas)\n" +
   "✅ Hasta 5 consultas con IA al día, citando la norma exacta\n\n" +
-  "La prueba dura hasta <b>14 días o 3 alertas</b>, lo que llegue primero.\n\n" +
-  "O, si ya sabes que quieres suscribirte, elige tu plan abajo (⭐ el que elegiste en la web):";
+  "La <b>prueba gratuita</b> dura hasta <b>14 días o 3 alertas</b>, lo que llegue primero.\n\n" +
+  "O, si ya sabes que quieres suscribirte, elige tu plan abajo:";
+
+const ACCESO_REQUERIDO_TEXTO =
+  "🔒 <b>Necesitas una prueba gratuita activa o un plan para usar esto.</b>\n\n" +
+  "La prueba gratuita dura <b>14 días o 3 alertas</b>, lo que llegue primero. Elige una opción:";
 
 const PLANES_TEXTO_CORTO =
   "• <b>Básico</b> S/29 — 30 consultas/día\n• <b>Consultoría</b> S/79 — 100/día\n• <b>Empresarial</b> S/199 — sin límite";
@@ -321,16 +327,16 @@ async function consumirInvitacion(codigo: string, chatId: string): Promise<void>
     .update({ estado: "usado", telegram_chat_id: chatId, used_at: new Date().toISOString() })
     .eq("id", invitacion.id);
 
-  if (invitacion.telefono || invitacion.nombre) {
-    const actualizaciones: Record<string, string> = {};
-    if (invitacion.telefono) actualizaciones.telefono = invitacion.telefono;
-    if (invitacion.nombre) actualizaciones.nombre = invitacion.nombre;
+  // Invitacion directa = caso manual: queda exenta de la prueba con limite
+  // de tiempo/alertas, igual que los usuarios ya existentes antes del cambio.
+  const actualizaciones: Record<string, unknown> = { plan_gratis_legado: true };
+  if (invitacion.telefono) actualizaciones.telefono = invitacion.telefono;
+  if (invitacion.nombre) actualizaciones.nombre = invitacion.nombre;
 
-    await supabase
-      .from("digemid_bot_usuarios")
-      .update(actualizaciones)
-      .eq("telegram_chat_id", chatId);
-  }
+  await supabase
+    .from("digemid_bot_usuarios")
+    .update(actualizaciones)
+    .eq("telegram_chat_id", chatId);
 
   const admins = ADMIN_CHAT_IDS
     .split(",")
@@ -600,6 +606,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/renombrar chat_id nombre</b>",
     "Cambia el nombre mostrado de un usuario.",
+    "",
+    "<b>/gratis chat_id</b>",
+    "Deja a esa persona con acceso gratis permanente (caso manual, sin límite de prueba).",
   ];
 
   return [...base, ...admin].join("\n");
@@ -1032,6 +1041,32 @@ async function getNivelUsuario(chatId: string): Promise<string> {
   return data.nivel;
 }
 
+type EstadoAcceso = {
+  legado: boolean;
+  pruebaEstado: string | null;
+  nivelPagado: string | null; // nivel real si tiene una suscripcion pagada activa
+};
+
+async function getEstadoAcceso(chatId: string): Promise<EstadoAcceso> {
+  const { data: usuario } = await supabase
+    .from("digemid_bot_usuarios")
+    .select("plan_gratis_legado, prueba_estado")
+    .eq("telegram_chat_id", chatId)
+    .maybeSingle();
+
+  const nivel = await getNivelUsuario(chatId);
+
+  return {
+    legado: usuario?.plan_gratis_legado ?? false,
+    pruebaEstado: usuario?.prueba_estado ?? null,
+    nivelPagado: nivel !== "gratis" ? nivel : null,
+  };
+}
+
+function tieneAccesoActivo(estado: EstadoAcceso): boolean {
+  return estado.legado || estado.pruebaEstado === "activa" || Boolean(estado.nivelPagado);
+}
+
 function formatResumenUsuarios(totalUsuarios: number, suscripciones: any[]): string {
   const hoy = getLimaDateParts().isoDate;
 
@@ -1166,6 +1201,7 @@ function formatDirectorio(
   subPorChatId: Map<string, { nivel: string; estado: string; fecha_fin: string | null }>,
   hoy: string,
 ): { texto: string; candidatos: { chatId: string; nombre: string }[] } {
+  const gratisPermanente: any[] = [];
   const conPlanActivo: { persona: any; sub: any }[] = [];
   const enPruebaActiva: any[] = [];
   const lapsos: { persona: any; motivo: string }[] = [];
@@ -1180,7 +1216,9 @@ function formatDirectorio(
       estadoEfectivo = vencida ? "vencido" : sub.estado;
     }
 
-    if (estadoEfectivo === "activo") {
+    if (persona.plan_gratis_legado) {
+      gratisPermanente.push(persona);
+    } else if (estadoEfectivo === "activo") {
       conPlanActivo.push({ persona, sub });
     } else if (persona.prueba_estado === "activa") {
       enPruebaActiva.push(persona);
@@ -1198,6 +1236,16 @@ function formatDirectorio(
   }
 
   const lines = ["🗂 <b>Directorio de usuarios</b>", ""];
+
+  lines.push(`<b>♾️ Gratis permanente — caso manual (${gratisPermanente.length})</b>`);
+  if (!gratisPermanente.length) {
+    lines.push("Nadie por ahora.");
+  } else {
+    for (const persona of gratisPermanente) {
+      lines.push(`• ${escapeHtml(nombreDirectorio(persona))}`);
+    }
+  }
+  lines.push("");
 
   lines.push(`<b>✅ Con plan activo (${conPlanActivo.length})</b>`);
   if (!conPlanActivo.length) {
@@ -1511,6 +1559,20 @@ async function handleCommand(
     return await handleCommand(chatId, userId, mappedCommand, chatType, esUsuarioNuevo);
   }
 
+  const COMANDOS_CON_ACCESO_EXACTO = ["/ultimas", "/hoy", "/semana", "/mes", "/recientes"];
+  const requiereAcceso =
+    COMANDOS_CON_ACCESO_EXACTO.includes(trimmed) ||
+    trimmed.startsWith("/detalle") ||
+    trimmed.startsWith("/buscar") ||
+    trimmed.startsWith("/consulta");
+
+  if (requiereAcceso && !isAdmin(chatId)) {
+    const estado = await getEstadoAcceso(chatId);
+    if (!tieneAccesoActivo(estado)) {
+      return await sendMessage(chatId, ACCESO_REQUERIDO_TEXTO, trialKeyboard());
+    }
+  }
+
   const esComandoStart = trimmed === "/start" || trimmed.startsWith("/start ");
 
   if (esComandoStart || trimmed === "/menu") {
@@ -1536,8 +1598,18 @@ async function handleCommand(
       }
 
       if (payload.startsWith("plan_")) {
-        // Deep-link desde la landing page: /start plan_basico, plan_consultoria...
+        // Deep-link desde la landing page: /start plan_basico, plan_consultoria, plan_prueba...
         const nivelSolicitado = payload.slice(5).toLowerCase();
+
+        if (nivelSolicitado === "prueba") {
+          await supabase
+            .from("digemid_bot_usuarios")
+            .update({ origen: "landing_page" })
+            .eq("telegram_chat_id", chatId);
+
+          await sendMessage(chatId, TRIAL_TEXTO, trialKeyboard());
+          return;
+        }
 
         if (nivelSolicitado in NIVEL_PRECIOS && nivelSolicitado !== "gratis") {
           await supabase
@@ -1550,6 +1622,21 @@ async function handleCommand(
         }
       } else if (payload) {
         await consumirInvitacion(payload, chatId);
+      } else {
+        // /start sin ningun payload: entrada organica (alguien encontro el bot
+        // directo en Telegram). Si todavia no eligio ni prueba ni plan, se le
+        // ofrece lo mismo que a quien llega por la landing page.
+        const estado = await getEstadoAcceso(chatId);
+
+        if (!estado.legado && !estado.pruebaEstado && !estado.nivelPagado) {
+          await supabase
+            .from("digemid_bot_usuarios")
+            .update({ origen: "organico" })
+            .eq("telegram_chat_id", chatId);
+
+          await sendMessage(chatId, TRIAL_TEXTO, trialKeyboard());
+          return;
+        }
       }
     }
 
@@ -1876,7 +1963,7 @@ async function handleCommand(
       await Promise.all([
         supabase
           .from("digemid_bot_usuarios")
-          .select("telegram_chat_id, nombre, username, origen, plan_interes, prueba_estado, prueba_alertas_enviadas")
+          .select("telegram_chat_id, nombre, username, origen, plan_interes, prueba_estado, prueba_alertas_enviadas, plan_gratis_legado")
           .order("created_at", { ascending: false }),
         supabase
           .from("digemid_suscripciones")
@@ -2011,6 +2098,35 @@ async function handleCommand(
     return await sendMessage(
       chatId,
       `✅ <code>${escapeHtml(targetChatId)}</code> ahora se llama <b>${escapeHtml(nuevoNombre)}</b>.`,
+    );
+  }
+
+  if (trimmed.startsWith("/gratis")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const targetChatId = trimmed.split(/\s+/)[1];
+
+    if (!targetChatId) {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/gratis chat_id</code>\n\nDeja a esa persona exenta de la prueba con límite de tiempo/alertas (acceso gratis para siempre, caso manual).",
+      );
+    }
+
+    const { error } = await supabase
+      .from("digemid_bot_usuarios")
+      .update({ plan_gratis_legado: true })
+      .eq("telegram_chat_id", targetChatId);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error: ${escapeHtml(error.message)}`);
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ <code>${escapeHtml(targetChatId)}</code> queda con acceso gratis permanente (caso manual).`,
     );
   }
 
@@ -2234,6 +2350,15 @@ async function handleCallback(update: TelegramUpdate) {
   }
 
   const callbackUserId = String(callback.from?.id ?? "");
+
+  const requiereAccesoCallback = data === "menu:alertas" || data.startsWith("alertas:");
+
+  if (requiereAccesoCallback && !isAdmin(chatId)) {
+    const estado = await getEstadoAcceso(chatId);
+    if (!tieneAccesoActivo(estado)) {
+      return await sendMessage(chatId, ACCESO_REQUERIDO_TEXTO, trialKeyboard());
+    }
+  }
 
   if (data === "demo:ejemplo") {
     const preguntaEjemplo = "que alertas hay sobre productos falsificados";

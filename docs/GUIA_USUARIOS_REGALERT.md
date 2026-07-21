@@ -33,21 +33,23 @@ responde citando la fuente exacta (documento, fecha y página).
 
 ## Cómo funciona la prueba gratuita
 
-Si llegaste desde la landing page y elegiste un plan, el bot te ofrece antes
-una **prueba gratuita**:
+Al escribir `/start` — ya sea desde la landing page o buscando el bot
+directo en Telegram — el bot te muestra una **prueba gratuita** y los 3
+planes pagados para que elijas:
 
-- Dura hasta **14 días o 3 alertas** (lo que ocurra primero).
+- La prueba dura hasta **14 días o 3 alertas** (lo que ocurra primero).
 - Durante la prueba recibes las alertas nuevas directo a tu chat y tienes
-  5 consultas de IA al día, igual que el plan gratis normal.
-- Al terminar la prueba, el bot te muestra los 3 planes pagados para que
-  elijas si quieres continuar.
+  5 consultas de IA al día.
+- Al terminar la prueba sin suscribirte, **las alertas automáticas y las
+  consultas con IA se pausan** hasta que elijas un plan — el bot te avisa
+  y te muestra las opciones apenas se cumple el límite. También te llega
+  algún recordatorio ocasional (no todos los días) por si quieres retomarlo.
 - La prueba gratuita solo se puede usar **una vez por cuenta**: si ya la
   usaste, el botón de "Empezar prueba gratuita" te muestra los planes en
   vez de reiniciarla.
 
-Si no viniste de la landing page (por invitación directa), tu cuenta queda
-en el plan **gratis** normal desde el inicio: alertas ilimitadas + 5
-consultas de IA al día, sin fecha de vencimiento.
+Si ya elegiste una prueba o un plan antes, `/start` ya no te vuelve a
+mostrar esta pantalla — va directo al menú principal.
 
 ---
 
@@ -63,7 +65,7 @@ Planes y precios:
 
 | Plan | Precio | Consultas IA/día |
 |---|---|---|
-| Gratis | S/0 | 5 |
+| Prueba gratuita | S/0 | 5 (hasta 14 días o 3 alertas) |
 | Básico | S/29/mes | 30 |
 | Consultoría | S/79/mes | 100 |
 | Empresarial | S/199/mes | Sin límite |
@@ -76,8 +78,14 @@ Planes y precios:
 Sí, las consultas con IA solo funcionan en tu chat privado con el bot.
 
 **¿Qué pasa si se me acaban las consultas del día?**
-Las alertas automáticas siguen llegando sin límite. Solo las consultas con
-IA tienen cupo diario, y se renueva al día siguiente.
+Solo las consultas con IA tienen cupo diario según tu plan; se renueva al
+día siguiente. Las alertas automáticas no tienen límite mientras tu prueba
+o plan estén activos.
+
+**¿Qué pasa cuando termina mi prueba gratuita?**
+Las alertas y consultas se pausan hasta que elijas un plan con
+`/suscribirme`. No se pierde nada de lo que ya usaste — solo se detiene el
+servicio hasta que te suscribas.
 
 **¿La información es confiable?**
 Cada respuesta cita la alerta o norma oficial de DIGEMID de donde proviene,

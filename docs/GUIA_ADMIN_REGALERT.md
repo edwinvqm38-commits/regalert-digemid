@@ -17,6 +17,7 @@ Esta guía es solo para ti. La guía que ven los usuarios está en
 | `/ingresos` | Ingresos del mes actual, desglosados por plan. |
 | `/invitar telefono [nombre]` | Genera un enlace de invitación (WhatsApp + Telegram) para alguien nuevo. |
 | `/renombrar chat_id nombre` | Cambia el nombre mostrado de un usuario. |
+| `/gratis chat_id` | Deja a esa persona con acceso gratis permanente, sin límite de prueba (caso manual). |
 
 Estos comandos solo funcionan si tu chat_id está en el secret
 `ADMIN_CHAT_IDS` del Edge Function.
@@ -28,15 +29,24 @@ Estos comandos solo funcionan si tu chat_id está en el secret
 ### 1. Invitación directa — `/invitar telefono nombre`
 
 Genera un link de WhatsApp (con el mensaje ya armado) y el link directo de
-Telegram. Cuando la persona toca "Iniciar", el bot la registra sola y te
+Telegram. Cuando la persona toca "Iniciar", el bot la registra sola, le da
+acceso gratis permanente (caso manual, `plan_gratis_legado = true`) y te
 avisa con su chat_id.
 
-### 2. Landing page → prueba gratuita → pago
+### 2. Cualquier `/start` → prueba gratuita → pago
 
-Los botones de la landing abren `t.me/<bot>?start=plan_basico` (o
-`plan_consultoria`, `plan_empresarial`). Eso activa el flujo de prueba
-gratuita (14 días o 3 alertas) descrito en la guía de usuarios. Al terminar
-la prueba, o si el usuario elige pagar directo, se dispara el flujo de pago.
+Ya no existe una entrada "gratis para siempre" automática. Cualquiera que
+escriba `/start` — desde la landing page (`t.me/<bot>?start=plan_basico`,
+`plan_consultoria`, `plan_empresarial` o `plan_prueba`) o buscando el bot
+directo en Telegram sin ningún link — ve la misma oferta: prueba gratuita
+(14 días o 3 alertas) + los 3 planes pagados, descrita en la guía de
+usuarios. Solo se le vuelve a mostrar esa pantalla mientras no haya elegido
+nada; una vez que empieza su prueba o paga un plan, `/start` va directo al
+menú principal.
+
+Al terminar la prueba sin suscribirse, el bot **pausa las alertas
+automáticas y las consultas con IA** hasta que el usuario elija un plan
+(ver más abajo).
 
 ---
 
@@ -111,6 +121,32 @@ fricción al registro.
 
 ---
 
+## Acceso cortado al terminar la prueba, y la excepción `plan_gratis_legado`
+
+Desde este cambio, `/consulta`, `/ultimas`, `/hoy`, `/semana`, `/mes`,
+`/recientes`, `/buscar`, `/detalle` y el menú de alertas solo funcionan si
+la persona tiene **acceso activo**: prueba gratuita activa, un plan pagado
+vigente, o la excepción manual `plan_gratis_legado`. Si no tiene ninguna de
+las tres, el bot le muestra el mismo mensaje de prueba/planes en vez de
+responder — no se responde nada de fondo (ni del DEEPSEEK_API_KEY/consultas
+ni del listado de alertas).
+
+`plan_gratis_legado` es la forma de dejar a alguien con acceso gratis para
+siempre, sin pasar por la prueba con límite:
+
+- Se activó automáticamente para **todos los usuarios que ya existían**
+  antes de este cambio (nadie perdió acceso de golpe).
+- Se activa automáticamente para cualquiera que llegue por
+  `/invitar telefono nombre`.
+- Puedes activarlo para cualquier otra persona puntual con `/gratis
+  chat_id`.
+
+`/start`, `/menu`, `/ayuda`, `/registrarme`, `/miperfil`, `/suscribirme` y
+`/pague` siempre funcionan, tenga o no acceso activo, para que cualquiera
+pueda elegir un plan o pedir ayuda.
+
+---
+
 ## Dónde viven los secrets
 
 - **Supabase → Edge Functions → Secrets**: `TELEGRAM_BOT_TOKEN`,
@@ -132,7 +168,7 @@ configuran directo en Supabase/GitHub.
 | `digemid-monitor.yml` | Revisa DIGEMID y registra alertas nuevas, las manda al grupo y por DM a suscriptores/pruebas activas. | 3 veces al día, días hábiles |
 | `digemid-normativa-text-simple.yml` | Extrae texto de normas con alta fidelidad (OCR incluido) y respalda el PDF. | Diario |
 | `digemid-finalizar-pruebas.yml` | Cierra pruebas gratuitas vencidas por tiempo (14 días). | Diario |
-| `digemid-recordatorio-planes.yml` | Recuerda planes a invitados que no se han suscrito. | Programado |
+| `digemid-recordatorio-planes.yml` | Recuerda planes a invitados y a pruebas gratuitas finalizadas que no se han suscrito (cada 2 días, máx. 5 veces cada uno). | Diario |
 | `deploy-supabase-functions.yml` | Despliega el bot (Edge Function) a Supabase. | Manual, después de cada cambio en `supabase/functions/` |
 | `set-telegram-webhook.yml` | Registra el webhook de Telegram apuntando al Edge Function. | Manual, una vez por bot/token |
 | `set-telegram-bot-profile.yml` | Configura descripción y menú de comandos nativo del bot. | Manual, una vez por bot |

@@ -27,6 +27,17 @@ PLANES_TEXTO = (
     "y te contactamos para activarlo."
 )
 
+PLANES_TEXTO_PRUEBA = (
+    "👋 ¿Te acuerdas de RegAlert DIGEMID? Tu prueba gratuita ya terminó, así que "
+    "las alertas automáticas y las consultas con IA están pausadas hasta que "
+    "actives un plan.\n\n"
+    "• <b>Básico</b> — S/29/mes (30 consultas/día)\n"
+    "• <b>Consultoría</b> — S/79/mes (100 consultas/día)\n"
+    "• <b>Empresarial</b> — S/199/mes (sin límite)\n\n"
+    "Escribe <code>/suscribirme basico</code> (o el plan que prefieras) "
+    "cuando quieras retomarlo."
+)
+
 
 def load_env():
     load_dotenv()
@@ -56,6 +67,22 @@ def get_invitaciones_elegibles(supabase) -> list[dict]:
     return response.data or []
 
 
+def get_pruebas_finalizadas_elegibles(supabase) -> list[dict]:
+    response = (
+        supabase.table("digemid_bot_usuarios")
+        .select(
+            "telegram_chat_id, nombre, prueba_inicio, recordatorio_prueba_enviados, "
+            "ultimo_recordatorio_prueba_at, plan_gratis_legado"
+        )
+        .eq("prueba_estado", "finalizada")
+        .eq("plan_gratis_legado", False)
+        .lt("recordatorio_prueba_enviados", MAX_RECORDATORIOS)
+        .execute()
+    )
+
+    return response.data or []
+
+
 def tiene_plan_pagado(supabase, chat_id: str) -> bool:
     today = datetime.now(timezone.utc).date().isoformat()
 
@@ -76,9 +103,7 @@ def tiene_plan_pagado(supabase, chat_id: str) -> bool:
     return False
 
 
-def debe_enviar_recordatorio(invitacion: dict) -> bool:
-    referencia = invitacion.get("ultimo_recordatorio_at") or invitacion.get("used_at")
-
+def debe_enviar_recordatorio_desde(referencia: str | None) -> bool:
     if not referencia:
         return False
 
@@ -125,7 +150,8 @@ def main():
             omitidos_ya_pagan += 1
             continue
 
-        if not debe_enviar_recordatorio(inv):
+        referencia = inv.get("ultimo_recordatorio_at") or inv.get("used_at")
+        if not debe_enviar_recordatorio_desde(referencia):
             omitidos_muy_pronto += 1
             continue
 
@@ -139,10 +165,45 @@ def main():
             enviados += 1
 
     logger.info(
-        "Finalizado. Enviados: %s | Ya tienen plan: %s | Aun no toca: %s",
+        "Invitaciones -> Enviados: %s | Ya tienen plan: %s | Aun no toca: %s",
         enviados,
         omitidos_ya_pagan,
         omitidos_muy_pronto,
+    )
+
+    pruebas = get_pruebas_finalizadas_elegibles(supabase)
+    logger.info("Pruebas finalizadas candidatas: %s", len(pruebas))
+
+    enviados_prueba = 0
+    omitidos_prueba_ya_pagan = 0
+    omitidos_prueba_muy_pronto = 0
+
+    for usuario in pruebas:
+        chat_id = usuario["telegram_chat_id"]
+
+        if tiene_plan_pagado(supabase, chat_id):
+            omitidos_prueba_ya_pagan += 1
+            continue
+
+        referencia = usuario.get("ultimo_recordatorio_prueba_at") or usuario.get("prueba_inicio")
+        if not debe_enviar_recordatorio_desde(referencia):
+            omitidos_prueba_muy_pronto += 1
+            continue
+
+        if enviar_telegram(token, chat_id, PLANES_TEXTO_PRUEBA):
+            supabase.table("digemid_bot_usuarios").update(
+                {
+                    "recordatorio_prueba_enviados": usuario["recordatorio_prueba_enviados"] + 1,
+                    "ultimo_recordatorio_prueba_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ).eq("telegram_chat_id", chat_id).execute()
+            enviados_prueba += 1
+
+    logger.info(
+        "Pruebas finalizadas -> Enviados: %s | Ya tienen plan: %s | Aun no toca: %s",
+        enviados_prueba,
+        omitidos_prueba_ya_pagan,
+        omitidos_prueba_muy_pronto,
     )
 
 

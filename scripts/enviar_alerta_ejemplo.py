@@ -62,12 +62,18 @@ def enviar_mensaje(token: str, chat_id: str, texto: str) -> None:
 
 def main():
     load_env()
-    supabase = get_supabase()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not token:
         raise SystemExit("Falta TELEGRAM_BOT_TOKEN")
 
+    chat_id_override = os.getenv("EJEMPLO_CHAT_ID", "").strip()
+    if chat_id_override:
+        enviar_mensaje(token, chat_id_override, MENSAJE_EJEMPLO)
+        logger.info("Alerta de ejemplo enviada directo a: %s", chat_id_override)
+        return
+
+    supabase = get_supabase()
     en_prueba = (
         supabase.table(USUARIOS_TABLE)
         .select("telegram_chat_id")

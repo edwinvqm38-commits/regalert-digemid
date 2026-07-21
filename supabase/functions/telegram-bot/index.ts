@@ -377,10 +377,10 @@ async function logConsulta(params: {
   }
 }
 
-async function upsertUsuario(update: TelegramUpdate, chatId: string) {
+async function upsertUsuario(update: TelegramUpdate, chatId: string): Promise<{ isNew: boolean }> {
   const from = update.message?.from ?? update.callback_query?.from;
 
-  if (!from) return;
+  if (!from) return { isNew: false };
 
   try {
     const { data: existing } = await supabase
@@ -390,8 +390,9 @@ async function upsertUsuario(update: TelegramUpdate, chatId: string) {
       .maybeSingle();
 
     if (existing) {
-      // No tocamos "nombre" aqui: /renombrar puede haberlo personalizado,
-      // y no queremos que un mensaje cualquiera lo pise con el nombre de Telegram.
+      // No tocamos "nombre" aqui: /renombrar o /registrarme pueden haberlo
+      // personalizado, y no queremos que un mensaje cualquiera lo pise con
+      // el nombre de Telegram.
       await supabase
         .from("digemid_bot_usuarios")
         .update({
@@ -401,18 +402,23 @@ async function upsertUsuario(update: TelegramUpdate, chatId: string) {
           last_seen_at: new Date().toISOString(),
         })
         .eq("telegram_chat_id", chatId);
-    } else {
-      await supabase.from("digemid_bot_usuarios").insert({
-        telegram_chat_id: chatId,
-        telegram_user_id: String(from.id),
-        nombre: from.first_name ?? null,
-        username: from.username ?? null,
-        estado: "activo",
-        last_seen_at: new Date().toISOString(),
-      });
+
+      return { isNew: false };
     }
+
+    await supabase.from("digemid_bot_usuarios").insert({
+      telegram_chat_id: chatId,
+      telegram_user_id: String(from.id),
+      nombre: from.first_name ?? null,
+      username: from.username ?? null,
+      estado: "activo",
+      last_seen_at: new Date().toISOString(),
+    });
+
+    return { isNew: true };
   } catch (_error) {
     // No bloquea la respuesta del bot.
+    return { isNew: false };
   }
 }
 
@@ -525,6 +531,12 @@ function helpText(esAdmin = false) {
     "<b>/pague codigo_de_operacion</b>",
     "Reporta el código de operación de tu Yape luego de pagar un plan. Ejemplo: /pague 000123456",
     "",
+    "<b>/registrarme Tu Nombre</b>",
+    "Registra el nombre con el que quieres identificarte en tu cuenta o membresía.",
+    "",
+    "<b>/miperfil</b>",
+    "Muestra tu nombre registrado y el estado de tu prueba o plan.",
+    "",
     "<b>/detalle 50-2026</b>",
     "Consulta una alerta por número o código.",
     "",
@@ -576,6 +588,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/membresias</b>",
     "Lista completa de suscripciones con fechas de inicio y fin.",
+    "",
+    "<b>/directorio</b>",
+    "Lista a todos por estado (plan activo, prueba activa, sin continuar, nunca empezó) con botón para enviar recordatorio.",
     "",
     "<b>/ingresos</b>",
     "Ingresos del mes actual, desglosados por plan.",
@@ -1142,6 +1157,99 @@ function formatMembresias(suscripciones: any[], nombresPorChatId: Map<string, st
   return lines.join("\n").trimEnd();
 }
 
+function nombreDirectorio(persona: any): string {
+  return persona.nombre || (persona.username ? `@${persona.username}` : persona.telegram_chat_id);
+}
+
+function formatDirectorio(
+  personas: any[],
+  subPorChatId: Map<string, { nivel: string; estado: string; fecha_fin: string | null }>,
+  hoy: string,
+): { texto: string; candidatos: { chatId: string; nombre: string }[] } {
+  const conPlanActivo: { persona: any; sub: any }[] = [];
+  const enPruebaActiva: any[] = [];
+  const lapsos: { persona: any; motivo: string }[] = [];
+  const sinNada: any[] = [];
+
+  for (const persona of personas) {
+    const sub = subPorChatId.get(persona.telegram_chat_id);
+    let estadoEfectivo: string | null = null;
+
+    if (sub) {
+      const vencida = sub.estado === "activo" && sub.fecha_fin && sub.fecha_fin < hoy;
+      estadoEfectivo = vencida ? "vencido" : sub.estado;
+    }
+
+    if (estadoEfectivo === "activo") {
+      conPlanActivo.push({ persona, sub });
+    } else if (persona.prueba_estado === "activa") {
+      enPruebaActiva.push(persona);
+    } else if (estadoEfectivo === "vencido") {
+      lapsos.push({ persona, motivo: `plan ${sub!.nivel} vencido (${sub!.fecha_fin ?? "sin fecha"})` });
+    } else if (estadoEfectivo === "cancelado") {
+      lapsos.push({ persona, motivo: `plan ${sub!.nivel} cancelado` });
+    } else if (estadoEfectivo === "pendiente_pago") {
+      lapsos.push({ persona, motivo: `pidió plan ${sub!.nivel} pero no completó el pago` });
+    } else if (persona.prueba_estado === "finalizada") {
+      lapsos.push({ persona, motivo: "terminó su prueba gratuita sin suscribirse" });
+    } else {
+      sinNada.push(persona);
+    }
+  }
+
+  const lines = ["🗂 <b>Directorio de usuarios</b>", ""];
+
+  lines.push(`<b>✅ Con plan activo (${conPlanActivo.length})</b>`);
+  if (!conPlanActivo.length) {
+    lines.push("Nadie por ahora.");
+  } else {
+    for (const { persona, sub } of conPlanActivo) {
+      lines.push(`• <b>${escapeHtml(nombreDirectorio(persona))}</b> — ${escapeHtml(sub.nivel)} hasta ${escapeHtml(sub.fecha_fin ?? "sin fecha")}`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`<b>🎁 En prueba gratuita activa (${enPruebaActiva.length})</b>`);
+  if (!enPruebaActiva.length) {
+    lines.push("Nadie por ahora.");
+  } else {
+    for (const persona of enPruebaActiva) {
+      lines.push(`• <b>${escapeHtml(nombreDirectorio(persona))}</b> — ${persona.prueba_alertas_enviadas ?? 0}/3 alertas usadas`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`<b>⏳ Sin continuar — candidatos a recordatorio (${lapsos.length})</b>`);
+  if (!lapsos.length) {
+    lines.push("Nadie por ahora.");
+  } else {
+    for (const { persona, motivo } of lapsos) {
+      lines.push(`• <b>${escapeHtml(nombreDirectorio(persona))}</b> — ${escapeHtml(motivo)}`);
+    }
+  }
+  lines.push("");
+
+  lines.push(`<b>💤 Nunca empezaron prueba ni plan (${sinNada.length})</b>`);
+  if (!sinNada.length) {
+    lines.push("Nadie por ahora.");
+  } else {
+    for (const persona of sinNada) {
+      lines.push(`• ${escapeHtml(nombreDirectorio(persona))}`);
+    }
+  }
+
+  if (lapsos.length) {
+    lines.push("", "Toca un botón abajo para enviarle un recordatorio amigable con sus opciones de plan.");
+  }
+
+  const candidatos = lapsos.map(({ persona }) => ({
+    chatId: persona.telegram_chat_id as string,
+    nombre: nombreDirectorio(persona),
+  }));
+
+  return { texto: lines.join("\n").trimEnd(), candidatos };
+}
+
 function formatIngresos(altas: any[], startIso: string): string {
   const desglose: Record<string, { cantidad: number; subtotal: number }> = {};
   let total = 0;
@@ -1394,12 +1502,13 @@ async function handleCommand(
   userId: string | undefined,
   text: string,
   chatType: string,
+  esUsuarioNuevo = false,
 ) {
   const trimmed = text.trim();
 
   const mappedCommand = KEYBOARD_LABEL_COMMANDS[trimmed];
   if (mappedCommand) {
-    return await handleCommand(chatId, userId, mappedCommand, chatType);
+    return await handleCommand(chatId, userId, mappedCommand, chatType, esUsuarioNuevo);
   }
 
   const esComandoStart = trimmed === "/start" || trimmed.startsWith("/start ");
@@ -1416,6 +1525,15 @@ async function handleCommand(
       const payload = trimmed.startsWith("/start ") ? trimmed.slice(7).trim() : "";
 
       await sendMessage(chatId, "👋 Bienvenido a RegAlert DIGEMID.", persistentKeyboard());
+
+      if (esUsuarioNuevo) {
+        await sendMessage(
+          chatId,
+          "📝 Para identificarte en tus consultas de cuenta o membresía, cuéntanos con qué nombre quieres registrarte:\n" +
+            "<code>/registrarme Tu Nombre Completo</code>\n\n" +
+            "Ese será siempre el nombre con el que te reconocemos, aunque cambies tu nombre de Telegram. Puedes verlo cuando quieras con <code>/miperfil</code>.",
+        );
+      }
 
       if (payload.startsWith("plan_")) {
         // Deep-link desde la landing page: /start plan_basico, plan_consultoria...
@@ -1749,6 +1867,55 @@ async function handleCommand(
     return await sendMessage(chatId, formatMembresias(suscripciones ?? [], nombresPorChatId));
   }
 
+  if (trimmed === "/directorio") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const [{ data: usuarios, error: usuariosError }, { data: suscripciones, error: suscripcionesError }] =
+      await Promise.all([
+        supabase
+          .from("digemid_bot_usuarios")
+          .select("telegram_chat_id, nombre, username, origen, plan_interes, prueba_estado, prueba_alertas_enviadas")
+          .order("created_at", { ascending: false }),
+        supabase
+          .from("digemid_suscripciones")
+          .select("telegram_chat_id, nivel, estado, fecha_fin")
+          .order("fecha_fin", { ascending: false }),
+      ]);
+
+    if (usuariosError || suscripcionesError) {
+      return await sendMessage(
+        chatId,
+        `⚠️ Error al consultar el directorio: ${escapeHtml((usuariosError ?? suscripcionesError)!.message)}`,
+      );
+    }
+
+    const hoy = getLimaDateParts().isoDate;
+    const subPorChatId = new Map<string, { nivel: string; estado: string; fecha_fin: string | null }>();
+
+    for (const sub of suscripciones ?? []) {
+      // Ya viene ordenado por fecha_fin desc: nos quedamos con la mas reciente por chat_id.
+      if (!subPorChatId.has(sub.telegram_chat_id)) {
+        subPorChatId.set(sub.telegram_chat_id, sub);
+      }
+    }
+
+    const personas = (usuarios ?? []).filter((u) => !u.telegram_chat_id.startsWith("-"));
+
+    const { texto, candidatos } = formatDirectorio(personas, subPorChatId, hoy);
+
+    const botones = candidatos.slice(0, 15).map((c) => [
+      { text: `📣 Recordar a ${c.nombre}`, callback_data: `recordatorio:${c.chatId}` },
+    ]);
+
+    return await sendMessage(
+      chatId,
+      texto,
+      botones.length ? { inline_keyboard: botones } : undefined,
+    );
+  }
+
   if (trimmed === "/ingresos") {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -1834,7 +2001,7 @@ async function handleCommand(
 
     const { error } = await supabase
       .from("digemid_bot_usuarios")
-      .update({ nombre: nuevoNombre })
+      .update({ nombre: nuevoNombre, nombre_confirmado: true })
       .eq("telegram_chat_id", targetChatId);
 
     if (error) {
@@ -1845,6 +2012,69 @@ async function handleCommand(
       chatId,
       `✅ <code>${escapeHtml(targetChatId)}</code> ahora se llama <b>${escapeHtml(nuevoNombre)}</b>.`,
     );
+  }
+
+  if (trimmed.startsWith("/registrarme")) {
+    const nuevoNombre = trimmed.replace("/registrarme", "").trim();
+
+    if (!nuevoNombre) {
+      return await sendMessage(
+        chatId,
+        "Uso:\n<code>/registrarme Tu Nombre Completo</code>\n\nEjemplo:\n<code>/registrarme Juan Pérez</code>",
+      );
+    }
+
+    const { error } = await supabase
+      .from("digemid_bot_usuarios")
+      .update({ nombre: nuevoNombre, nombre_confirmado: true })
+      .eq("telegram_chat_id", chatId);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al registrar tu nombre: ${escapeHtml(error.message)}`);
+    }
+
+    return await sendMessage(
+      chatId,
+      `✅ Quedaste registrado como <b>${escapeHtml(nuevoNombre)}</b>.\n\nUsa este nombre cuando nos escribas por dudas de tu cuenta o membresía. Puedes verlo cuando quieras con <code>/miperfil</code>.`,
+    );
+  }
+
+  if (trimmed === "/miperfil") {
+    const { data: usuario, error: usuarioError } = await supabase
+      .from("digemid_bot_usuarios")
+      .select("nombre, nombre_confirmado, prueba_estado, prueba_alertas_enviadas, prueba_inicio, plan_interes")
+      .eq("telegram_chat_id", chatId)
+      .maybeSingle();
+
+    if (usuarioError || !usuario) {
+      return await sendMessage(chatId, "⚠️ No pude encontrar tu perfil. Escribe /start primero.");
+    }
+
+    const { data: suscripcion } = await supabase
+      .from("digemid_suscripciones")
+      .select("nivel, estado, fecha_fin")
+      .eq("telegram_chat_id", chatId)
+      .eq("estado", "activo")
+      .maybeSingle();
+
+    const lines = [
+      "🪪 <b>Tu perfil</b>",
+      "",
+      `Nombre registrado: <b>${escapeHtml(usuario.nombre ?? "sin registrar")}</b>` +
+        (usuario.nombre_confirmado ? "" : " (por defecto — usa /registrarme para elegir el tuyo)"),
+    ];
+
+    if (suscripcion) {
+      lines.push(`Plan activo: <b>${escapeHtml(NOMBRES_PLAN[suscripcion.nivel] ?? suscripcion.nivel)}</b> hasta ${escapeHtml(suscripcion.fecha_fin ?? "sin fecha")}.`);
+    } else if (usuario.prueba_estado === "activa") {
+      lines.push(`Prueba gratuita activa: ${usuario.prueba_alertas_enviadas ?? 0}/3 alertas usadas.`);
+    } else if (usuario.prueba_estado === "finalizada") {
+      lines.push("Tu prueba gratuita ya terminó. Escribe /suscribirme para ver los planes.");
+    } else {
+      lines.push("Todavía no tienes plan ni prueba gratuita activa. Escribe /suscribirme para empezar.");
+    }
+
+    return await sendMessage(chatId, lines.join("\n"));
   }
 
   if (trimmed.startsWith("/desactivar")) {
@@ -2040,6 +2270,22 @@ async function handleCallback(update: TelegramUpdate) {
   }
 
   if (data === "trial:iniciar") {
+    const { data: usuarioActual } = await supabase
+      .from("digemid_bot_usuarios")
+      .select("prueba_estado")
+      .eq("telegram_chat_id", chatId)
+      .maybeSingle();
+
+    if (usuarioActual?.prueba_estado) {
+      // Ya tuvo una prueba (activa o finalizada): no se puede reiniciar.
+      return await sendMessage(
+        chatId,
+        "⚠️ Ya usaste tu prueba gratuita de RegAlert anteriormente, así que no se puede reiniciar. " +
+          "Si quieres seguir recibiendo alertas y consultas con IA, elige un plan:",
+        planesKeyboard(),
+      );
+    }
+
     await supabase
       .from("digemid_bot_usuarios")
       .update({
@@ -2065,6 +2311,36 @@ async function handleCallback(update: TelegramUpdate) {
     }
 
     return;
+  }
+
+  if (data.startsWith("recordatorio:")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ No autorizado.");
+    }
+
+    const targetChatId = data.slice("recordatorio:".length);
+
+    const { data: destinatario } = await supabase
+      .from("digemid_bot_usuarios")
+      .select("nombre, username")
+      .eq("telegram_chat_id", targetChatId)
+      .maybeSingle();
+
+    const nombreDestino = destinatario?.nombre || (destinatario?.username ? `@${destinatario.username}` : "");
+    const saludo = nombreDestino ? `Hola ${escapeHtml(nombreDestino)}` : "Hola";
+
+    await sendMessage(
+      targetChatId,
+      `👋 ${saludo}, ¡te extrañamos por RegAlert DIGEMID!\n\n` +
+        "DIGEMID sigue publicando alertas sanitarias todas las semanas, y no queremos que te pierdas la próxima. " +
+        "Si quieres volver a recibir alertas automáticas y hacer consultas con IA citando la fuente oficial, elige tu plan aquí mismo:",
+      planesKeyboard(),
+    );
+
+    return await sendMessage(
+      chatId,
+      `✅ Recordatorio enviado a <b>${escapeHtml(nombreDestino || targetChatId)}</b>.`,
+    );
   }
 
   if (data.startsWith("pago:confirmar:") || data.startsWith("pago:rechazar:")) {
@@ -2282,7 +2558,7 @@ serve(async (req: Request) => {
       return new Response("No autorizado", { status: 200 });
     }
 
-    await upsertUsuario(update, chatId);
+    const { isNew: esUsuarioNuevo } = await upsertUsuario(update, chatId);
 
     if (update.callback_query) {
       await handleCallback(update);
@@ -2290,7 +2566,7 @@ serve(async (req: Request) => {
     }
 
     const text = update.message?.text ?? "/start";
-    await handleCommand(chatId, userId, text, chatType);
+    await handleCommand(chatId, userId, text, chatType, esUsuarioNuevo);
 
     return new Response("OK", { status: 200 });
   } catch (error) {

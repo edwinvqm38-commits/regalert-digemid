@@ -25,6 +25,8 @@ responde citando la fuente exacta (documento, fecha y página).
 | `/consulta pregunta` | Responde citando la fuente. Ej: `/consulta que paso con el Opdivo falsificado`. |
 | `/suscribirme nivel` | Pide un plan pagado (`basico`, `consultoria`, `empresarial`) y te da el número de Yape. |
 | `/pague codigo_de_operacion` | Reporta tu código de operación de Yape luego de pagar. |
+| `/registrarme Tu Nombre` | Registra el nombre con el que quieres identificarte para temas de tu cuenta o membresía. |
+| `/miperfil` | Muestra tu nombre registrado y el estado de tu prueba o plan. |
 | `/chatid` | Muestra tu propio chat_id. |
 
 ---
@@ -39,6 +41,9 @@ una **prueba gratuita**:
   5 consultas de IA al día, igual que el plan gratis normal.
 - Al terminar la prueba, el bot te muestra los 3 planes pagados para que
   elijas si quieres continuar.
+- La prueba gratuita solo se puede usar **una vez por cuenta**: si ya la
+  usaste, el botón de "Empezar prueba gratuita" te muestra los planes en
+  vez de reiniciarla.
 
 Si no viniste de la landing page (por invitación directa), tu cuenta queda
 en el plan **gratis** normal desde el inicio: alertas ilimitadas + 5

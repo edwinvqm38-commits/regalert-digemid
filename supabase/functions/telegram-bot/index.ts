@@ -793,11 +793,53 @@ function formatRecentAlertList(rows: any[]) {
 }
 
 const ALERT_SELECT =
-  "alert_number, alert_title, published_date, published_date_display, detail_url, pdf_source_url, drive_file_url, drive_download_url, process_status";
+  "id, alert_number, alert_title, published_date, published_date_display, detail_url, pdf_source_url, drive_file_url, drive_download_url, telegram_file_id, process_status";
 const WEEK_ALERT_SELECT =
-  "document_key, title, published_date, published_date_display, source_section, file_url, detail_url, process_status";
+  "id, document_key, title, published_date, published_date_display, source_section, file_url, detail_url, telegram_file_id, process_status";
 const RECENT_ALERT_SELECT =
-  "document_key, title, published_date, published_date_display, created_at, source_section, file_url, detail_url, process_status";
+  "id, document_key, title, published_date, published_date_display, created_at, source_section, file_url, detail_url, telegram_file_id, process_status";
+
+const MAX_PDFS_POR_CONSULTA = 3;
+
+async function enviarPdfAlerta(chatId: string, row: any): Promise<void> {
+  if (!row?.id) return;
+
+  const fileRef =
+    row.telegram_file_id ||
+    row.pdf_source_url ||
+    row.file_url ||
+    row.drive_file_url ||
+    row.drive_download_url;
+
+  if (!fileRef) return;
+
+  const numero = row.alert_number ?? row.document_key ?? "";
+  const titulo = String(row.alert_title ?? row.title ?? "").slice(0, 200);
+
+  try {
+    const result: any = await telegram("sendDocument", {
+      chat_id: chatId,
+      document: fileRef,
+      caption: `📄 <b>${escapeHtml(numero)}</b> — ${escapeHtml(titulo)}`,
+      parse_mode: "HTML",
+    });
+
+    if (!row.telegram_file_id) {
+      const fileId = result?.result?.document?.file_id;
+      if (fileId) {
+        await supabase.from("digemid_documentos").update({ telegram_file_id: fileId }).eq("id", row.id);
+      }
+    }
+  } catch (_error) {
+    // No bloquea la respuesta del bot si falla el envio del PDF adjunto.
+  }
+}
+
+async function enviarPdfsAlertas(chatId: string, rows: any[]): Promise<void> {
+  for (const row of rows.slice(0, MAX_PDFS_POR_CONSULTA)) {
+    await enviarPdfAlerta(chatId, row);
+  }
+}
 
 async function getLatestAlerts(limit = 5) {
   const { data, error } = await supabase
@@ -1753,11 +1795,13 @@ async function handleCommand(
       status: "ok",
     });
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (trimmed === "/hoy") {
@@ -1770,11 +1814,13 @@ async function handleCommand(
       status: "ok",
     });
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (trimmed === "/semana") {
@@ -1787,11 +1833,13 @@ async function handleCommand(
       status: "ok",
     });
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (trimmed === "/recientes") {
@@ -1804,11 +1852,13 @@ async function handleCommand(
       status: "ok",
     });
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatRecentAlertList(rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (trimmed === "/mes") {
@@ -1821,11 +1871,13 @@ async function handleCommand(
       status: "ok",
     });
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (trimmed.startsWith("/detalle")) {
@@ -1858,7 +1910,9 @@ async function handleCommand(
       );
     }
 
-    return await sendMessage(chatId, formatAlertDetail(row), detailButtons(row));
+    await sendMessage(chatId, formatAlertDetail(row), detailButtons(row));
+    await enviarPdfAlerta(chatId, row);
+    return;
   }
 
   if (trimmed.startsWith("/buscar")) {
@@ -1883,11 +1937,13 @@ async function handleCommand(
       status: "ok",
     });
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList(`🔎 <b>Resultados para:</b> ${escapeHtml(query)}`, rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (trimmed === "/chatid") {
@@ -2635,51 +2691,61 @@ async function handleCallback(update: TelegramUpdate) {
   if (data === "alertas:ultimas") {
     const rows = await getLatestAlerts(5);
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (data === "alertas:hoy") {
     const rows = await getTodayAlerts();
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (data === "alertas:semana") {
     const { rows, total } = await getAlertasSemana(10);
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (data === "alertas:recientes") {
     const rows = await getRecentAlerts(10);
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatRecentAlertList(rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (data === "alertas:mes") {
     const rows = await getMonthAlerts();
 
-    return await sendMessage(
+    await sendMessage(
       chatId,
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
+    await enviarPdfsAlertas(chatId, rows);
+    return;
   }
 
   if (data === "alertas:buscar_info") {

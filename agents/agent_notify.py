@@ -86,10 +86,10 @@ class NotifyAgent:
                 fecha_escapada = html.escape(str(fecha_publicacion))
                 if hora_deteccion:
                     lines.append(
-                        f"Fecha: {fecha_escapada} (detectado ≈{hora_deteccion} hora Perú)"
+                        f"🗓️ Fecha: {fecha_escapada} (detectado ≈{hora_deteccion} hora Perú)"
                     )
                 else:
-                    lines.append(f"Fecha: {fecha_escapada}")
+                    lines.append(f"🗓️ Fecha: {fecha_escapada}")
             lines.append(f"🔗 {detail_url}")
             lines.append("")
 

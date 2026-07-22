@@ -124,6 +124,71 @@ class NotifyAgent:
         if not response.ok:
             logger.warning("No se pudo enviar DM a %s: %s", chat_id, response.text)
 
+    def _resolver_documento_pdf(self, document_key: str) -> dict | None:
+        response = (
+            self.supabase.table("digemid_documentos")
+            .select("id, telegram_file_id, file_url, drive_download_url, drive_file_url")
+            .eq("document_key", document_key)
+            .eq("source_type", "alerta")
+            .limit(1)
+            .execute()
+        )
+        filas = response.data or []
+        return filas[0] if filas else None
+
+    def enviar_pdf_alerta(self, chat_id: str, doc: dict) -> None:
+        """Adjunta el PDF real de la alerta (no solo el link) usando el file_id
+        cacheado de Telegram si ya existe; si no, usa la URL publica (fuente
+        oficial o Drive) y Telegram la descarga una sola vez por documento,
+        sin egress nuestro. No depende de Supabase Storage.
+        """
+        document_key = doc.get("document_key")
+        if not document_key or self.supabase is None:
+            return
+
+        fila = self._resolver_documento_pdf(str(document_key))
+        if not fila:
+            return
+
+        file_ref = (
+            fila.get("telegram_file_id")
+            or fila.get("file_url")
+            or fila.get("drive_download_url")
+            or fila.get("drive_file_url")
+        )
+        if not file_ref:
+            return
+
+        titulo = html.escape(str(doc.get("title", "")))[:200]
+        caption = f"📄 <b>{html.escape(str(document_key))}</b> — {titulo}"
+
+        payload = {
+            "chat_id": chat_id,
+            "document": file_ref,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+
+        try:
+            response = requests.post(
+                f"https://api.telegram.org/bot{self.token}/sendDocument", json=payload, timeout=30
+            )
+        except Exception:
+            logger.exception("Error al enviar PDF de %s a %s", document_key, chat_id)
+            return
+
+        if not response.ok:
+            logger.warning("No se pudo enviar PDF de %s a %s: %s", document_key, chat_id, response.text)
+            return
+
+        if not fila.get("telegram_file_id"):
+            data = response.json()
+            file_id = (data.get("result") or {}).get("document", {}).get("file_id")
+            if file_id:
+                self.supabase.table("digemid_documentos").update(
+                    {"telegram_file_id": file_id}
+                ).eq("id", fila["id"]).execute()
+
     def _usuarios_elegibles_dm(self) -> tuple[set[str], dict[str, int]]:
         """Devuelve (chat_ids con suscripcion paga activa, {chat_id: alertas_en_prueba} de los en prueba activa)."""
         pagados: set[str] = set()
@@ -177,12 +242,17 @@ class NotifyAgent:
 
         texto = self.build_message(new_docs)
         pagados, en_prueba = self._usuarios_elegibles_dm()
+        docs_con_pdf = new_docs[:5]
 
         for chat_id in pagados:
             self._send_to_chat(chat_id, texto)
+            for doc in docs_con_pdf:
+                self.enviar_pdf_alerta(chat_id, doc)
 
         for chat_id, alertas_previas in en_prueba.items():
             self._send_to_chat(chat_id, texto)
+            for doc in docs_con_pdf:
+                self.enviar_pdf_alerta(chat_id, doc)
 
             nuevas_alertas = alertas_previas + len(new_docs)
             actualizacion = {"prueba_alertas_enviadas": nuevas_alertas}

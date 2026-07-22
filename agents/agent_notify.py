@@ -15,11 +15,12 @@ NIVEL_PRECIOS = {"basico": 29, "consultoria": 79, "empresarial": 199}
 PERU_TZ = timezone(timedelta(hours=-5))
 
 
-def _formatear_detectado(doc: dict) -> str | None:
+def _hora_aproximada_deteccion(doc: dict) -> str | None:
     """DIGEMID no publica la hora exacta en que sube una alerta (solo un
-    dia/mes en su tarjeta, sin reloj). Como proxy auditable usamos el
-    momento en que nuestro propio sistema detecto el documento
-    (raw.scraped_at, en UTC), convertido a hora Peru."""
+    dia/mes en su tarjeta, sin reloj). Como aproximacion usamos la hora en
+    que nuestro propio sistema detecto el documento (raw.scraped_at, en
+    UTC), convertida a hora Peru — solo la hora, para acompañar la fecha de
+    publicacion en una misma linea."""
     scraped_at = (doc.get("raw") or {}).get("scraped_at")
     if not scraped_at:
         return None
@@ -32,7 +33,7 @@ def _formatear_detectado(doc: dict) -> str | None:
     if momento.tzinfo is None:
         momento = momento.replace(tzinfo=timezone.utc)
 
-    return momento.astimezone(PERU_TZ).strftime("%d/%m/%Y %H:%M")
+    return momento.astimezone(PERU_TZ).strftime("%H:%M")
 
 
 class NotifyAgent:
@@ -67,13 +68,18 @@ class NotifyAgent:
             title = html.escape(str(doc.get("title", "")))[:250]
             detail_url = html.escape(str(doc.get("detail_url", "")))
             fecha_publicacion = doc.get("published_date_display")
-            detectado = _formatear_detectado(doc)
+            hora_deteccion = _hora_aproximada_deteccion(doc)
 
             lines.append(f"• <b>{key}</b> — {title}")
             if fecha_publicacion:
-                lines.append(f"📅 Publicado en DIGEMID: {html.escape(str(fecha_publicacion))}")
-            if detectado:
-                lines.append(f"🕐 Detectado por el sistema: {detectado} (hora Perú)")
+                fecha_escapada = html.escape(str(fecha_publicacion))
+                if hora_deteccion:
+                    lines.append(
+                        f"📅 Publicado en DIGEMID: {fecha_escapada} "
+                        f"(detectado ≈{hora_deteccion} hora Perú)"
+                    )
+                else:
+                    lines.append(f"📅 Publicado en DIGEMID: {fecha_escapada}")
             lines.append(f"🔗 {detail_url}")
             lines.append("")
 

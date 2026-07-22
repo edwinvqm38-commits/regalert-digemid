@@ -54,11 +54,17 @@ class NotifyAgent:
 
         return "\n".join(lines)
 
-    def send_summary(self, new_docs: list[dict]) -> None:
-        """Envía resumen solo si existen documentos nuevos."""
+    def send_summary(self, new_docs: list[dict]) -> bool:
+        """Envía resumen solo si existen documentos nuevos.
+
+        Devuelve True si Telegram confirmó el envío. Nunca lanza excepción:
+        un fallo aquí (ej. TELEGRAM_CHAT_ID invalido) no debe tumbar el resto
+        del pipeline ni bloquear el envio de DMs a suscriptores individuales,
+        que es un canal independiente.
+        """
         if not new_docs:
             logger.info("No hay documentos nuevos para notificar.")
-            return
+            return True
 
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
@@ -69,14 +75,19 @@ class NotifyAgent:
             "disable_web_page_preview": False,
         }
 
-        response = requests.post(url, json=payload, timeout=20)
+        try:
+            response = requests.post(url, json=payload, timeout=20)
 
-        if not response.ok:
-            logger.error("Respuesta de Telegram: %s", response.text)
+            if not response.ok:
+                logger.error("Respuesta de Telegram: %s", response.text)
 
-        response.raise_for_status()
+            response.raise_for_status()
+        except Exception:
+            logger.exception("No se pudo enviar el resumen a Telegram.")
+            return False
 
         logger.info("Notificación enviada a Telegram.")
+        return True
 
     def send_pipeline_failure_alert(self, failed_steps: list[str]) -> None:
         """Notifica cuando uno o más pasos del pipeline fallan."""

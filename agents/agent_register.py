@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 
 from supabase import Client, create_client
 
@@ -89,3 +90,37 @@ class RegisterAgent:
         logger.info("Documentos registrados en Supabase: %s", len(clean_docs))
 
         return response.data or clean_docs
+
+    def get_pending_notification_docs(
+        self, source_type: str = "alerta", limit: int = 50
+    ) -> list[dict]:
+        """Documentos ya guardados en Supabase que aun no fueron notificados.
+
+        Cubre tanto los recien registrados como los que quedaron pendientes
+        porque un envio anterior fallo (ej. Telegram caido): al no marcarse
+        notified_at, se vuelven a intentar en la siguiente corrida en vez de
+        perderse en silencio.
+        """
+        response = (
+            self.supabase
+            .table(self.table_name)
+            .select("*")
+            .eq("source_type", source_type)
+            .is_("notified_at", "null")
+            .order("published_date", desc=False)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data or []
+
+    def mark_notified(self, document_keys: list[str]) -> None:
+        """Marca documentos como notificados para que no se reintenten."""
+        if not document_keys:
+            return
+
+        self.supabase.table(self.table_name).update(
+            {"notified_at": datetime.now(timezone.utc).isoformat()}
+        ).in_("document_key", document_keys).execute()
+
+        logger.info("Documentos marcados como notificados: %s", len(document_keys))

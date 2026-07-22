@@ -147,6 +147,20 @@ pueda elegir un plan o pedir ayuda.
 
 ---
 
+## Las alertas llegan con el PDF adjunto, no solo el link
+
+Cuando el monitor detecta una alerta nueva, además del resumen de texto,
+cada suscriptor pagado o en prueba activa recibe el **PDF real adjunto**
+en el chat (hasta 5 documentos por corrida). No usamos Google Drive ni
+Supabase Storage para esto: se manda la URL pública original de DIGEMID
+directo a Telegram, que la descarga él mismo — cero egress nuestro. La
+primera vez que se envía un documento, Telegram devuelve un `file_id` que
+se guarda en `digemid_documentos.telegram_file_id`; los envíos siguientes
+(a cualquier otro usuario) reusan ese `file_id` sin volver a descargar
+nada del origen.
+
+---
+
 ## Dónde viven los secrets
 
 - **Supabase → Edge Functions → Secrets**: `TELEGRAM_BOT_TOKEN`,

@@ -159,6 +159,12 @@ se guarda en `digemid_documentos.telegram_file_id`; los envíos siguientes
 (a cualquier otro usuario) reusan ese `file_id` sin volver a descargar
 nada del origen.
 
+Esto mismo aplica también a las **consultas bajo demanda**: `/ultimas`,
+`/hoy`, `/semana`, `/mes`, `/recientes`, `/buscar` y `/detalle` (y sus
+botones equivalentes) ahora adjuntan el PDF real de cada alerta que
+muestran (hasta 3 por consulta, para no saturar el chat), usando el mismo
+mecanismo de `file_id` cacheado.
+
 ---
 
 ## Dónde viven los secrets

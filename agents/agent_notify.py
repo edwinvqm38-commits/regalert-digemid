@@ -21,8 +21,7 @@ def _hora_aproximada_deteccion(doc: dict) -> str | None:
     """DIGEMID no publica la hora exacta en que sube una alerta (solo un
     dia/mes en su tarjeta, sin reloj). Como aproximacion usamos la hora en
     que nuestro propio sistema detecto el documento (raw.scraped_at, en
-    UTC), convertida a hora Peru — solo la hora, para acompañar la fecha de
-    publicacion en una misma linea."""
+    UTC), convertida a hora Peru en formato 12h con am/pm (ej. '5:41 pm')."""
     scraped_at = (doc.get("raw") or {}).get("scraped_at")
     if not scraped_at:
         return None
@@ -35,7 +34,8 @@ def _hora_aproximada_deteccion(doc: dict) -> str | None:
     if momento.tzinfo is None:
         momento = momento.replace(tzinfo=timezone.utc)
 
-    return momento.astimezone(PERU_TZ).strftime("%H:%M")
+    hora_12h = momento.astimezone(PERU_TZ).strftime("%I:%M %p").lstrip("0")
+    return hora_12h.lower()
 
 
 class NotifyAgent:
@@ -77,17 +77,15 @@ class NotifyAgent:
             # solo el numero de alerta ("ALERTA DIGEMID N 81-2026"): mostrar
             # ese titulo junto al document_key es puro relleno repetido.
             if es_titulo_generico(title_original, document_key):
-                lines.append(f"📄 <b>Alerta DIGEMID Nº {key}</b>")
+                lines.append(f"📁 <b>Alerta DIGEMID Nº {key}</b>")
             else:
                 title = html.escape(title_original)[:250]
-                lines.append(f"📄 <b>{key}</b> — {title}")
+                lines.append(f"📁 <b>{key}</b> — {title}")
 
             if fecha_publicacion:
                 fecha_escapada = html.escape(str(fecha_publicacion))
                 if hora_deteccion:
-                    lines.append(
-                        f"🗓️ Fecha: {fecha_escapada} (detectado ≈{hora_deteccion} hora Perú)"
-                    )
+                    lines.append(f"🗓️ Fecha: {fecha_escapada} ({hora_deteccion})")
                 else:
                     lines.append(f"🗓️ Fecha: {fecha_escapada}")
             lines.append(f"🔗 {detail_url}")

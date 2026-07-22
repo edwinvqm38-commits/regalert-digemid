@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from urllib.parse import urljoin
 
 import requests
@@ -50,6 +51,8 @@ class MonitorAgent:
             soup = BeautifulSoup(html, "html.parser")
 
             documents: list[dict] = []
+            candidate_count = 0
+            rejected_sample: list[str] = []
 
             for link in soup.find_all("a", href=True):
                 href = link.get("href", "")
@@ -65,7 +68,20 @@ class MonitorAgent:
                     or "alerta digemid" in detail_url_lower.replace("-", " ")
                 )
 
+                # Red mas amplia: cualquier link bajo /alertas-modificaciones/<anio>/...
+                # que no haya calzado con el filtro estricto de arriba. Sirve para
+                # detectar en los logs si DIGEMID cambio el formato de sus URLs/textos
+                # y el filtro estricto empezo a descartar alertas reales en silencio.
+                looks_like_alert_path = bool(
+                    re.search(r"/alertas-modificaciones/20\d{2}/[^/]+/?$", detail_url_lower)
+                )
+
+                if looks_like_alert_path:
+                    candidate_count += 1
+
                 if not is_alert_link:
+                    if looks_like_alert_path and len(rejected_sample) < 20:
+                        rejected_sample.append(f"href={detail_url!r} text={text!r}")
                     continue
 
                 document_key = generate_document_key(text, detail_url)
@@ -108,6 +124,15 @@ class MonitorAgent:
             result = list(unique_docs.values())
 
             logger.info("Documentos detectados por MonitorAgent: %s", len(result))
+
+            if rejected_sample:
+                logger.warning(
+                    "DIAGNOSTICO: %s link(s) con patron /alertas-modificaciones/<anio>/... "
+                    "no calzaron con el filtro estricto is_alert_link (posible cambio de "
+                    "formato en DIGEMID). Muestra: %s",
+                    candidate_count,
+                    rejected_sample,
+                )
 
             return result
 

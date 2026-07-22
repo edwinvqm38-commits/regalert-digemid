@@ -36,7 +36,7 @@ jobs:
 
       - name: Ejecutar pipeline completo DIGEMID
         run: |
-          python scripts/run_full_pipeline.py
+          python scripts/preview_ultima_alerta.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}

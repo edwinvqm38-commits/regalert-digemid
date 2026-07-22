@@ -75,11 +75,10 @@ class NotifyAgent:
                 fecha_escapada = html.escape(str(fecha_publicacion))
                 if hora_deteccion:
                     lines.append(
-                        f"📅 Publicado en DIGEMID: {fecha_escapada} "
-                        f"(detectado ≈{hora_deteccion} hora Perú)"
+                        f"📅 {fecha_escapada} (detectado ≈{hora_deteccion} hora Perú)"
                     )
                 else:
-                    lines.append(f"📅 Publicado en DIGEMID: {fecha_escapada}")
+                    lines.append(f"📅 {fecha_escapada}")
             lines.append(f"🔗 {detail_url}")
             lines.append("")
 

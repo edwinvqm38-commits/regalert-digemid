@@ -137,15 +137,14 @@ function isAdmin(chatId: string): boolean {
 const KEYBOARD_LABEL_COMMANDS: Record<string, string> = {
   "🚨 Últimas alertas": "/ultimas",
   "🔎 Buscar": "/buscar",
-  "🤖 Consulta IA": "/consulta",
   "ℹ️ Ayuda": "/ayuda",
 };
 
-function persistentKeyboard() {
+async function persistentKeyboard(chatId: string) {
   return {
     keyboard: [
       ["🚨 Últimas alertas", "🔎 Buscar"],
-      ["🤖 Consulta IA", "ℹ️ Ayuda"],
+      [await consultaIaLabel(chatId), "ℹ️ Ayuda"],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -172,6 +171,11 @@ function mainMenu(incluirDemo = false) {
     [
       { text: "🗓️ Este mes", callback_data: "alertas:mes" },
       { text: "🔎 Buscar", callback_data: "alertas:buscar_info" },
+    ],
+    [{ text: "💳 Ver planes", callback_data: "menu:planes" }],
+    [
+      { text: "🪪 Mi perfil", callback_data: "cuenta:miperfil" },
+      { text: "📝 Registrarme", callback_data: "cuenta:registrarme_info" },
     ],
     [{ text: "ℹ️ Ayuda", callback_data: "menu:ayuda" }],
   );
@@ -571,6 +575,15 @@ function helpText(esAdmin = false) {
     "",
     "<b>⬅️ Volver</b>",
     "Regresa al menú anterior o al menú principal.",
+    "",
+    "<b>💳 Ver planes</b>",
+    "Muestra los 3 planes pagados con botones para solicitarlos.",
+    "",
+    "<b>🪪 Mi perfil</b>",
+    "Muestra tu nombre registrado y el estado de tu prueba o plan.",
+    "",
+    "<b>📝 Registrarme</b>",
+    "Te recuerda cómo fijar el nombre con el que te identificas.",
     "",
     "Usa /menu para volver al panel principal.",
   ];
@@ -1067,6 +1080,26 @@ function tieneAccesoActivo(estado: EstadoAcceso): boolean {
   return estado.legado || estado.pruebaEstado === "activa" || Boolean(estado.nivelPagado);
 }
 
+async function consultaIaLabel(chatId: string): Promise<string> {
+  const estado = await getEstadoAcceso(chatId);
+
+  if (!tieneAccesoActivo(estado)) {
+    return "🤖 Consulta IA (activar prueba)";
+  }
+
+  const nivel = estado.nivelPagado ?? "gratis";
+  const limite = NIVEL_LIMITES_DIARIOS[nivel] ?? NIVEL_LIMITES_DIARIOS.gratis;
+
+  if (limite === null) {
+    return "🤖 Consulta IA (sin límite)";
+  }
+
+  const usadas = await contarConsultasHoy(chatId);
+  const restantes = Math.max(0, limite - usadas);
+
+  return `🤖 Consulta IA (quedan ${restantes})`;
+}
+
 function formatResumenUsuarios(totalUsuarios: number, suscripciones: any[]): string {
   const hoy = getLimaDateParts().isoDate;
 
@@ -1216,12 +1249,15 @@ function formatDirectorio(
       estadoEfectivo = vencida ? "vencido" : sub.estado;
     }
 
-    if (persona.plan_gratis_legado) {
-      gratisPermanente.push(persona);
-    } else if (estadoEfectivo === "activo") {
+    if (estadoEfectivo === "activo") {
+      // Un plan pagado activo manda siempre, incluso si la cuenta tambien
+      // quedo marcada como gratis_legado (ej. usuarios grandfathered que
+      // despues se suscribieron a un plan real).
       conPlanActivo.push({ persona, sub });
     } else if (persona.prueba_estado === "activa") {
       enPruebaActiva.push(persona);
+    } else if (persona.plan_gratis_legado) {
+      gratisPermanente.push(persona);
     } else if (estadoEfectivo === "vencido") {
       lapsos.push({ persona, motivo: `plan ${sub!.nivel} vencido (${sub!.fecha_fin ?? "sin fecha"})` });
     } else if (estadoEfectivo === "cancelado") {
@@ -1376,6 +1412,44 @@ async function answerConsulta(
   }
 
   throw new Error("Falta configurar DEEPSEEK_API_KEY o ANTHROPIC_API_KEY");
+}
+
+async function enviarMiPerfil(chatId: string): Promise<void> {
+  const { data: usuario, error: usuarioError } = await supabase
+    .from("digemid_bot_usuarios")
+    .select("nombre, nombre_confirmado, prueba_estado, prueba_alertas_enviadas, prueba_inicio, plan_interes")
+    .eq("telegram_chat_id", chatId)
+    .maybeSingle();
+
+  if (usuarioError || !usuario) {
+    return await sendMessage(chatId, "⚠️ No pude encontrar tu perfil. Escribe /start primero.");
+  }
+
+  const { data: suscripcion } = await supabase
+    .from("digemid_suscripciones")
+    .select("nivel, estado, fecha_fin")
+    .eq("telegram_chat_id", chatId)
+    .eq("estado", "activo")
+    .maybeSingle();
+
+  const lines = [
+    "🪪 <b>Tu perfil</b>",
+    "",
+    `Nombre registrado: <b>${escapeHtml(usuario.nombre ?? "sin registrar")}</b>` +
+      (usuario.nombre_confirmado ? "" : " (por defecto — usa /registrarme para elegir el tuyo)"),
+  ];
+
+  if (suscripcion) {
+    lines.push(`Plan activo: <b>${escapeHtml(NOMBRES_PLAN[suscripcion.nivel] ?? suscripcion.nivel)}</b> hasta ${escapeHtml(suscripcion.fecha_fin ?? "sin fecha")}.`);
+  } else if (usuario.prueba_estado === "activa") {
+    lines.push(`Prueba gratuita activa: ${usuario.prueba_alertas_enviadas ?? 0}/3 alertas usadas.`);
+  } else if (usuario.prueba_estado === "finalizada") {
+    lines.push("Tu prueba gratuita ya terminó. Escribe /suscribirme para ver los planes.");
+  } else {
+    lines.push("Todavía no tienes plan ni prueba gratuita activa. Escribe /suscribirme para empezar.");
+  }
+
+  return await sendMessage(chatId, lines.join("\n"));
 }
 
 async function solicitarPlan(
@@ -1559,6 +1633,10 @@ async function handleCommand(
     return await handleCommand(chatId, userId, mappedCommand, chatType, esUsuarioNuevo);
   }
 
+  if (trimmed.startsWith("🤖 Consulta IA")) {
+    return await handleCommand(chatId, userId, "/consulta", chatType, esUsuarioNuevo);
+  }
+
   const COMANDOS_CON_ACCESO_EXACTO = ["/ultimas", "/hoy", "/semana", "/mes", "/recientes"];
   const requiereAcceso =
     COMANDOS_CON_ACCESO_EXACTO.includes(trimmed) ||
@@ -1586,7 +1664,7 @@ async function handleCommand(
     if (esComandoStart) {
       const payload = trimmed.startsWith("/start ") ? trimmed.slice(7).trim() : "";
 
-      await sendMessage(chatId, "👋 Bienvenido a RegAlert DIGEMID.", persistentKeyboard());
+      await sendMessage(chatId, "👋 Bienvenido a RegAlert DIGEMID.", await persistentKeyboard(chatId));
 
       if (esUsuarioNuevo) {
         await sendMessage(
@@ -2156,41 +2234,7 @@ async function handleCommand(
   }
 
   if (trimmed === "/miperfil") {
-    const { data: usuario, error: usuarioError } = await supabase
-      .from("digemid_bot_usuarios")
-      .select("nombre, nombre_confirmado, prueba_estado, prueba_alertas_enviadas, prueba_inicio, plan_interes")
-      .eq("telegram_chat_id", chatId)
-      .maybeSingle();
-
-    if (usuarioError || !usuario) {
-      return await sendMessage(chatId, "⚠️ No pude encontrar tu perfil. Escribe /start primero.");
-    }
-
-    const { data: suscripcion } = await supabase
-      .from("digemid_suscripciones")
-      .select("nivel, estado, fecha_fin")
-      .eq("telegram_chat_id", chatId)
-      .eq("estado", "activo")
-      .maybeSingle();
-
-    const lines = [
-      "🪪 <b>Tu perfil</b>",
-      "",
-      `Nombre registrado: <b>${escapeHtml(usuario.nombre ?? "sin registrar")}</b>` +
-        (usuario.nombre_confirmado ? "" : " (por defecto — usa /registrarme para elegir el tuyo)"),
-    ];
-
-    if (suscripcion) {
-      lines.push(`Plan activo: <b>${escapeHtml(NOMBRES_PLAN[suscripcion.nivel] ?? suscripcion.nivel)}</b> hasta ${escapeHtml(suscripcion.fecha_fin ?? "sin fecha")}.`);
-    } else if (usuario.prueba_estado === "activa") {
-      lines.push(`Prueba gratuita activa: ${usuario.prueba_alertas_enviadas ?? 0}/3 alertas usadas.`);
-    } else if (usuario.prueba_estado === "finalizada") {
-      lines.push("Tu prueba gratuita ya terminó. Escribe /suscribirme para ver los planes.");
-    } else {
-      lines.push("Todavía no tienes plan ni prueba gratuita activa. Escribe /suscribirme para empezar.");
-    }
-
-    return await sendMessage(chatId, lines.join("\n"));
+    return await enviarMiPerfil(chatId);
   }
 
   if (trimmed.startsWith("/desactivar")) {
@@ -2567,6 +2611,25 @@ async function handleCallback(update: TelegramUpdate) {
 
   if (data === "menu:ayuda") {
     return await sendMessage(chatId, helpText(isAdmin(chatId)), mainMenu());
+  }
+
+  if (data === "menu:planes") {
+    return await sendMessage(
+      chatId,
+      `💳 <b>Planes disponibles</b>\n\n${PLANES_TEXTO_CORTO}\n\nToca uno para solicitarlo — te doy el número de Yape al instante.`,
+      planesKeyboard(),
+    );
+  }
+
+  if (data === "cuenta:miperfil") {
+    return await enviarMiPerfil(chatId);
+  }
+
+  if (data === "cuenta:registrarme_info") {
+    return await sendMessage(
+      chatId,
+      "📝 Escribe:\n<code>/registrarme Tu Nombre Completo</code>\n\nEjemplo:\n<code>/registrarme Juan Pérez</code>",
+    );
   }
 
   if (data === "alertas:ultimas") {

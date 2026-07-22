@@ -12,6 +12,28 @@ PRUEBA_LIMITE_DIAS = 14
 
 NIVEL_PRECIOS = {"basico": 29, "consultoria": 79, "empresarial": 199}
 
+PERU_TZ = timezone(timedelta(hours=-5))
+
+
+def _formatear_detectado(doc: dict) -> str | None:
+    """DIGEMID no publica la hora exacta en que sube una alerta (solo un
+    dia/mes en su tarjeta, sin reloj). Como proxy auditable usamos el
+    momento en que nuestro propio sistema detecto el documento
+    (raw.scraped_at, en UTC), convertido a hora Peru."""
+    scraped_at = (doc.get("raw") or {}).get("scraped_at")
+    if not scraped_at:
+        return None
+
+    try:
+        momento = datetime.fromisoformat(scraped_at)
+    except ValueError:
+        return None
+
+    if momento.tzinfo is None:
+        momento = momento.replace(tzinfo=timezone.utc)
+
+    return momento.astimezone(PERU_TZ).strftime("%d/%m/%Y %H:%M")
+
 
 class NotifyAgent:
     """Agente responsable de notificar novedades por Telegram."""
@@ -44,8 +66,14 @@ class NotifyAgent:
             key = html.escape(str(doc.get("document_key", "")))
             title = html.escape(str(doc.get("title", "")))[:250]
             detail_url = html.escape(str(doc.get("detail_url", "")))
+            fecha_publicacion = doc.get("published_date_display")
+            detectado = _formatear_detectado(doc)
 
             lines.append(f"• <b>{key}</b> — {title}")
+            if fecha_publicacion:
+                lines.append(f"📅 Publicado en DIGEMID: {html.escape(str(fecha_publicacion))}")
+            if detectado:
+                lines.append(f"🕐 Detectado por el sistema: {detectado} (hora Perú)")
             lines.append(f"🔗 {detail_url}")
             lines.append("")
 
@@ -72,7 +100,7 @@ class NotifyAgent:
             "chat_id": self.chat_id,
             "text": self.build_message(new_docs),
             "parse_mode": "HTML",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": True,
         }
 
         try:

@@ -42,6 +42,44 @@ def extract_date_display(text: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+MESES_ES = {
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "set": 9, "sep": 9, "oct": 10, "nov": 11, "dic": 12,
+}
+
+
+def extract_day_month_es(text: str | None) -> tuple[int, int] | None:
+    """Extrae dia y mes de textos tipo '22 Jul' (la tarjeta de fecha que
+    DIGEMID muestra junto a cada alerta, sin anio ni separador '/')."""
+    if not text:
+        return None
+
+    match = re.search(
+        r"\b(\d{1,2})\s+(ene|feb|mar|abr|may|jun|jul|ago|set|sep|oct|nov|dic)[a-z]*\.?\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    day = int(match.group(1))
+    month = MESES_ES.get(match.group(2).lower())
+
+    if not month or not (1 <= day <= 31):
+        return None
+
+    return day, month
+
+
+def year_from_document_key(document_key: str | None) -> int | None:
+    """Extrae el anio de un document_key tipo '81-2026'."""
+    if not document_key:
+        return None
+
+    match = re.search(r"(20\d{2})\b", document_key)
+    return int(match.group(1)) if match else None
+
+
 def remove_accents(text: str) -> str:
     """Remueve tildes para construir slugs estables."""
     normalized = unicodedata.normalize("NFKD", text)

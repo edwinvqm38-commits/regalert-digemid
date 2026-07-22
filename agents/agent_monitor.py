@@ -9,12 +9,20 @@ from bs4 import BeautifulSoup
 from agents.agent_utils import (
     clean_text,
     extract_date_display,
+    extract_day_month_es,
     generate_document_key,
     is_valid_document,
     normalize_date,
     slug_from_url,
     utc_now_iso,
+    year_from_document_key,
 )
+
+# Cuantos ancestros del link se revisan buscando la tarjeta de fecha ("22 Jul")
+# que DIGEMID muestra al costado de cada alerta. Se limita a pocos niveles y a
+# contenedores cortos para no terminar leyendo la fecha de un post vecino.
+MAX_NIVELES_FECHA = 3
+MAX_LARGO_CONTENEDOR_FECHA = 350
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +51,38 @@ class MonitorAgent:
         response.raise_for_status()
 
         return response.text
+
+    @staticmethod
+    def _fecha_desde_tarjeta(link, document_key: str) -> tuple[str | None, str | None]:
+        """Busca en los ancestros cercanos del link la tarjeta de fecha de
+        DIGEMID (ej. '22 Jul', sin anio ni separador '/') y la combina con el
+        anio del document_key. Se limita a pocos niveles y contenedores
+        cortos para no leer por error la fecha de un post vecino en el
+        listado; si no hay certeza razonable, devuelve (None, None) en vez de
+        arriesgar una fecha incorrecta."""
+        year = year_from_document_key(document_key)
+        if not year:
+            return None, None
+
+        ancestor = link
+        for _ in range(MAX_NIVELES_FECHA):
+            ancestor = getattr(ancestor, "parent", None)
+            if ancestor is None:
+                break
+
+            container_text = clean_text(ancestor.get_text(" "))
+            if len(container_text) > MAX_LARGO_CONTENEDOR_FECHA:
+                break
+
+            day_month = extract_day_month_es(container_text)
+            if day_month:
+                day, month = day_month
+                return (
+                    f"{day:02d}/{month:02d}/{year}",
+                    f"{year}-{month:02d}-{day:02d}",
+                )
+
+        return None, None
 
     def get_latest_alerts(self) -> list[dict]:
         """Consulta DIGEMID y devuelve documentos normalizados."""
@@ -91,6 +131,11 @@ class MonitorAgent:
 
                 date_display = extract_date_display(text)
                 published_date = normalize_date(date_display)
+
+                if not published_date:
+                    date_display, published_date = self._fecha_desde_tarjeta(
+                        link, document_key
+                    )
 
                 title = text or f"Alerta DIGEMID {document_key}"
                 doc_slug = slug_from_url(detail_url)

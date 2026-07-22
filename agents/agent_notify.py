@@ -70,7 +70,7 @@ class NotifyAgent:
             fecha_publicacion = doc.get("published_date_display")
             hora_deteccion = _hora_aproximada_deteccion(doc)
 
-            lines.append(f"• <b>{key}</b> — {title}")
+            lines.append(f"📄 <b>{key}</b> — {title}")
             if fecha_publicacion:
                 fecha_escapada = html.escape(str(fecha_publicacion))
                 if hora_deteccion:
@@ -84,7 +84,7 @@ class NotifyAgent:
             lines.append("")
 
         if len(new_docs) > 10:
-            lines.append(f"Y {len(new_docs) - 10} documentos más.")
+            lines.append(f"➕ Y {len(new_docs) - 10} documentos más.")
 
         return "\n".join(lines)
 

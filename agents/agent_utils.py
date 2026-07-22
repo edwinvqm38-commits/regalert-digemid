@@ -80,6 +80,33 @@ def year_from_document_key(document_key: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+TITULO_PALABRAS_GENERICAS = {"alerta", "digemid", "n", "no", "sanitaria", "de"}
+
+
+def es_titulo_generico(title: str | None, document_key: str | None = None) -> bool:
+    """Detecta titulos que no aportan info real, ej. 'ALERTA DIGEMID N 81-2026'
+    (el mismo document_key repetido con palabras de relleno): DIGEMID no
+    incluye el nombre del producto en el texto del link del listado, solo en
+    el detalle/PDF, asi que a veces el titulo scrapeado es puro ruido."""
+    if not title:
+        return True
+
+    normalizado = remove_accents(title).lower()
+    normalizado = re.sub(r"[^\w\s]", " ", normalizado)
+    tokens = [t for t in normalizado.replace("-", " ").split() if t]
+
+    key_tokens: set[str] = set()
+    if document_key:
+        key_tokens = {t for t in re.split(r"[-\s]+", document_key.lower()) if t}
+
+    restantes = [
+        t for t in tokens
+        if t not in TITULO_PALABRAS_GENERICAS and t not in key_tokens
+    ]
+
+    return len(restantes) == 0
+
+
 def remove_accents(text: str) -> str:
     """Remueve tildes para construir slugs estables."""
     normalized = unicodedata.normalize("NFKD", text)

@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from agents.agent_utils import es_titulo_generico
+
 logger = logging.getLogger(__name__)
 
 PRUEBA_LIMITE_ALERTAS = 3
@@ -64,21 +66,30 @@ class NotifyAgent:
         ]
 
         for doc in new_docs[:10]:
-            key = html.escape(str(doc.get("document_key", "")))
-            title = html.escape(str(doc.get("title", "")))[:250]
+            document_key = str(doc.get("document_key", ""))
+            key = html.escape(document_key)
+            title_original = str(doc.get("title", ""))
             detail_url = html.escape(str(doc.get("detail_url", "")))
             fecha_publicacion = doc.get("published_date_display")
             hora_deteccion = _hora_aproximada_deteccion(doc)
 
-            lines.append(f"📄 <b>{key}</b> — {title}")
+            # DIGEMID no pone el nombre del producto en el link del listado,
+            # solo el numero de alerta ("ALERTA DIGEMID N 81-2026"): mostrar
+            # ese titulo junto al document_key es puro relleno repetido.
+            if es_titulo_generico(title_original, document_key):
+                lines.append(f"📄 <b>Alerta DIGEMID Nº {key}</b>")
+            else:
+                title = html.escape(title_original)[:250]
+                lines.append(f"📄 <b>{key}</b> — {title}")
+
             if fecha_publicacion:
                 fecha_escapada = html.escape(str(fecha_publicacion))
                 if hora_deteccion:
                     lines.append(
-                        f"📅 {fecha_escapada} (detectado ≈{hora_deteccion} hora Perú)"
+                        f"Fecha: {fecha_escapada} (detectado ≈{hora_deteccion} hora Perú)"
                     )
                 else:
-                    lines.append(f"📅 {fecha_escapada}")
+                    lines.append(f"Fecha: {fecha_escapada}")
             lines.append(f"🔗 {detail_url}")
             lines.append("")
 

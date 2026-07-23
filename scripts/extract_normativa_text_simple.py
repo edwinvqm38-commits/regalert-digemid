@@ -56,13 +56,14 @@ def get_supabase():
 
 
 def contar_universo(supabase) -> tuple[int, int]:
+    """Devuelve (total de normas, normas DISTINTAS con al menos una pagina de
+    texto). con_texto NO es un conteo de paginas: contar filas de
+    digemid_norma_paginas sobreestima el avance real (una norma con 10
+    paginas sumaria 10, no 1), por eso se cuentan norma_id distintos."""
     total = supabase.table(NORMAS_TABLE).select("id", count="exact", head=True).execute()
-    con_texto = (
-        supabase.table(PAGE_TABLE)
-        .select("norma_id", count="exact", head=True)
-        .execute()
-    )
-    return (total.count or 0), (con_texto.count or 0)
+    paginas = supabase.table(PAGE_TABLE).select("norma_id").execute()
+    normas_con_texto = {row["norma_id"] for row in (paginas.data or []) if row.get("norma_id")}
+    return (total.count or 0), len(normas_con_texto)
 
 
 def get_pending_normas(supabase, limit: int, document_key: str | None = None) -> list[dict]:
@@ -73,18 +74,19 @@ def get_pending_normas(supabase, limit: int, document_key: str | None = None) ->
         .neq("pdf_url", "")
     )
     if document_key:
-        query = query.eq("document_key", document_key)
-    else:
-        query = query.order("anio", desc=True)
+        response = query.eq("document_key", document_key).limit(limit).execute()
+        # Con un document_key explícito reprocesamos aunque ya tenga páginas.
+        return response.data or []
 
-    response = query.limit(limit).execute()
+    # OJO: el limite se aplica DESPUES de filtrar las que ya tienen paginas,
+    # no antes. Si se aplicara antes (via .limit() en esta misma consulta),
+    # con order-by-anio-desc siempre se traen las normas mas nuevas primero;
+    # en cuanto esas ya esten todas procesadas, esta funcion devolveria vacio
+    # aunque queden cientos de normas mas antiguas sin procesar todavia.
+    response = query.order("anio", desc=True).execute()
     normas = response.data or []
     if not normas:
         return []
-
-    # Con un document_key explícito reprocesamos aunque ya tenga páginas.
-    if document_key:
-        return normas
 
     norma_ids = [n["id"] for n in normas]
     paginas = (
@@ -94,7 +96,8 @@ def get_pending_normas(supabase, limit: int, document_key: str | None = None) ->
         .execute()
     )
     con_paginas = {row["norma_id"] for row in (paginas.data or []) if row.get("norma_id")}
-    return [n for n in normas if n["id"] not in con_paginas]
+    pendientes = [n for n in normas if n["id"] not in con_paginas]
+    return pendientes[:limit]
 
 
 def sanitize_file_name(document_key: str, file_name: str | None) -> str:

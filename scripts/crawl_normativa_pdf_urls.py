@@ -99,8 +99,17 @@ def elegir_pdf(html: str, base_url: str) -> str | None:
 
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if href.lower().endswith(".pdf"):
-            candidatos.append(urljoin(base_url, href))
+        if not href.lower().endswith(".pdf"):
+            continue
+
+        url = urljoin(base_url, href)
+        # Algunas paginas de DIGEMID traen un enlace roto/plantilla que termina
+        # en "/.pdf" (nombre de archivo vacio) — no es un PDF real, se descarta.
+        nombre_archivo = url.rsplit("/", 1)[-1]
+        if nombre_archivo == ".pdf" or len(nombre_archivo) <= len(".pdf"):
+            continue
+
+        candidatos.append(url)
 
     if not candidatos:
         return None

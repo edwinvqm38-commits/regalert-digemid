@@ -1085,16 +1085,32 @@ async function searchConsultaChunks(query: string, limit = 4) {
 }
 
 // /consulta busca por relevancia de texto (buscar_paginas_texto), no por
-// fecha: para preguntas tipo "cual es la ultima alerta" eso devuelve la
-// pagina cuyo contenido calza mejor con las palabras "ultima"/"alerta", no
-// la mas reciente, y la IA narra ese resultado como si lo fuera. Estas
-// preguntas se detectan aqui y se resuelven con el mismo listado ordenado
-// por fecha que usa /ultimas, en vez de pasar por la busqueda semantica.
-function esConsultaDeUltimasAlertas(pregunta: string): boolean {
-  const texto = pregunta
+// fecha/orden/conteo: para preguntas tipo "cual es la ultima alerta",
+// "que salio esta semana" o "cuantas alertas hay este mes" esa busqueda
+// devuelve la pagina cuyo contenido calza mejor con esas palabras sueltas,
+// no el dato real, y la IA narra ese resultado como si lo fuera. Estas
+// preguntas se detectan aqui (por texto o por voz, ya que la voz reusa este
+// mismo camino) y se resuelven con las mismas consultas ordenadas/contadas
+// que usan /ultimas, /hoy, /semana y /mes, en vez de pasar por la IA.
+function normalizarTexto(texto: string): string {
+  return texto
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+function ambitoTemporalAlertas(pregunta: string): "hoy" | "semana" | "mes" | null {
+  const texto = normalizarTexto(pregunta);
+
+  if (/\bhoy\b/.test(texto)) return "hoy";
+  if (/\b(esta semana|semana)\b/.test(texto)) return "semana";
+  if (/\b(este mes|del mes|\bmes\b)\b/.test(texto)) return "mes";
+
+  return null;
+}
+
+function esConsultaDeUltimasAlertas(pregunta: string): boolean {
+  const texto = normalizarTexto(pregunta);
 
   const mencionaAlertas = /alerta/.test(texto);
   const pideRecencia = /\b(ultima|ultimas|ultimo|ultimos|reciente|recientes|nueva|nuevas|nuevo|nuevos)\b/.test(texto);
@@ -1106,10 +1122,7 @@ function esConsultaDeUltimasAlertas(pregunta: string): boolean {
 // entiende que pide solo 1, no el listado completo de 5 que usa /ultimas;
 // si menciona un numero explicito ("las 3 ultimas") se respeta ese numero.
 function limiteAlertasSolicitado(pregunta: string): number {
-  const texto = pregunta
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+  const texto = normalizarTexto(pregunta);
 
   const numeroExplicito = texto.match(/\b([1-9]|10)\b/);
   if (numeroExplicito) {
@@ -1123,6 +1136,19 @@ function limiteAlertasSolicitado(pregunta: string): number {
   if (esSingular) return 1;
 
   return 5;
+}
+
+// Solo intercepta "cuantas alertas ..." cuando ademas trae un ambito de
+// fecha explicito (hoy/semana/mes): sin eso, "cuantas alertas hay sobre
+// tal medicamento" es una pregunta de contenido real que si necesita la
+// busqueda semantica, no un conteo.
+function esConsultaDeConteoAlertas(pregunta: string): boolean {
+  const texto = normalizarTexto(pregunta);
+
+  const preguntaCuantas = /\bcuant[oa]s?\b/.test(texto);
+  const mencionaAlertas = /alerta/.test(texto);
+
+  return preguntaCuantas && mencionaAlertas && ambitoTemporalAlertas(pregunta) !== null;
 }
 
 function buildConsultaContext(chunks: any[]) {
@@ -2735,6 +2761,80 @@ async function handleCommand(
         chatId,
         "🤖 <b>Consulta IA</b>\n\nEscribe tu pregunta despues de /consulta y te respondo citando la alerta o norma oficial.\n\nEjemplo:\n<code>/consulta que paso con el Opdivo falsificado</code>",
       );
+    }
+
+    if (esConsultaDeConteoAlertas(question)) {
+      const ambito = ambitoTemporalAlertas(question)!;
+      const { total, etiqueta } = ambito === "hoy"
+        ? { total: (await getTodayAlerts()).length, etiqueta: "hoy" }
+        : ambito === "semana"
+        ? { total: (await getAlertasSemana(10)).total, etiqueta: "esta semana" }
+        : { total: (await getMonthAlerts()).length, etiqueta: "este mes" };
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: total,
+        status: "ok_redirigido_conteo",
+      });
+
+      return await sendMessage(
+        chatId,
+        `🔢 Hay <b>${total}</b> ${total === 1 ? "alerta" : "alertas"} registradas ${etiqueta}.`,
+        alertasMenu(),
+      );
+    }
+
+    const ambito = ambitoTemporalAlertas(question);
+
+    if (ambito === "hoy") {
+      const rows = await getTodayAlerts();
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: rows.length,
+        status: "ok_redirigido_hoy",
+      });
+
+      await sendMessage(chatId, formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows), alertasMenu());
+      return await enviarPdfsAlertas(chatId, rows);
+    }
+
+    if (ambito === "semana") {
+      const { rows, total } = await getAlertasSemana(10);
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: rows.length,
+        status: "ok_redirigido_semana",
+      });
+
+      await sendMessage(chatId, formatWeekAlertList(rows, total, 10), alertasMenu());
+      return await enviarPdfsAlertas(chatId, rows);
+    }
+
+    if (ambito === "mes") {
+      const rows = await getMonthAlerts();
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: rows.length,
+        status: "ok_redirigido_mes",
+      });
+
+      await sendMessage(chatId, formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows), alertasMenu());
+      return await enviarPdfsAlertas(chatId, rows);
     }
 
     if (esConsultaDeUltimasAlertas(question)) {

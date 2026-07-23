@@ -30,7 +30,7 @@ const LIMITE_DIARIO_GLOBAL = 300;
 // real rara vez pasa de 20-30s, y esto evita audios larguisimos que salen
 // mas caros de transcribir. Los administradores no tienen limite.
 const NIVEL_LIMITE_VOZ_SEGUNDOS: Record<string, number> = {
-  gratis: 20,
+  gratis: 10,
   basico: 30,
   consultoria: 60,
   empresarial: 120,

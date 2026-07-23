@@ -1084,6 +1084,24 @@ async function searchConsultaChunks(query: string, limit = 4) {
   return data ?? [];
 }
 
+// /consulta busca por relevancia de texto (buscar_paginas_texto), no por
+// fecha: para preguntas tipo "cual es la ultima alerta" eso devuelve la
+// pagina cuyo contenido calza mejor con las palabras "ultima"/"alerta", no
+// la mas reciente, y la IA narra ese resultado como si lo fuera. Estas
+// preguntas se detectan aqui y se resuelven con el mismo listado ordenado
+// por fecha que usa /ultimas, en vez de pasar por la busqueda semantica.
+function esConsultaDeUltimasAlertas(pregunta: string): boolean {
+  const texto = pregunta
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const mencionaAlertas = /alerta/.test(texto);
+  const pideRecencia = /\b(ultima|ultimas|ultimo|ultimos|reciente|recientes|nueva|nuevas|nuevo|nuevos)\b/.test(texto);
+
+  return mencionaAlertas && pideRecencia;
+}
+
 function buildConsultaContext(chunks: any[]) {
   return chunks
     .map((chunk) => {
@@ -2694,6 +2712,26 @@ async function handleCommand(
         chatId,
         "🤖 <b>Consulta IA</b>\n\nEscribe tu pregunta despues de /consulta y te respondo citando la alerta o norma oficial.\n\nEjemplo:\n<code>/consulta que paso con el Opdivo falsificado</code>",
       );
+    }
+
+    if (esConsultaDeUltimasAlertas(question)) {
+      const rows = await getLatestAlerts(5);
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: rows.length,
+        status: "ok_redirigido_ultimas",
+      });
+
+      await sendMessage(
+        chatId,
+        formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
+        alertasMenu(),
+      );
+      return await enviarPdfsAlertas(chatId, rows);
     }
 
     try {

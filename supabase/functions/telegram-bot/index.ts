@@ -623,6 +623,12 @@ function helpText(esAdmin = false) {
     "",
     "<b>/gratis chat_id</b>",
     "Deja a esa persona con acceso gratis permanente (caso manual, sin límite de prueba).",
+    "",
+    "<b>/pagosyape</b>",
+    "Suma los montos reales que los usuarios reportaron con /pague este mes (confirmados y pendientes).",
+    "",
+    "<b>/saldodeepseek</b>",
+    "Consulta al instante el saldo de la API de DeepSeek y proyecta días restantes.",
   ];
 
   return [...base, ...admin].join("\n");
@@ -1419,6 +1425,113 @@ function formatIngresos(altas: any[], startIso: string): string {
   return lines.join("\n");
 }
 
+function formatPagosYape(pagos: any[], startIso: string): string {
+  let totalConfirmado = 0;
+  let totalPendiente = 0;
+  let countConfirmado = 0;
+  let countPendiente = 0;
+  let countRechazado = 0;
+
+  for (const pago of pagos) {
+    const monto = Number(pago.monto_esperado) || 0;
+    if (pago.estado === "confirmado") {
+      totalConfirmado += monto;
+      countConfirmado += 1;
+    } else if (pago.estado === "pendiente") {
+      totalPendiente += monto;
+      countPendiente += 1;
+    } else if (pago.estado === "rechazado") {
+      countRechazado += 1;
+    }
+  }
+
+  const mesLabel = new Date(`${startIso}T12:00:00Z`).toLocaleDateString("es-PE", {
+    month: "long",
+    year: "numeric",
+    timeZone: "America/Lima",
+  });
+
+  return [
+    `💸 <b>Pagos Yape reportados de ${escapeHtml(mesLabel)}</b>`,
+    "",
+    `<b>Confirmados: S/ ${totalConfirmado.toFixed(2)}</b> (${countConfirmado} pago${countConfirmado === 1 ? "" : "s"})`,
+    `Pendientes de verificar: S/ ${totalPendiente.toFixed(2)} (${countPendiente})`,
+    `Rechazados: ${countRechazado}`,
+    "",
+    "Nota: esto suma los montos que los usuarios reportaron con /pague. " +
+      "Es distinto de /ingresos, que calcula según planes activados × precio de lista.",
+  ].join("\n");
+}
+
+async function consultarSaldoDeepseek(): Promise<{ balanceUsd: number | null; isAvailable: boolean; raw: any }> {
+  const response = await fetch("https://api.deepseek.com/user/balance", {
+    headers: { Authorization: `Bearer ${DEEPSEEK_API_KEY}` },
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(`DeepSeek balance error ${response.status}: ${JSON.stringify(data)}`);
+  }
+
+  const infos = data.balance_infos ?? [];
+  const usd = infos.find((info: any) => info.currency === "USD") ?? infos[0];
+  const balanceUsd = usd ? Number(usd.total_balance) : null;
+  const isAvailable = Boolean(data.is_available ?? (balanceUsd !== null && balanceUsd > 0));
+
+  return { balanceUsd, isAvailable, raw: data };
+}
+
+async function guardarSnapshotSaldoDeepseek(balanceUsd: number | null, isAvailable: boolean, raw: any): Promise<void> {
+  try {
+    await supabase.from("deepseek_balance_historial").insert({
+      balance_usd: balanceUsd,
+      is_available: isAvailable,
+      raw,
+    });
+  } catch (error) {
+    console.error("No se pudo guardar snapshot de saldo DeepSeek:", error);
+  }
+}
+
+async function proyectarDiasRestantesDeepseek(balanceActual: number): Promise<number | null> {
+  const desde = new Date();
+  desde.setDate(desde.getDate() - 14);
+
+  const { data: historial, error } = await supabase
+    .from("deepseek_balance_historial")
+    .select("checked_at, balance_usd")
+    .gte("checked_at", desde.toISOString())
+    .order("checked_at", { ascending: true });
+
+  if (error || !historial) return null;
+
+  const filtrado = historial.filter((row: any) => row.balance_usd !== null);
+  if (filtrado.length < 2) return null;
+
+  let ultimoIndiceRecarga = -1;
+  for (let i = 1; i < filtrado.length; i++) {
+    if (filtrado[i].balance_usd > filtrado[i - 1].balance_usd) {
+      ultimoIndiceRecarga = i;
+    }
+  }
+
+  const tramo = ultimoIndiceRecarga >= 0 ? filtrado.slice(ultimoIndiceRecarga) : filtrado;
+  if (tramo.length < 2) return null;
+
+  const primero = tramo[0];
+  const ultimo = tramo[tramo.length - 1];
+
+  const diasTranscurridos =
+    (new Date(ultimo.checked_at).getTime() - new Date(primero.checked_at).getTime()) / 86_400_000;
+  const consumoTotal = primero.balance_usd - ultimo.balance_usd;
+
+  if (diasTranscurridos <= 0 || consumoTotal <= 0) return null;
+
+  const consumoDiarioPromedio = consumoTotal / diasTranscurridos;
+  return balanceActual / consumoDiarioPromedio;
+}
+
 async function answerConsulta(
   question: string,
 ): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
@@ -2159,6 +2272,60 @@ async function handleCommand(
     }
 
     return await sendMessage(chatId, formatIngresos(altas ?? [], startIso));
+  }
+
+  if (trimmed === "/pagosyape") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { startIso, nextIso } = getCurrentMonthBoundsLima();
+
+    const { data: pagos, error: pagosError } = await supabase
+      .from("digemid_pagos_yape")
+      .select("nivel, monto_esperado, estado")
+      .gte("creado_at", startIso)
+      .lt("creado_at", nextIso);
+
+    if (pagosError) {
+      return await sendMessage(chatId, `⚠️ Error al calcular pagos Yape: ${escapeHtml(pagosError.message)}`);
+    }
+
+    return await sendMessage(chatId, formatPagosYape(pagos ?? [], startIso));
+  }
+
+  if (trimmed === "/saldodeepseek") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    try {
+      const { balanceUsd, isAvailable, raw } = await consultarSaldoDeepseek();
+
+      if (balanceUsd === null) {
+        return await sendMessage(chatId, "⚠️ No pude interpretar el saldo devuelto por DeepSeek.");
+      }
+
+      await guardarSnapshotSaldoDeepseek(balanceUsd, isAvailable, raw);
+      const diasRestantes = await proyectarDiasRestantesDeepseek(balanceUsd);
+
+      const lineas = [
+        "🔋 <b>Saldo DeepSeek</b>",
+        "",
+        `Saldo actual: <b>$${balanceUsd.toFixed(2)} USD</b>`,
+        `Disponible: ${isAvailable ? "sí" : "no"}`,
+      ];
+
+      if (diasRestantes !== null) {
+        lineas.push(`Proyección al ritmo de consumo actual: <b>~${diasRestantes.toFixed(1)} días restantes</b>`);
+      } else {
+        lineas.push("Aún no hay suficiente historial para proyectar días restantes.");
+      }
+
+      return await sendMessage(chatId, lineas.join("\n"));
+    } catch (error) {
+      return await sendMessage(chatId, `⚠️ Error al consultar el saldo de DeepSeek: ${escapeHtml(String(error))}`);
+    }
   }
 
   if (trimmed.startsWith("/invitar")) {

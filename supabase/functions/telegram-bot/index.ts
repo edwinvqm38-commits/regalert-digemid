@@ -1102,6 +1102,29 @@ function esConsultaDeUltimasAlertas(pregunta: string): boolean {
   return mencionaAlertas && pideRecencia;
 }
 
+// Si la pregunta usa singular ("la ultima alerta", "una alerta reciente") se
+// entiende que pide solo 1, no el listado completo de 5 que usa /ultimas;
+// si menciona un numero explicito ("las 3 ultimas") se respeta ese numero.
+function limiteAlertasSolicitado(pregunta: string): number {
+  const texto = pregunta
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+  const numeroExplicito = texto.match(/\b([1-9]|10)\b/);
+  if (numeroExplicito) {
+    return parseInt(numeroExplicito[1], 10);
+  }
+
+  const esPlural = /\b(ultimas|ultimos|recientes|nuevas|nuevos)\b/.test(texto);
+  if (esPlural) return 5;
+
+  const esSingular = /\b(ultima|ultimo|reciente|nueva|nuevo)\b/.test(texto);
+  if (esSingular) return 1;
+
+  return 5;
+}
+
 function buildConsultaContext(chunks: any[]) {
   return chunks
     .map((chunk) => {
@@ -2715,7 +2738,9 @@ async function handleCommand(
     }
 
     if (esConsultaDeUltimasAlertas(question)) {
-      const rows = await getLatestAlerts(5);
+      const limite = limiteAlertasSolicitado(question);
+      const rows = await getLatestAlerts(limite);
+      const titulo = limite === 1 ? "🆕 <b>Última alerta DIGEMID</b>" : "🆕 <b>Últimas alertas DIGEMID</b>";
 
       await logConsulta({
         chatId,
@@ -2728,7 +2753,7 @@ async function handleCommand(
 
       await sendMessage(
         chatId,
-        formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
+        formatAlertList(titulo, rows),
         alertasMenu(),
       );
       return await enviarPdfsAlertas(chatId, rows);

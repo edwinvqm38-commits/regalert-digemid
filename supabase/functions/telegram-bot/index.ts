@@ -43,6 +43,12 @@ const NIVEL_PRECIOS: Record<string, number> = {
   empresarial: 199,
 };
 
+// TTS de Gemini es de pago (no free tier), por eso el audio de una respuesta
+// se genera solo si el usuario toca el boton "Escuchar" (nunca automatico) y
+// solo esta disponible desde el plan basico en adelante, para controlar costo.
+const GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts";
+const TTS_MAX_CARACTERES = 600;
+
 const CONSULTA_SYSTEM_PROMPT = `Eres un asistente que responde preguntas sobre alertas y \
 normativa de DIGEMID (Peru) usando UNICAMENTE el texto de los documentos que \
 se te entregan como contexto.
@@ -387,19 +393,110 @@ async function logConsulta(params: {
   resultCount?: number;
   status: string;
   raw?: Record<string, unknown>;
-}) {
+}): Promise<string | null> {
   try {
-    await supabase.from("digemid_bot_consultas").insert({
-      telegram_chat_id: params.chatId,
-      telegram_user_id: params.userId ?? null,
-      command: params.command,
-      query_text: params.queryText ?? null,
-      result_count: params.resultCount ?? 0,
-      status: params.status,
-      raw: params.raw ?? {},
-    });
+    const { data } = await supabase
+      .from("digemid_bot_consultas")
+      .insert({
+        telegram_chat_id: params.chatId,
+        telegram_user_id: params.userId ?? null,
+        command: params.command,
+        query_text: params.queryText ?? null,
+        result_count: params.resultCount ?? 0,
+        status: params.status,
+        raw: params.raw ?? {},
+      })
+      .select("id")
+      .single();
+
+    return data?.id != null ? String(data.id) : null;
   } catch (_error) {
     // No bloquea la respuesta del bot.
+    return null;
+  }
+}
+
+// Envuelve PCM crudo (lo que devuelve la API de Gemini TTS, sin encabezado)
+// en un contenedor WAV valido, a mano: no hay ffmpeg disponible en el edge
+// runtime de Deno, y un header WAV son solo 44 bytes fijos.
+function pcmAWav(pcm: Uint8Array, sampleRate = 24000, canales = 1, bitsPorMuestra = 16): Uint8Array {
+  const blockAlign = (canales * bitsPorMuestra) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const buffer = new ArrayBuffer(44 + pcm.length);
+  const view = new DataView(buffer);
+
+  const escribirTexto = (offset: number, texto: string) => {
+    for (let i = 0; i < texto.length; i++) view.setUint8(offset + i, texto.charCodeAt(i));
+  };
+
+  escribirTexto(0, "RIFF");
+  view.setUint32(4, 36 + pcm.length, true);
+  escribirTexto(8, "WAVE");
+  escribirTexto(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, canales, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPorMuestra, true);
+  escribirTexto(36, "data");
+  view.setUint32(40, pcm.length, true);
+  new Uint8Array(buffer, 44).set(pcm);
+
+  return new Uint8Array(buffer);
+}
+
+async function generarAudioRespuesta(texto: string): Promise<Uint8Array> {
+  const textoRecortado = texto.length > TTS_MAX_CARACTERES
+    ? texto.slice(0, TTS_MAX_CARACTERES) + "..."
+    : texto;
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_TTS_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: textoRecortado }] }],
+        generationConfig: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
+        },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Gemini TTS error ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const base64Audio = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
+  if (!base64Audio) {
+    throw new Error("Gemini TTS no devolvió audio");
+  }
+
+  const pcmBytes = Uint8Array.from(atob(base64Audio), (c) => c.charCodeAt(0));
+  return pcmAWav(pcmBytes);
+}
+
+async function enviarAudioRespuesta(chatId: string, wavBytes: Uint8Array, caption: string): Promise<void> {
+  const formData = new FormData();
+  formData.append("chat_id", chatId);
+  formData.append("caption", caption);
+  formData.append("audio", new Blob([wavBytes.buffer as ArrayBuffer], { type: "audio/wav" }), "respuesta.wav");
+
+  const response = await fetch(`${TELEGRAM_API}/sendAudio`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Telegram sendAudio error ${response.status}: ${await response.text()}`);
   }
 }
 
@@ -553,6 +650,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>🎙️ Nota de voz</b>",
     "Mándame un audio con tu pregunta y te respondo igual que con /consulta — no hace falta escribir ningún comando.",
+    "",
+    "<b>🔊 Escuchar respuesta</b>",
+    "En respuestas de /consulta (planes básico, consultoría y empresarial) aparece un botón para recibir la misma respuesta en audio.",
     "",
     "<b>/suscribirme nivel</b>",
     "Pide activar un plan pagado (basico, consultoria o empresarial). Ejemplo: /suscribirme basico",
@@ -2638,24 +2738,28 @@ async function handleCommand(
 
       const { answer, sources } = await answerConsulta(question);
 
-      await logConsulta({
+      const consultaId = await logConsulta({
         chatId,
         userId,
         command: "/consulta",
         queryText: question,
         resultCount: sources.length,
         status: "ok",
+        raw: { answerText: answer },
       });
 
-      const sourceButtons = sources.length
-        ? {
-          inline_keyboard: sources
-            .slice(0, 3)
-            .map((source) => [
-              { text: `📄 ${source.documentKey}${source.page ? " (pág. " + source.page + ")" : ""}`, url: source.url },
-            ]),
-        }
-        : undefined;
+      const filasBotones: Array<Array<{ text: string; url?: string; callback_data?: string }>> = sources
+        .slice(0, 3)
+        .map((source) => [
+          { text: `📄 ${source.documentKey}${source.page ? " (pág. " + source.page + ")" : ""}`, url: source.url },
+        ]);
+
+      const puedeEscucharAudio = isAdmin(chatId) || nivel !== "gratis";
+      if (consultaId && puedeEscucharAudio) {
+        filasBotones.push([{ text: "🔊 Escuchar respuesta", callback_data: `tts:${consultaId}` }]);
+      }
+
+      const sourceButtons = filasBotones.length ? { inline_keyboard: filasBotones } : undefined;
 
       let pie = "";
       if (limiteUsuario !== null) {
@@ -2716,6 +2820,31 @@ async function handleCallback(update: TelegramUpdate) {
     const estado = await getEstadoAcceso(chatId);
     if (!tieneAccesoActivo(estado)) {
       return await sendMessage(chatId, ACCESO_REQUERIDO_TEXTO, trialKeyboard());
+    }
+  }
+
+  if (data.startsWith("tts:")) {
+    const consultaId = data.slice(4);
+
+    try {
+      const { data: row } = await supabase
+        .from("digemid_bot_consultas")
+        .select("raw")
+        .eq("id", consultaId)
+        .maybeSingle();
+
+      const answerText = (row?.raw as Record<string, unknown> | null)?.answerText;
+
+      if (!answerText || typeof answerText !== "string") {
+        return await sendMessage(chatId, "⚠️ Ya no tengo guardado el texto de esa respuesta. Vuelve a hacer la consulta.");
+      }
+
+      await sendMessage(chatId, "🎙️ Generando audio...");
+      const wavBytes = await generarAudioRespuesta(answerText);
+      return await enviarAudioRespuesta(chatId, wavBytes, "🔊 Respuesta en audio");
+    } catch (error) {
+      console.error("TTS_ERROR:", error);
+      return await sendMessage(chatId, "⚠️ No pude generar el audio en este momento. Intenta de nuevo en unos minutos.");
     }
   }
 

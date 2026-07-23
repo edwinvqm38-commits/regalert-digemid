@@ -141,12 +141,29 @@ def normalize_text(text: str) -> str:
     return unicodedata.normalize("NFC", text or "").strip()
 
 
-def write_pages(supabase, norma_id: str, extracciones) -> int:
-    """Escribe páginas y devuelve cuántas quedaron con baja calidad."""
-    baja_calidad = 0
+def write_pages(supabase, norma_id: str, extracciones) -> dict:
+    """Escribe páginas y devuelve estadísticas de la norma para auditoría:
+    cuántas quedaron con baja calidad, cuántas usaron OCR, cuántas traen
+    tablas detectadas y cuántas se marcaron con posible fórmula/notación
+    técnica (estas dos últimas requieren revisión humana antes de usarse en
+    consultas legales, ya que ni el texto plano ni el OCR las reconstruyen
+    con fidelidad)."""
+    stats = {
+        "baja_calidad": 0,
+        "ocr_usado": False,
+        "con_tablas": 0,
+        "con_formula": 0,
+    }
+
     for page in extracciones:
         if page.quality < UMBRAL_BAJA_CALIDAD:
-            baja_calidad += 1
+            stats["baja_calidad"] += 1
+        if page.ocr_used:
+            stats["ocr_usado"] = True
+        if page.has_tables:
+            stats["con_tablas"] += 1
+        if page.posible_formula:
+            stats["con_formula"] += 1
 
         payload = {
             "norma_id": norma_id,
@@ -155,21 +172,42 @@ def write_pages(supabase, norma_id: str, extracciones) -> int:
             "text_normalized": normalize_text(page.text),
             "extraction_method": page.method,
             "ocr_used": page.ocr_used,
+            "ocr_confidence": page.ocr_confidence,
             "quality_score": page.quality,
-            "metadata": {"quality_score": page.quality, "method": page.method},
+            "has_tables": page.has_tables,
+            "posible_formula": page.posible_formula,
+            "metadata": {
+                "quality_score": page.quality,
+                "method": page.method,
+                "ocr_confidence": page.ocr_confidence,
+                "posible_formula": page.posible_formula,
+                "tables": page.tables,
+            },
         }
         supabase.table(PAGE_TABLE).insert(payload).execute()
-    return baja_calidad
+
+    return stats
 
 
-def mark_norma(supabase, norma_id: str, status: str) -> None:
+def mark_norma(supabase, norma_id: str, status: str, stats: dict | None = None) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    supabase.table(NORMAS_TABLE).update(
-        {"process_status": status, "updated_at": now}
-    ).eq("id", norma_id).execute()
+    payload = {"process_status": status, "updated_at": now}
+
+    if stats is not None:
+        payload["ocr_required"] = stats["ocr_usado"]
+        payload["has_tables"] = stats["con_tablas"] > 0
+
+    supabase.table(NORMAS_TABLE).update(payload).eq("id", norma_id).execute()
 
 
-def enviar_progreso_telegram(total: int, con_texto: int, procesadas_ahora: int, normas_baja: int) -> None:
+def enviar_progreso_telegram(
+    total: int,
+    con_texto: int,
+    procesadas_ahora: int,
+    normas_baja: int,
+    normas_con_tablas: int = 0,
+    normas_con_formula: int = 0,
+) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -187,6 +225,11 @@ def enviar_progreso_telegram(total: int, con_texto: int, procesadas_ahora: int, 
         lines.append(f"⚠️ Con baja confiabilidad: <b>{normas_baja}</b> (revisar antes de confiar en consultas)")
     else:
         lines.append("✅ Sin páginas de baja confiabilidad en esta corrida.")
+
+    if normas_con_tablas:
+        lines.append(f"📊 Con tablas detectadas: <b>{normas_con_tablas}</b> (guardadas como estructura, no solo texto plano)")
+    if normas_con_formula:
+        lines.append(f"🧮 Con posible fórmula/notación técnica: <b>{normas_con_formula}</b> (requieren revisión manual)")
 
     try:
         requests.post(
@@ -220,6 +263,8 @@ def main():
     procesadas = 0
     errores = 0
     normas_baja_calidad = 0
+    normas_con_tablas = 0
+    normas_con_formula = 0
     temp_dir = Path("tmp") / "normativa_text"
 
     for index, norma in enumerate(normas):
@@ -256,18 +301,23 @@ def main():
 
             extracciones = extract_pdf(str(local_path))
 
-            baja = write_pages(supabase, norma["id"], extracciones)
+            stats = write_pages(supabase, norma["id"], extracciones)
             promedio = sum(p.quality for p in extracciones) / max(1, len(extracciones))
             estado = "text_extracted" if promedio >= UMBRAL_BAJA_CALIDAD else "text_extracted_baja_calidad"
-            mark_norma(supabase, norma["id"], estado)
+            mark_norma(supabase, norma["id"], estado, stats)
 
-            if baja > 0:
+            if stats["baja_calidad"] > 0:
                 normas_baja_calidad += 1
+            if stats["con_tablas"] > 0:
+                normas_con_tablas += 1
+            if stats["con_formula"] > 0:
+                normas_con_formula += 1
 
             procesadas += 1
             logger.info(
-                "%s | páginas: %s | calidad prom: %.2f | páginas baja calidad: %s",
-                document_key, len(extracciones), promedio, baja,
+                "%s | páginas: %s | calidad prom: %.2f | baja calidad: %s | con tablas: %s | posible fórmula: %s",
+                document_key, len(extracciones), promedio,
+                stats["baja_calidad"], stats["con_tablas"], stats["con_formula"],
             )
 
         except Exception as error:
@@ -281,7 +331,10 @@ def main():
 
     if not args.dry_run and not args.no_telegram:
         _, con_texto_despues = contar_universo(supabase)
-        enviar_progreso_telegram(total_universo, con_texto_despues, procesadas, normas_baja_calidad)
+        enviar_progreso_telegram(
+            total_universo, con_texto_despues, procesadas, normas_baja_calidad,
+            normas_con_tablas, normas_con_formula,
+        )
 
 
 if __name__ == "__main__":

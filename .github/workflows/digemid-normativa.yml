@@ -3,6 +3,13 @@ name: DIGEMID Normativa
 on:
   workflow_dispatch:
 
+  schedule:
+    # Hora Perú = UTC-5. 08:00 a. m. Perú = 13:00 UTC.
+    # Corre antes que "DIGEMID - Extraer Texto Normativa" (15:30 UTC) para
+    # que las normas nuevas del dia ya tengan pdf_url a tiempo para esa
+    # corrida de extraccion de texto.
+    - cron: "0 13 * * *"
+
 jobs:
   normativa:
     runs-on: ubuntu-latest

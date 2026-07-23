@@ -15,7 +15,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_MODEL = "claude-haiku-4-5"
 DEEPSEEK_MODEL = "deepseek-chat"
 MAX_CHUNKS = 4
 
@@ -96,34 +95,19 @@ def call_deepseek(api_key: str, user_content: str) -> str:
     return response.json()["choices"][0]["message"]["content"]
 
 
-def call_claude(user_content: str) -> str:
-    from anthropic import Anthropic
-
-    client = Anthropic()
-
-    response = client.messages.create(
-        model=CLAUDE_MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-
-    return next((block.text for block in response.content if block.type == "text"), "")
-
-
 def call_llm(user_content: str) -> str:
-    """Usa DeepSeek si hay credito cargado (DEEPSEEK_API_KEY); si no, Claude.
-
-    Cuando se agote el credito de DeepSeek, basta con quitar/vencer esa
-    variable de entorno para que vuelva a usar Claude sin tocar codigo."""
+    """Usa DeepSeek (unico proveedor). Si falta la API key, falla explicito
+    en vez de degradar en silencio a otro proveedor."""
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
 
-    if deepseek_key:
-        logger.info("Usando DeepSeek (%s)", DEEPSEEK_MODEL)
-        return call_deepseek(deepseek_key, user_content)
+    if not deepseek_key:
+        raise RuntimeError(
+            "Falta configurar DEEPSEEK_API_KEY. Revisar el saldo en "
+            "https://platform.deepseek.com/ antes de recargar la variable."
+        )
 
-    logger.info("Usando Claude (%s)", CLAUDE_MODEL)
-    return call_claude(user_content)
+    logger.info("Usando DeepSeek (%s)", DEEPSEEK_MODEL)
+    return call_deepseek(deepseek_key, user_content)
 
 
 def ask(question: str, dry_run: bool = False) -> str:
@@ -146,7 +130,7 @@ def ask(question: str, dry_run: bool = False) -> str:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("question", nargs="?")
-    parser.add_argument("--dry-run", action="store_true", help="Solo muestra el contexto recuperado, no llama a Claude")
+    parser.add_argument("--dry-run", action="store_true", help="Solo muestra el contexto recuperado, no llama a DeepSeek")
     args = parser.parse_args()
 
     load_env()

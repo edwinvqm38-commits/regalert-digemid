@@ -11,7 +11,6 @@ const SUPABASE_SERVICE_ROLE_KEY =
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
-const ANTHROPIC_API_KEY = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
 const ADMIN_CHAT_IDS = Deno.env.get("ADMIN_CHAT_IDS") ?? "";
 const YAPE_NUMERO = Deno.env.get("YAPE_NUMERO") ?? "";
 const YAPE_TITULAR = Deno.env.get("YAPE_TITULAR") ?? "";
@@ -996,31 +995,6 @@ async function callDeepseek(userContent: string): Promise<string> {
   return data.choices?.[0]?.message?.content ?? "";
 }
 
-async function callClaude(userContent: string): Promise<string> {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5",
-      max_tokens: 1024,
-      system: CONSULTA_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userContent }],
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Claude error ${response.status}: ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  const textBlock = (data.content ?? []).find((block: any) => block.type === "text");
-  return textBlock?.text ?? "";
-}
-
 function consultaSources(chunks: any[]) {
   const seen = new Set<string>();
   const sources: { documentKey: string; url: string; page: number }[] = [];
@@ -1445,15 +1419,11 @@ async function answerConsulta(
   const userContent = `Contexto:\n\n${context}\n\nPregunta: ${question}`;
   const sources = consultaSources(chunks);
 
-  if (DEEPSEEK_API_KEY) {
-    return { answer: await callDeepseek(userContent), sources };
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error("Falta configurar DEEPSEEK_API_KEY");
   }
 
-  if (ANTHROPIC_API_KEY) {
-    return { answer: await callClaude(userContent), sources };
-  }
-
-  throw new Error("Falta configurar DEEPSEEK_API_KEY o ANTHROPIC_API_KEY");
+  return { answer: await callDeepseek(userContent), sources };
 }
 
 async function enviarMiPerfil(chatId: string): Promise<void> {

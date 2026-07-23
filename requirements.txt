@@ -11,4 +11,3 @@ pymupdf
 pdfplumber
 pytesseract
 Pillow
-anthropic

@@ -16,6 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_MODEL = "deepseek-chat"
+GEMINI_MODEL = "gemini-2.0-flash"
 MAX_CHUNKS = 4
 
 SYSTEM_PROMPT = """Eres un asistente que responde preguntas sobre alertas y \
@@ -95,19 +96,49 @@ def call_deepseek(api_key: str, user_content: str) -> str:
     return response.json()["choices"][0]["message"]["content"]
 
 
+def call_gemini(api_key: str, user_content: str) -> str:
+    response = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        params={"key": api_key},
+        json={
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+            "generationConfig": {"maxOutputTokens": 1024},
+        },
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    candidatos = data.get("candidates") or []
+    if not candidatos:
+        raise RuntimeError(f"Gemini no devolvió respuesta utilizable: {data}")
+
+    partes = candidatos[0].get("content", {}).get("parts") or []
+    return "".join(p.get("text", "") for p in partes)
+
+
 def call_llm(user_content: str) -> str:
-    """Usa DeepSeek (unico proveedor). Si falta la API key, falla explicito
-    en vez de degradar en silencio a otro proveedor."""
+    """DeepSeek como proveedor principal; Gemini Flash (nivel gratuito) como
+    respaldo de emergencia si DeepSeek falla (sin saldo, caído, error de
+    red), para no dejar a los usuarios sin poder hacer consultas."""
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    gemini_key = os.getenv("GEMINI_API_KEY")
 
-    if not deepseek_key:
-        raise RuntimeError(
-            "Falta configurar DEEPSEEK_API_KEY. Revisar el saldo en "
-            "https://platform.deepseek.com/ antes de recargar la variable."
-        )
+    if deepseek_key:
+        try:
+            logger.info("Usando DeepSeek (%s)", DEEPSEEK_MODEL)
+            return call_deepseek(deepseek_key, user_content)
+        except Exception as error:
+            logger.warning("DeepSeek falló (%s); probando respaldo Gemini.", error)
 
-    logger.info("Usando DeepSeek (%s)", DEEPSEEK_MODEL)
-    return call_deepseek(deepseek_key, user_content)
+    if gemini_key:
+        logger.info("Usando Gemini (%s) como respaldo", GEMINI_MODEL)
+        return call_gemini(gemini_key, user_content)
+
+    raise RuntimeError(
+        "Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)."
+    )
 
 
 def ask(question: str, dry_run: bool = False) -> str:

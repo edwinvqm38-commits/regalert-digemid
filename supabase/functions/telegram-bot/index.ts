@@ -11,6 +11,8 @@ const SUPABASE_SERVICE_ROLE_KEY =
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
+const GEMINI_MODEL = "gemini-2.0-flash";
 const ADMIN_CHAT_IDS = Deno.env.get("ADMIN_CHAT_IDS") ?? "";
 const YAPE_NUMERO = Deno.env.get("YAPE_NUMERO") ?? "";
 const YAPE_TITULAR = Deno.env.get("YAPE_TITULAR") ?? "";
@@ -995,6 +997,29 @@ async function callDeepseek(userContent: string): Promise<string> {
   return data.choices?.[0]?.message?.content ?? "";
 }
 
+async function callGemini(userContent: string): Promise<string> {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system_instruction: { parts: [{ text: CONSULTA_SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts: [{ text: userContent }] }],
+        generationConfig: { maxOutputTokens: 1024 },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Gemini error ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  return parts.map((p: any) => p.text ?? "").join("");
+}
+
 function consultaSources(chunks: any[]) {
   const seen = new Set<string>();
   const sources: { documentKey: string; url: string; page: number }[] = [];
@@ -1419,11 +1444,19 @@ async function answerConsulta(
   const userContent = `Contexto:\n\n${context}\n\nPregunta: ${question}`;
   const sources = consultaSources(chunks);
 
-  if (!DEEPSEEK_API_KEY) {
-    throw new Error("Falta configurar DEEPSEEK_API_KEY");
+  if (DEEPSEEK_API_KEY) {
+    try {
+      return { answer: await callDeepseek(userContent), sources };
+    } catch (error) {
+      console.error("DeepSeek falló, probando respaldo Gemini:", error);
+    }
   }
 
-  return { answer: await callDeepseek(userContent), sources };
+  if (GEMINI_API_KEY) {
+    return { answer: await callGemini(userContent), sources };
+  }
+
+  throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
 }
 
 async function enviarMiPerfil(chatId: string): Promise<void> {

@@ -26,6 +26,16 @@ const NIVEL_LIMITES_DIARIOS: Record<string, number | null> = {
 
 const LIMITE_DIARIO_GLOBAL = 300;
 
+// Duracion maxima (segundos) de nota de voz por plan: una consulta hablada
+// real rara vez pasa de 20-30s, y esto evita audios larguisimos que salen
+// mas caros de transcribir. Los administradores no tienen limite.
+const NIVEL_LIMITE_VOZ_SEGUNDOS: Record<string, number> = {
+  gratis: 20,
+  basico: 30,
+  consultoria: 60,
+  empresarial: 120,
+};
+
 const NIVEL_PRECIOS: Record<string, number> = {
   gratis: 0,
   basico: 29,
@@ -3069,6 +3079,22 @@ serve(async (req: Request) => {
     }
 
     if (update.message?.voice) {
+      if (!isAdmin(chatId)) {
+        const nivelVoz = await getNivelUsuario(chatId);
+        const limiteSegundos = NIVEL_LIMITE_VOZ_SEGUNDOS[nivelVoz] ?? NIVEL_LIMITE_VOZ_SEGUNDOS.gratis;
+        const duracion = update.message.voice.duration ?? 0;
+
+        if (duracion > limiteSegundos) {
+          await sendMessage(
+            chatId,
+            `⚠️ Tu plan <b>${escapeHtml(nivelVoz)}</b> permite notas de voz de hasta ` +
+              `<b>${limiteSegundos} segundos</b> (la tuya duró ${duracion}s). ` +
+              "Intenta de nuevo más corto, o escribe tu pregunta con /consulta.",
+          );
+          return new Response("OK", { status: 200 });
+        }
+      }
+
       try {
         const transcripcion = await transcribirNotaDeVoz(update.message.voice.file_id);
 

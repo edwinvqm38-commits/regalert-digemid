@@ -22,9 +22,11 @@ on:
         default: ""
         type: string
 
-  # Corrida lenta automatica: ~20 normas al dia, 10:30 a. m. Peru (15:30 UTC).
+  # Corrida cada hora, lotes chicos (5) para ponerse al dia con el atraso sin
+  # generar rafagas grandes contra digemid.minsa.gob.pe: reparte la carga en
+  # vez de concentrarla, que es lo que suele disparar bloqueos.
   schedule:
-    - cron: "30 15 * * *"
+    - cron: "0 * * * *"
 
 concurrency:
   group: digemid-normativa-text
@@ -67,7 +69,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            MODE="apply"; LIMIT="20"
+            MODE="apply"; LIMIT="5"
           else
             MODE="${{ inputs.mode }}"; LIMIT="${{ inputs.limit }}"
           fi
@@ -89,7 +91,7 @@ jobs:
           # En corridas programadas (schedule) siempre aplica; el disparo manual respeta el modo.
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             MODE="apply"
-            LIMIT="20"
+            LIMIT="5"
           else
             MODE="${{ inputs.mode }}"
             LIMIT="${{ inputs.limit }}"

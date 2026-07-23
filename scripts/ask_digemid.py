@@ -16,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DEEPSEEK_MODEL = "deepseek-chat"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 MAX_CHUNKS = 4
 
 SYSTEM_PROMPT = """Eres un asistente que responde preguntas sobre alertas y \

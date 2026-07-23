@@ -77,6 +77,11 @@ type TelegramUpdate = {
       username?: string;
     };
     text?: string;
+    voice?: {
+      file_id: string;
+      duration?: number;
+      mime_type?: string;
+    };
   };
   callback_query?: {
     id: string;
@@ -535,6 +540,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/consulta pregunta</b>",
     "Responde en lenguaje natural citando la alerta/norma fuente. Ejemplo: /consulta que paso con el Opdivo falsificado",
+    "",
+    "<b>🎙️ Nota de voz</b>",
+    "Mándame un audio con tu pregunta y te respondo igual que con /consulta — no hace falta escribir ningún comando.",
     "",
     "<b>/suscribirme nivel</b>",
     "Pide activar un plan pagado (basico, consultoria o empresarial). Ejemplo: /suscribirme basico",
@@ -1530,6 +1538,77 @@ async function proyectarDiasRestantesDeepseek(balanceActual: number): Promise<nu
 
   const consumoDiarioPromedio = consumoTotal / diasTranscurridos;
   return balanceActual / consumoDiarioPromedio;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+/**
+ * Descarga una nota de voz de Telegram y la transcribe con Gemini (entiende
+ * audio de forma nativa, sin sumar una libreria/proveedor nuevo). Se le pide
+ * transcripcion literal, no un resumen, para no perder matices de la
+ * pregunta antes de que entre al mismo pipeline de busqueda+respuesta que
+ * usa /consulta.
+ */
+async function transcribirNotaDeVoz(fileId: string): Promise<string> {
+  if (!GEMINI_API_KEY) {
+    throw new Error("Falta GEMINI_API_KEY para transcribir audio.");
+  }
+
+  const fileInfoResponse = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+  const fileInfo = await fileInfoResponse.json();
+
+  if (!fileInfo.ok) {
+    throw new Error(`No se pudo obtener el archivo de audio: ${JSON.stringify(fileInfo)}`);
+  }
+
+  const filePath = fileInfo.result.file_path as string;
+  const audioResponse = await fetch(`https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`);
+
+  if (!audioResponse.ok) {
+    throw new Error(`No se pudo descargar el audio (status ${audioResponse.status}).`);
+  }
+
+  const audioBuffer = new Uint8Array(await audioResponse.arrayBuffer());
+  const audioBase64 = bytesToBase64(audioBuffer);
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text:
+                  "Transcribe este audio en español de forma literal, palabra por palabra, " +
+                  "sin traducir ni resumir ni agregar comentarios. Devuelve unicamente el texto transcrito.",
+              },
+              { inline_data: { mime_type: "audio/ogg", data: audioBase64 } },
+            ],
+          },
+        ],
+        generationConfig: { maxOutputTokens: 512 },
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Gemini (transcripción) error ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const parts = data.candidates?.[0]?.content?.parts ?? [];
+  return parts.map((p: any) => p.text ?? "").join("").trim();
 }
 
 async function answerConsulta(
@@ -2986,6 +3065,35 @@ serve(async (req: Request) => {
 
     if (update.callback_query) {
       await handleCallback(update);
+      return new Response("OK", { status: 200 });
+    }
+
+    if (update.message?.voice) {
+      try {
+        const transcripcion = await transcribirNotaDeVoz(update.message.voice.file_id);
+
+        if (!transcripcion) {
+          await sendMessage(
+            chatId,
+            "⚠️ No pude transcribir el audio con claridad. Intenta de nuevo hablando despacio, " +
+              "o escribe tu pregunta con /consulta.",
+          );
+          return new Response("OK", { status: 200 });
+        }
+
+        // Se muestra la transcripcion antes de responder: si la IA entendio
+        // mal el audio, el usuario lo nota de inmediato en vez de recibir
+        // una respuesta que no corresponde a lo que pregunto.
+        await sendMessage(chatId, `🎙️ Escuché: <i>"${escapeHtml(transcripcion)}"</i>`);
+        await handleCommand(chatId, userId, `/consulta ${transcripcion}`, chatType, esUsuarioNuevo);
+      } catch (error) {
+        console.error("Error transcribiendo nota de voz:", error);
+        await sendMessage(
+          chatId,
+          "⚠️ No pude procesar tu mensaje de voz. Intenta de nuevo o escribe tu pregunta con /consulta.",
+        );
+      }
+
       return new Response("OK", { status: 200 });
     }
 

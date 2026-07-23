@@ -89,13 +89,18 @@ def proyectar_dias_restantes(supabase, balance_actual: float) -> float | None:
     para no mezclar "antes de recargar" con "despues de recargar"."""
     desde = (datetime.now(timezone.utc) - timedelta(days=DIAS_VENTANA_PROMEDIO)).isoformat()
 
-    response = (
-        supabase.table(HISTORIAL_TABLE)
-        .select("checked_at, balance_usd")
-        .gte("checked_at", desde)
-        .order("checked_at", desc=False)
-        .execute()
-    )
+    try:
+        response = (
+            supabase.table(HISTORIAL_TABLE)
+            .select("checked_at, balance_usd")
+            .gte("checked_at", desde)
+            .order("checked_at", desc=False)
+            .execute()
+        )
+    except Exception:
+        logger.warning("No se pudo leer el historial de saldo (tabla no disponible aún).")
+        return None
+
     historial = [
         row for row in (response.data or [])
         if row.get("balance_usd") is not None
@@ -173,8 +178,16 @@ def main() -> None:
     balance_usd = extraer_balance_usd(data)
     is_available = bool(data.get("is_available", balance_usd is not None and balance_usd > 0))
 
-    guardar_snapshot(supabase, balance_usd, is_available, data)
     logger.info("Saldo DeepSeek: %s USD | disponible: %s", balance_usd, is_available)
+
+    try:
+        guardar_snapshot(supabase, balance_usd, is_available, data)
+    except Exception:
+        logger.exception(
+            "No se pudo guardar el snapshot (¿falta correr la migración "
+            "2026_07_23_create_deepseek_balance_historial.sql en Supabase?). "
+            "Se continúa con el saldo ya obtenido."
+        )
 
     if balance_usd is None:
         logger.warning("No se pudo interpretar el saldo devuelto por DeepSeek: %s", data)

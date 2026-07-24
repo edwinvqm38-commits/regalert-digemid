@@ -624,6 +624,56 @@ function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): str
   return `${encabezado}\n${bloques.join("\n")}`;
 }
 
+/** Genera y envia el reporte HTML, el PDF y la plantilla .txt de una norma
+ * con paginas de baja confiabilidad. Usada tanto por /normarevisar como por
+ * el boton correspondiente en /normasrevisar. */
+async function enviarRevisionNorma(chatId: string, documentKey: string) {
+  try {
+    const resultado = await getPaginasBajaCalidad(documentKey);
+
+    if (!resultado) {
+      return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
+    }
+
+    const { norma, paginas } = resultado;
+
+    if (!paginas.length) {
+      return await sendMessage(chatId, `✅ "${escapeHtml(documentKey)}" no tiene páginas pendientes de revisión.`);
+    }
+
+    const html = construirReporteHtmlRevision(norma, paginas);
+    await enviarDocumentoTexto(
+      chatId,
+      html,
+      `revision_${documentKey}.html`,
+      "text/html",
+      `📋 Reporte de revisión — ${documentKey} (${paginas.length} página(s))`,
+    );
+
+    if (norma.pdf_url) {
+      await telegram("sendDocument", {
+        chat_id: chatId,
+        document: norma.pdf_url,
+        caption: `📄 PDF original — ${documentKey}`,
+      });
+    }
+
+    const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
+    await enviarDocumentoTexto(
+      chatId,
+      plantilla,
+      `plantilla_${documentKey}.txt`,
+      "text/plain",
+      "✏️ Corrige el texto de cada página comparando con el PDF y reenvía este mismo archivo (como documento) a este chat cuando termines.",
+    );
+
+    return new Response("OK", { status: 200 });
+  } catch (error) {
+    console.error("NORMAREVISAR_ERROR:", error);
+    return await sendMessage(chatId, `⚠️ Error al generar la revisión: ${escapeHtml(String(error))}`);
+  }
+}
+
 /** Parsea la plantilla .txt devuelta por un admin y aplica la correccion. */
 async function aplicarRevisionManualNorma(
   contenido: string,
@@ -2810,13 +2860,12 @@ async function handleCommand(
       });
     }
 
-    const lineas = ["📋 <b>Normas con páginas de baja confiabilidad</b>", ""];
-    for (const [documentKey, info] of porNorma) {
-      lineas.push(`• <code>${escapeHtml(documentKey)}</code> — ${info.count} página(s)`);
-    }
-    lineas.push("", "Usa <code>/normarevisar &lt;document_key&gt;</code> para revisar una en detalle.");
+    const lineas = ["📋 <b>Normas con páginas de baja confiabilidad</b>", "", "Toca una para revisarla:"];
+    const botones = [...porNorma.entries()].map(([documentKey, info]) => [
+      { text: `${documentKey} — ${info.count} página(s)`, callback_data: `normarevisar:${documentKey}` },
+    ]);
 
-    return await sendMessage(chatId, lineas.join("\n"));
+    return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
   }
 
   if (trimmed.startsWith("/normarevisar")) {
@@ -2833,50 +2882,7 @@ async function handleCommand(
       );
     }
 
-    try {
-      const resultado = await getPaginasBajaCalidad(documentKey);
-
-      if (!resultado) {
-        return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
-      }
-
-      const { norma, paginas } = resultado;
-
-      if (!paginas.length) {
-        return await sendMessage(chatId, `✅ "${escapeHtml(documentKey)}" no tiene páginas pendientes de revisión.`);
-      }
-
-      const html = construirReporteHtmlRevision(norma, paginas);
-      await enviarDocumentoTexto(
-        chatId,
-        html,
-        `revision_${documentKey}.html`,
-        "text/html",
-        `📋 Reporte de revisión — ${documentKey} (${paginas.length} página(s))`,
-      );
-
-      if (norma.pdf_url) {
-        await telegram("sendDocument", {
-          chat_id: chatId,
-          document: norma.pdf_url,
-          caption: `📄 PDF original — ${documentKey}`,
-        });
-      }
-
-      const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
-      await enviarDocumentoTexto(
-        chatId,
-        plantilla,
-        `plantilla_${documentKey}.txt`,
-        "text/plain",
-        "✏️ Corrige el texto de cada página comparando con el PDF y reenvía este mismo archivo (como documento) a este chat cuando termines.",
-      );
-
-      return;
-    } catch (error) {
-      console.error("NORMAREVISAR_ERROR:", error);
-      return await sendMessage(chatId, `⚠️ Error al generar la revisión: ${escapeHtml(String(error))}`);
-    }
+    return await enviarRevisionNorma(chatId, documentKey);
   }
 
   if (trimmed.startsWith("/invitar")) {
@@ -3279,6 +3285,15 @@ async function handleCallback(update: TelegramUpdate) {
     if (!tieneAccesoActivo(estado)) {
       return await sendMessage(chatId, ACCESO_REQUERIDO_TEXTO, trialKeyboard());
     }
+  }
+
+  if (data.startsWith("normarevisar:")) {
+    if (!isAdmin(chatId)) {
+      return;
+    }
+
+    const documentKey = data.slice("normarevisar:".length);
+    return await enviarRevisionNorma(chatId, documentKey);
   }
 
   if (data.startsWith("tts:")) {

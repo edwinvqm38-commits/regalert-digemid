@@ -294,7 +294,7 @@ def enviar_reporte_extraccion_telegram(document_key: str, html: str, pdf_path: P
         logger.info("Sin TELEGRAM_BOT_TOKEN o chat_id: no se envía el reporte de extracción.")
         return
 
-    requests.post(
+    response_html = requests.post(
         f"https://api.telegram.org/bot{token}/sendDocument",
         data={
             "chat_id": chat_id,
@@ -303,14 +303,18 @@ def enviar_reporte_extraccion_telegram(document_key: str, html: str, pdf_path: P
         files={"document": (f"reporte_{document_key}.html", html.encode("utf-8"), "text/html")},
         timeout=30,
     )
+    response_html.raise_for_status()
 
     with pdf_path.open("rb") as file_obj:
-        requests.post(
+        response_pdf = requests.post(
             f"https://api.telegram.org/bot{token}/sendDocument",
             data={"chat_id": chat_id, "caption": f"📄 PDF original — {document_key}"},
             files={"document": (pdf_path.name, file_obj, "application/pdf")},
             timeout=60,
         )
+    response_pdf.raise_for_status()
+
+    logger.info("Reporte de extracción y PDF de %s enviados por Telegram.", document_key)
 
 
 def enviar_progreso_telegram(

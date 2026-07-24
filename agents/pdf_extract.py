@@ -187,7 +187,7 @@ def _ocr_page(page: "fitz.Page") -> tuple[str, float | None]:
 
 def es_pagina_en_blanco(page: "fitz.Page") -> bool:
     """Detecta una pagina GENUINAMENTE en blanco en el PDF original: sin
-    texto embebido, sin imagenes, y el render es practicamente todo blanco.
+    texto embebido y con un render practicamente todo blanco.
 
     Esto es distinto de que la extraccion haya fallado (una pagina con
     contenido real que no se pudo transcribir bien) — sin este chequeo,
@@ -195,10 +195,17 @@ def es_pagina_en_blanco(page: "fitz.Page") -> bool:
     caracteres), y una pagina en blanco terminaba en la cola de revision
     como si fuera un error de transcripcion cuando en realidad no hay nada
     que corregir.
+
+    OJO: no se descarta por tener imagenes embebidas. Muchas normas de
+    DIGEMID traen un membrete/marca de agua institucional en TODAS las
+    paginas del PDF (incluidas las que no tienen contenido), asi que
+    get_images() no distingue una pagina en blanco de una con contenido
+    real — se confirmo con paginas reales donde el promedio de pixel salio
+    ~254.99/255 (blanco casi puro) a pesar de tener 1 imagen incrustada.
+    El render (promedio de pixel) es la señal confiable, no la presencia
+    de imagenes.
     """
     if (page.get_text("text") or "").strip():
-        return False
-    if page.get_images():
         return False
 
     pix = page.get_pixmap(matrix=fitz.Matrix(72 / 72, 72 / 72))

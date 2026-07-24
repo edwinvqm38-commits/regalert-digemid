@@ -56,20 +56,26 @@ def get_supabase():
 
 
 def contar_universo(supabase) -> tuple[int, int]:
-    """Devuelve (total de normas, normas DISTINTAS con al menos una pagina de
-    texto). con_texto NO es un conteo de paginas: contar filas de
-    digemid_norma_paginas sobreestima el avance real (una norma con 10
-    paginas sumaria 10, no 1), por eso se cuentan norma_id distintos."""
+    """Devuelve (total de normas, normas completadas con exito). Se cuenta
+    por process_status (no trayendo todas las filas de digemid_norma_paginas
+    y contando norma_id distintos): esa alternativa trae UNA FILA POR PAGINA
+    de TODA la tabla sin paginar, y se trunca silenciosamente si el total de
+    paginas supera el limite de filas de PostgREST, subestimando el avance
+    real a medida que crece la base."""
     total = supabase.table(NORMAS_TABLE).select("id", count="exact", head=True).execute()
-    paginas = supabase.table(PAGE_TABLE).select("norma_id").execute()
-    normas_con_texto = {row["norma_id"] for row in (paginas.data or []) if row.get("norma_id")}
-    return (total.count or 0), len(normas_con_texto)
+    con_texto = (
+        supabase.table(NORMAS_TABLE)
+        .select("id", count="exact", head=True)
+        .in_("process_status", ["text_extracted", "text_extracted_baja_calidad"])
+        .execute()
+    )
+    return (total.count or 0), (con_texto.count or 0)
 
 
 def get_pending_normas(supabase, limit: int, document_key: str | None = None) -> list[dict]:
     query = (
         supabase.table(NORMAS_TABLE)
-        .select("id, document_key, pdf_url, file_name")
+        .select("id, document_key, pdf_url, file_name, titulo")
         .not_.is_("pdf_url", "null")
         .neq("pdf_url", "")
     )
@@ -78,26 +84,32 @@ def get_pending_normas(supabase, limit: int, document_key: str | None = None) ->
         # Con un document_key explícito reprocesamos aunque ya tenga páginas.
         return response.data or []
 
-    # OJO: el limite se aplica DESPUES de filtrar las que ya tienen paginas,
-    # no antes. Si se aplicara antes (via .limit() en esta misma consulta),
-    # con order-by-anio-desc siempre se traen las normas mas nuevas primero;
-    # en cuanto esas ya esten todas procesadas, esta funcion devolveria vacio
-    # aunque queden cientos de normas mas antiguas sin procesar todavia.
-    response = query.order("anio", desc=True).execute()
-    normas = response.data or []
-    if not normas:
-        return []
-
-    norma_ids = [n["id"] for n in normas]
-    paginas = (
-        supabase.table(PAGE_TABLE)
-        .select("norma_id")
-        .in_("norma_id", norma_ids)
+    # "Pendiente" se determina por process_status, NO por si la norma ya
+    # tiene alguna fila en digemid_norma_paginas. write_pages() inserta
+    # pagina por pagina (no es una transaccion), asi que una norma puede
+    # haber fallado a mitad de camino con solo la pagina 1 escrita
+    # (process_status='text_extraction_error'); esa SI debe reintentarse
+    # (ver limpieza de paginas parciales en main()) para no quedar
+    # incompleta contando como "con texto" sin estarlo.
+    #
+    # Antes esto se resolvia consultando que norma_id ya aparecen en
+    # digemid_norma_paginas, pero esa consulta trae UNA FILA POR PAGINA (no
+    # por norma) y puede truncarse silenciosamente si el total de paginas ya
+    # guardadas supera el limite de filas de PostgREST — con normas de 100+
+    # paginas eso pasa rapido, y una norma completa terminaba pareciendo
+    # "pendiente" (reintentando y chocando con la pagina 1 ya existente).
+    #
+    # OJO: el limite se aplica DESPUES del filtro, no antes, para no quedar
+    # atascado en las normas mas nuevas (order by anio desc) si esas ya
+    # estan listas mientras quedan cientos mas antiguas sin procesar.
+    response = (
+        query
+        .or_("process_status.is.null,process_status.eq.inventory_imported,process_status.eq.text_extraction_error")
+        .order("anio", desc=True)
         .execute()
     )
-    con_paginas = {row["norma_id"] for row in (paginas.data or []) if row.get("norma_id")}
-    pendientes = [n for n in normas if n["id"] not in con_paginas]
-    return pendientes[:limit]
+    normas = response.data or []
+    return normas[:limit]
 
 
 def sanitize_file_name(document_key: str, file_name: str | None) -> str:
@@ -203,6 +215,104 @@ def mark_norma(supabase, norma_id: str, status: str, stats: dict | None = None) 
     supabase.table(NORMAS_TABLE).update(payload).eq("id", norma_id).execute()
 
 
+def _escapar_html(texto: str | None) -> str:
+    return (texto or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def construir_reporte_html(document_key: str, titulo: str | None, extracciones) -> str:
+    """Reporte pagina por pagina para comparar contra el PDF original: color
+    por calidad, señales (OCR/formula/tabla), texto completo, y las tablas
+    detectadas renderizadas como tabla HTML real (no aplanadas a texto
+    corrido), ya que eso es justo lo que se pierde en la extraccion plana y
+    donde mas importa la fidelidad para uso legal."""
+    secciones = []
+
+    for page in extracciones:
+        if page.quality >= 0.85:
+            color = "#43a047"
+        elif page.quality >= 0.5:
+            color = "#fbc02d"
+        else:
+            color = "#e53935"
+
+        señales = []
+        if page.ocr_used:
+            señales.append(f"OCR (confianza {page.ocr_confidence})")
+        if page.posible_formula:
+            señales.append("posible fórmula/notación técnica — revisar manualmente")
+        if page.has_tables:
+            señales.append("tabla detectada")
+        señales_html = " · ".join(_escapar_html(s) for s in señales) if señales else "—"
+
+        tablas_html = ""
+        for tabla in (page.tables or []):
+            filas_html = "".join(
+                "<tr>" + "".join(f"<td>{_escapar_html(str(celda) if celda is not None else '')}</td>" for celda in fila) + "</tr>"
+                for fila in tabla
+            )
+            tablas_html += f'<table class="tabla-detectada">{filas_html}</table>'
+
+        secciones.append(f"""
+        <section style="border-left: 6px solid {color}; padding-left: 1rem; margin-bottom: 1.5rem;">
+          <h3>Página {page.page_number} — calidad {page.quality} ({_escapar_html(page.method)})</h3>
+          <p><b>Señales:</b> {señales_html}</p>
+          <pre>{_escapar_html(page.text)}</pre>
+          {tablas_html}
+        </section>""")
+
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Extracción — {_escapar_html(document_key)}</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; max-width: 900px; }}
+  pre {{ white-space: pre-wrap; word-break: break-word; background: #fafafa; padding: 0.75rem; border-radius: 6px; }}
+  table.tabla-detectada {{ border-collapse: collapse; margin: 0.5rem 0; }}
+  table.tabla-detectada td {{ border: 1px solid #999; padding: 0.3rem 0.5rem; font-size: 0.85rem; }}
+  .nota {{ background: #e3f2fd; border: 1px solid #90caf9; padding: 0.75rem; border-radius: 6px; margin-bottom: 1.5rem; }}
+</style>
+</head>
+<body>
+  <h1>{_escapar_html(document_key)}</h1>
+  <p>{_escapar_html(titulo)}</p>
+  <div class="nota">
+    Compara este texto con el PDF adjunto en el mismo mensaje de Telegram.
+    Borde verde = calidad alta, amarillo = revisar con cuidado, rojo = baja
+    confiabilidad. Usa <code>/normarevisar {_escapar_html(document_key)}</code>
+    en Telegram si necesitas corregir alguna página directamente.
+  </div>
+  {''.join(secciones)}
+</body>
+</html>"""
+
+
+def enviar_reporte_extraccion_telegram(document_key: str, html: str, pdf_path: Path) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.info("Sin TELEGRAM_BOT_TOKEN o chat_id: no se envía el reporte de extracción.")
+        return
+
+    requests.post(
+        f"https://api.telegram.org/bot{token}/sendDocument",
+        data={
+            "chat_id": chat_id,
+            "caption": f"🔍 Reporte de extracción — {document_key} (revisar tablas/fórmulas/baja calidad vs. el PDF)",
+        },
+        files={"document": (f"reporte_{document_key}.html", html.encode("utf-8"), "text/html")},
+        timeout=30,
+    )
+
+    with pdf_path.open("rb") as file_obj:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendDocument",
+            data={"chat_id": chat_id, "caption": f"📄 PDF original — {document_key}"},
+            files={"document": (pdf_path.name, file_obj, "application/pdf")},
+            timeout=60,
+        )
+
+
 def enviar_progreso_telegram(
     total: int,
     con_texto: int,
@@ -284,10 +394,13 @@ def main():
                 procesadas += 1
                 continue
 
-            # Si reprocesamos una norma específica, borramos sus páginas viejas
-            # para regenerarlas con el pipeline de alta calidad (sin duplicar).
-            if args.document_key:
-                supabase.table(PAGE_TABLE).delete().eq("norma_id", norma["id"]).execute()
+            # Limpia cualquier pagina parcial de un intento anterior fallido
+            # antes de reescribir (no-op si la norma no tenia ninguna): la
+            # insercion es pagina por pagina, no transaccional, asi que un
+            # intento previo pudo haber dejado algunas paginas sueltas sin
+            # completar la norma, lo que choca con la clave unica al
+            # reintentar.
+            supabase.table(PAGE_TABLE).delete().eq("norma_id", norma["id"]).execute()
 
             local_path = temp_dir / file_name
             download_pdf(pdf_url, local_path)
@@ -322,6 +435,16 @@ def main():
                 document_key, len(extracciones), promedio,
                 stats["baja_calidad"], stats["con_tablas"], stats["con_formula"],
             )
+
+            # Reporte automatico para revisar fidelidad vs. el PDF: solo
+            # cuando hay algo que amerita ojo humano (tablas, posible
+            # formula, o baja calidad), no en cada norma procesada.
+            if not args.no_telegram and (stats["con_tablas"] > 0 or stats["con_formula"] > 0 or stats["baja_calidad"] > 0):
+                try:
+                    html = construir_reporte_html(document_key, norma.get("titulo"), extracciones)
+                    enviar_reporte_extraccion_telegram(document_key, html, local_path)
+                except Exception:
+                    logger.exception("No se pudo enviar el reporte de extracción de %s.", document_key)
 
         except Exception as error:
             errores += 1

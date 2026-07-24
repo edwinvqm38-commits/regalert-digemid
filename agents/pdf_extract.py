@@ -185,7 +185,41 @@ def _ocr_page(page: "fitz.Page") -> tuple[str, float | None]:
         return "", None
 
 
+def es_pagina_en_blanco(page: "fitz.Page") -> bool:
+    """Detecta una pagina GENUINAMENTE en blanco en el PDF original: sin
+    texto embebido, sin imagenes, y el render es practicamente todo blanco.
+
+    Esto es distinto de que la extraccion haya fallado (una pagina con
+    contenido real que no se pudo transcribir bien) — sin este chequeo,
+    quality_score le pone 0 a ambos casos por igual (por texto < 15
+    caracteres), y una pagina en blanco terminaba en la cola de revision
+    como si fuera un error de transcripcion cuando en realidad no hay nada
+    que corregir.
+    """
+    if (page.get_text("text") or "").strip():
+        return False
+    if page.get_images():
+        return False
+
+    pix = page.get_pixmap(matrix=fitz.Matrix(72 / 72, 72 / 72))
+    samples = pix.samples
+    if not samples:
+        return True
+
+    promedio = sum(samples) / len(samples)
+    return promedio > 250
+
+
 def extract_page(pdf_path: str, page: "fitz.Page", page_index: int) -> PageExtraction:
+    if es_pagina_en_blanco(page):
+        return PageExtraction(
+            page_number=page_index + 1,
+            text="",
+            method="pagina_en_blanco",
+            quality=1.0,
+            ocr_used=False,
+        )
+
     candidates: list[tuple[str, str, float, bool, float | None]] = []
 
     # Capa 1: PyMuPDF texto embebido.

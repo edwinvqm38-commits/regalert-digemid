@@ -69,6 +69,8 @@ COMANDOS_ADMIN_EXTRA = [
     {"command": "renombrar", "description": "Cambia el nombre mostrado de un usuario"},
     {"command": "gratis", "description": "Da acceso gratis permanente a un usuario"},
     {"command": "saldodeepseek", "description": "Saldo de la API de DeepSeek al instante"},
+    {"command": "normasrevisar", "description": "Lista normas con paginas de baja confiabilidad"},
+    {"command": "normarevisar", "description": "Revisa/corrige una norma por Telegram, sin entrar a Supabase"},
 ]
 
 

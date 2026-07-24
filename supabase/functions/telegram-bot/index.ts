@@ -98,6 +98,11 @@ type TelegramUpdate = {
       duration?: number;
       mime_type?: string;
     };
+    document?: {
+      file_id: string;
+      file_name?: string;
+      mime_type?: string;
+    };
   };
   callback_query?: {
     id: string;
@@ -500,6 +505,187 @@ async function enviarAudioRespuesta(chatId: string, wavBytes: Uint8Array, captio
   }
 }
 
+async function enviarDocumentoTexto(
+  chatId: string,
+  contenido: string,
+  nombreArchivo: string,
+  mimeType: string,
+  caption?: string,
+): Promise<void> {
+  const formData = new FormData();
+  formData.append("chat_id", chatId);
+  if (caption) formData.append("caption", caption);
+  formData.append("document", new Blob([contenido], { type: mimeType }), nombreArchivo);
+
+  const response = await fetch(`${TELEGRAM_API}/sendDocument`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Telegram sendDocument error ${response.status}: ${await response.text()}`);
+  }
+}
+
+const UMBRAL_BAJA_CALIDAD_NORMA = 0.5;
+
+async function getPaginasBajaCalidad(documentKey: string) {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, pdf_url")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) return null;
+
+  const { data: paginas } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw")
+    .eq("norma_id", norma.id)
+    .lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)
+    .eq("revisado_manual", false)
+    .order("page_number");
+
+  return { norma, paginas: paginas ?? [] };
+}
+
+function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
+  const filas = paginas
+    .map((p) => {
+      const motivo = [
+        `método: ${escapeHtml(p.extraction_method ?? "?")}`,
+        p.ocr_confidence != null ? `confianza OCR: ${p.ocr_confidence}` : null,
+        p.posible_formula ? "posible fórmula/notación técnica" : null,
+      ].filter(Boolean).join(" · ");
+
+      const muestra = escapeHtml((p.text_normalized ?? p.text_raw ?? "").slice(0, 500));
+
+      return `
+        <tr>
+          <td>${p.page_number}</td>
+          <td>${p.quality_score}</td>
+          <td>${motivo}</td>
+          <td><pre>${muestra}</pre></td>
+        </tr>`;
+    })
+    .join("\n");
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Revisión — ${escapeHtml(norma.document_key)}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+  th, td { border: 1px solid #ccc; padding: 0.5rem; vertical-align: top; text-align: left; }
+  th { background: #f0f0f0; }
+  pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
+  .nota { background: #fff8e1; border: 1px solid #ffe082; padding: 0.75rem; border-radius: 6px; }
+</style>
+</head>
+<body>
+  <h1>📋 Revisión de baja confiabilidad — ${escapeHtml(norma.document_key)}</h1>
+  <p>${escapeHtml(norma.titulo ?? "")}</p>
+  <div class="nota">
+    Corrige el texto en la plantilla .txt que te envié junto a este reporte,
+    comparando con el PDF adjunto, y reenvía ese mismo archivo .txt a este
+    chat cuando termines. No necesitas entrar a Supabase.
+  </div>
+  <table>
+    <thead><tr><th>Página</th><th>Calidad</th><th>Motivo</th><th>Texto extraído (muestra)</th></tr></thead>
+    <tbody>${filas}</tbody>
+  </table>
+</body>
+</html>`;
+}
+
+function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): string {
+  const encabezado = [
+    `# NORMA: ${documentKey}`,
+    "# Instrucciones: corrige el texto de cada pagina comparando con el PDF adjunto.",
+    "# No modifiques ni borres las lineas que empiezan con \"### PAGINA\".",
+    "# Cuando termines, reenvia este mismo archivo (como documento, no como texto) a este chat.",
+    "",
+  ].join("\n");
+
+  const bloques = paginas.map((p) => {
+    const motivo = [
+      `calidad actual: ${p.quality_score}`,
+      `metodo: ${p.extraction_method ?? "?"}`,
+      p.ocr_confidence != null ? `confianza ocr: ${p.ocr_confidence}` : null,
+      p.posible_formula ? "posible formula/notacion tecnica" : null,
+    ].filter(Boolean).join(", ");
+
+    return `### PAGINA ${p.page_number} (${motivo})\n${p.text_normalized ?? p.text_raw ?? ""}\n`;
+  });
+
+  return `${encabezado}\n${bloques.join("\n")}`;
+}
+
+/** Parsea la plantilla .txt devuelta por un admin y aplica la correccion. */
+async function aplicarRevisionManualNorma(
+  contenido: string,
+): Promise<{ ok: boolean; mensaje: string; documentKey?: string; paginasActualizadas?: number }> {
+  const matchNorma = contenido.match(/^#\s*NORMA:\s*(.+)$/m);
+  if (!matchNorma) {
+    return { ok: false, mensaje: "No encontré la línea \"# NORMA: ...\" en el archivo. Usa la plantilla generada por /normarevisar sin borrar esa línea." };
+  }
+
+  const documentKey = matchNorma[1].trim();
+
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) {
+    return { ok: false, mensaje: `No encontré ninguna norma con document_key "${documentKey}".` };
+  }
+
+  // Cada bloque empieza con "### PAGINA <n> (...)"; se parte por ese
+  // marcador y se descarta lo anterior al primero (el encabezado con
+  // instrucciones, que no es contenido de ninguna pagina).
+  const partes = contenido.split(/^### PAGINA /m).slice(1);
+
+  if (!partes.length) {
+    return { ok: false, mensaje: "No encontré ningún bloque \"### PAGINA N (...)\" en el archivo." };
+  }
+
+  let actualizadas = 0;
+  const ahora = new Date().toISOString();
+
+  for (const parte of partes) {
+    const match = parte.match(/^(\d+)\s*\([^)]*\)\s*\n([\s\S]*)$/);
+    if (!match) continue;
+
+    const pageNumber = parseInt(match[1], 10);
+    const textoCorregido = match[2].trim().normalize("NFC");
+
+    if (!textoCorregido) continue;
+
+    const { error } = await supabase
+      .from("digemid_norma_paginas")
+      .update({
+        text_raw: textoCorregido,
+        text_normalized: textoCorregido,
+        quality_score: 1,
+        extraction_method: "revision_manual",
+        revisado_manual: true,
+        revisado_en: ahora,
+        updated_at: ahora,
+      })
+      .eq("norma_id", norma.id)
+      .eq("page_number", pageNumber);
+
+    if (!error) actualizadas += 1;
+  }
+
+  return { ok: true, mensaje: "ok", documentKey, paginasActualizadas: actualizadas };
+}
+
 async function upsertUsuario(update: TelegramUpdate, chatId: string): Promise<{ isNew: boolean }> {
   const from = update.message?.from ?? update.callback_query?.from;
 
@@ -747,6 +933,12 @@ function helpText(esAdmin = false) {
     "",
     "<b>/saldodeepseek</b>",
     "Consulta al instante el saldo de la API de DeepSeek y proyecta días restantes.",
+    "",
+    "<b>/normasrevisar</b>",
+    "Lista las normas con páginas de baja confiabilidad pendientes de revisión.",
+    "",
+    "<b>/normarevisar document_key</b>",
+    "Te mando un reporte HTML, el PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
   ];
 
   return [...base, ...admin].join("\n");
@@ -1726,6 +1918,25 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/** Descarga cualquier archivo de Telegram (voz, documento) como bytes crudos. */
+async function descargarArchivoTelegram(fileId: string): Promise<Uint8Array> {
+  const fileInfoResponse = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
+  const fileInfo = await fileInfoResponse.json();
+
+  if (!fileInfo.ok) {
+    throw new Error(`No se pudo obtener el archivo: ${JSON.stringify(fileInfo)}`);
+  }
+
+  const filePath = fileInfo.result.file_path as string;
+  const fileResponse = await fetch(`https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`);
+
+  if (!fileResponse.ok) {
+    throw new Error(`No se pudo descargar el archivo (status ${fileResponse.status}).`);
+  }
+
+  return new Uint8Array(await fileResponse.arrayBuffer());
+}
+
 /**
  * Descarga una nota de voz de Telegram y la transcribe con Gemini (entiende
  * audio de forma nativa, sin sumar una libreria/proveedor nuevo). Se le pide
@@ -1738,21 +1949,7 @@ async function transcribirNotaDeVoz(fileId: string): Promise<string> {
     throw new Error("Falta GEMINI_API_KEY para transcribir audio.");
   }
 
-  const fileInfoResponse = await fetch(`${TELEGRAM_API}/getFile?file_id=${fileId}`);
-  const fileInfo = await fileInfoResponse.json();
-
-  if (!fileInfo.ok) {
-    throw new Error(`No se pudo obtener el archivo de audio: ${JSON.stringify(fileInfo)}`);
-  }
-
-  const filePath = fileInfo.result.file_path as string;
-  const audioResponse = await fetch(`https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${filePath}`);
-
-  if (!audioResponse.ok) {
-    throw new Error(`No se pudo descargar el audio (status ${audioResponse.status}).`);
-  }
-
-  const audioBuffer = new Uint8Array(await audioResponse.arrayBuffer());
+  const audioBuffer = await descargarArchivoTelegram(fileId);
   const audioBase64 = bytesToBase64(audioBuffer);
 
   const response = await fetch(
@@ -2584,6 +2781,104 @@ async function handleCommand(
     }
   }
 
+  if (trimmed === "/normasrevisar") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { data: paginas, error } = await supabase
+      .from("digemid_norma_paginas")
+      .select("norma_id, digemid_normas(document_key, titulo)")
+      .lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)
+      .eq("revisado_manual", false);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al consultar: ${escapeHtml(error.message)}`);
+    }
+
+    if (!paginas || !paginas.length) {
+      return await sendMessage(chatId, "✅ No hay páginas de baja confiabilidad pendientes de revisión.");
+    }
+
+    const porNorma = new Map<string, { titulo: string; count: number }>();
+    for (const p of paginas as any[]) {
+      const key = p.digemid_normas?.document_key ?? "?";
+      const previo = porNorma.get(key);
+      porNorma.set(key, {
+        titulo: p.digemid_normas?.titulo ?? "",
+        count: (previo?.count ?? 0) + 1,
+      });
+    }
+
+    const lineas = ["📋 <b>Normas con páginas de baja confiabilidad</b>", ""];
+    for (const [documentKey, info] of porNorma) {
+      lineas.push(`• <code>${escapeHtml(documentKey)}</code> — ${info.count} página(s)`);
+    }
+    lineas.push("", "Usa <code>/normarevisar &lt;document_key&gt;</code> para revisar una en detalle.");
+
+    return await sendMessage(chatId, lineas.join("\n"));
+  }
+
+  if (trimmed.startsWith("/normarevisar")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const documentKey = trimmed.replace("/normarevisar", "").trim();
+
+    if (!documentKey) {
+      return await sendMessage(
+        chatId,
+        "Escribe el document_key de la norma.\n\nEjemplo:\n<code>/normarevisar RM-100-2024</code>\n\nUsa <code>/normasrevisar</code> para ver cuáles tienen páginas pendientes.",
+      );
+    }
+
+    try {
+      const resultado = await getPaginasBajaCalidad(documentKey);
+
+      if (!resultado) {
+        return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
+      }
+
+      const { norma, paginas } = resultado;
+
+      if (!paginas.length) {
+        return await sendMessage(chatId, `✅ "${escapeHtml(documentKey)}" no tiene páginas pendientes de revisión.`);
+      }
+
+      const html = construirReporteHtmlRevision(norma, paginas);
+      await enviarDocumentoTexto(
+        chatId,
+        html,
+        `revision_${documentKey}.html`,
+        "text/html",
+        `📋 Reporte de revisión — ${documentKey} (${paginas.length} página(s))`,
+      );
+
+      if (norma.pdf_url) {
+        await telegram("sendDocument", {
+          chat_id: chatId,
+          document: norma.pdf_url,
+          caption: `📄 PDF original — ${documentKey}`,
+        });
+      }
+
+      const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
+      await enviarDocumentoTexto(
+        chatId,
+        plantilla,
+        `plantilla_${documentKey}.txt`,
+        "text/plain",
+        "✏️ Corrige el texto de cada página comparando con el PDF y reenvía este mismo archivo (como documento) a este chat cuando termines.",
+      );
+
+      return;
+    } catch (error) {
+      console.error("NORMAREVISAR_ERROR:", error);
+      return await sendMessage(chatId, `⚠️ Error al generar la revisión: ${escapeHtml(String(error))}`);
+    }
+  }
+
   if (trimmed.startsWith("/invitar")) {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -3409,6 +3704,36 @@ serve(async (req: Request) => {
         await sendMessage(
           chatId,
           "⚠️ No pude procesar tu mensaje de voz. Intenta de nuevo o escribe tu pregunta con /consulta.",
+        );
+      }
+
+      return new Response("OK", { status: 200 });
+    }
+
+    if (update.message?.document) {
+      if (!isAdmin(chatId)) {
+        return new Response("OK", { status: 200 });
+      }
+
+      try {
+        const bytes = await descargarArchivoTelegram(update.message.document.file_id);
+        const contenido = new TextDecoder("utf-8").decode(bytes);
+        const resultado = await aplicarRevisionManualNorma(contenido);
+
+        if (!resultado.ok) {
+          await sendMessage(chatId, `⚠️ ${resultado.mensaje}`);
+        } else {
+          await sendMessage(
+            chatId,
+            `✅ Norma <b>${escapeHtml(resultado.documentKey ?? "")}</b> actualizada: ` +
+              `<b>${resultado.paginasActualizadas}</b> página(s) corregida(s).`,
+          );
+        }
+      } catch (error) {
+        console.error("DOCUMENTO_REVISION_ERROR:", error);
+        await sendMessage(
+          chatId,
+          "⚠️ No pude procesar ese archivo. Verifica que sea la plantilla generada por /normarevisar, sin modificar los encabezados de página.",
         );
       }
 

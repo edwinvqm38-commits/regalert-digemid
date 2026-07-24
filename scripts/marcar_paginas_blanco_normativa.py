@@ -113,7 +113,7 @@ def main():
                 supabase.table(NORMAS_TABLE)
                 .select("id, document_key, pdf_url, file_storage_path")
                 .eq("id", norma_id)
-                .maybeSingle()
+                .maybe_single()
                 .execute()
             )
             norma = norma_resp.data

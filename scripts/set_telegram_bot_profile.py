@@ -41,6 +41,7 @@ COMANDOS_USUARIO = [
     {"command": "start", "description": "Inicia el bot y muestra el menú"},
     {"command": "menu", "description": "Menú principal con botones"},
     {"command": "ayuda", "description": "Lista de comandos y opciones"},
+    {"command": "alertas", "description": "Submenú de alertas (últimas, hoy, semana, mes...)"},
     {"command": "ultimas", "description": "Últimas alertas registradas"},
     {"command": "hoy", "description": "Alertas publicadas hoy"},
     {"command": "semana", "description": "Alertas publicadas esta semana"},
@@ -53,6 +54,7 @@ COMANDOS_USUARIO = [
     {"command": "pague", "description": "Reporta tu código de operación de Yape"},
     {"command": "registrarme", "description": "Registra tu nombre para identificarte"},
     {"command": "miperfil", "description": "Tu nombre y el estado de tu prueba o plan"},
+    {"command": "limpiar", "description": "Borra los mensajes que te mandó el bot en este chat"},
     {"command": "chatid", "description": "Muestra tu chat_id"},
 ]
 

@@ -204,7 +204,10 @@ function mainMenu(incluirDemo = false) {
       { text: "🪪 Mi perfil", callback_data: "cuenta:miperfil" },
       { text: "📝 Registrarme", callback_data: "cuenta:registrarme_info" },
     ],
-    [{ text: "ℹ️ Ayuda", callback_data: "menu:ayuda" }],
+    [
+      { text: "ℹ️ Ayuda", callback_data: "menu:ayuda" },
+      { text: "🧹 Limpiar chat", callback_data: "cuenta:limpiar" },
+    ],
   );
 
   return { inline_keyboard: filas };
@@ -937,6 +940,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/ayuda</b>",
     "Muestra esta guía de comandos y opciones.",
+    "",
+    "<b>/alertas</b>",
+    "Muestra el submenú de alertas (últimas, hoy, semana, mes, recientes, buscar).",
     "",
     "<b>/ultimas</b>",
     "Muestra las últimas alertas registradas.",
@@ -3570,6 +3576,10 @@ async function handleCallback(update: TelegramUpdate) {
 
   if (data === "cuenta:miperfil") {
     return await enviarMiPerfil(chatId);
+  }
+
+  if (data === "cuenta:limpiar") {
+    return await limpiarChat(chatId);
   }
 
   if (data === "cuenta:registrarme_info") {

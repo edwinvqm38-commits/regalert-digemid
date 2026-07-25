@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agents.pdf_extract import extract_pdf
+from agents.pdf_extract import extract_pdf, tablas_a_texto
 
 logging.basicConfig(
     level=logging.INFO,
@@ -180,11 +180,21 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         if page.posible_formula:
             stats["con_formula"] += 1
 
+        texto_normalizado = normalize_text(page.text)
+        if page.has_tables:
+            # Anexa las tablas ya detectadas (page.tables, via pdfplumber) en
+            # formato markdown, para que quien revise el texto y la IA que
+            # responde /consulta vean la tabla con sus columnas separadas en
+            # vez de solo el texto aplanado que ya trae texto_normalizado.
+            bloque_tablas = tablas_a_texto(page.tables)
+            if bloque_tablas:
+                texto_normalizado = f"{texto_normalizado}\n\n{bloque_tablas}"
+
         payload = {
             "norma_id": norma_id,
             "page_number": page.page_number,
             "text_raw": page.text,
-            "text_normalized": normalize_text(page.text),
+            "text_normalized": texto_normalizado,
             "extraction_method": page.method,
             "ocr_used": page.ocr_used,
             "ocr_confidence": page.ocr_confidence,
@@ -287,7 +297,15 @@ def construir_reporte_html(document_key: str, titulo: str | None, extracciones) 
 </html>"""
 
 
-def enviar_reporte_extraccion_telegram(document_key: str, html: str, pdf_path: Path) -> None:
+def enviar_reporte_extraccion_telegram(document_key: str, html: str, pdf_url: str) -> None:
+    """Envía el reporte HTML de fidelidad y un link al PDF (no el archivo).
+
+    El PDF ya queda respaldado en Supabase Storage (respaldar_pdf, llamado
+    antes en el flujo principal), así que no hace falta volver a subirlo a
+    Telegram en cada corrida — eso es justo lo que llenaba el chat de
+    documentos adjuntos repetidos. Se linkea la fuente oficial (pdf_url),
+    que es publica y estable.
+    """
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -305,16 +323,18 @@ def enviar_reporte_extraccion_telegram(document_key: str, html: str, pdf_path: P
     )
     response_html.raise_for_status()
 
-    with pdf_path.open("rb") as file_obj:
-        response_pdf = requests.post(
-            f"https://api.telegram.org/bot{token}/sendDocument",
-            data={"chat_id": chat_id, "caption": f"📄 PDF original — {document_key}"},
-            files={"document": (pdf_path.name, file_obj, "application/pdf")},
-            timeout=60,
-        )
-    response_pdf.raise_for_status()
+    response_link = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": f"📄 PDF original — {document_key}\n{pdf_url}",
+            "disable_web_page_preview": True,
+        },
+        timeout=20,
+    )
+    response_link.raise_for_status()
 
-    logger.info("Reporte de extracción y PDF de %s enviados por Telegram.", document_key)
+    logger.info("Reporte de extracción y link del PDF de %s enviados por Telegram.", document_key)
 
 
 def enviar_progreso_telegram(
@@ -446,7 +466,7 @@ def main():
             if not args.no_telegram and (stats["con_tablas"] > 0 or stats["con_formula"] > 0 or stats["baja_calidad"] > 0):
                 try:
                     html = construir_reporte_html(document_key, norma.get("titulo"), extracciones)
-                    enviar_reporte_extraccion_telegram(document_key, html, local_path)
+                    enviar_reporte_extraccion_telegram(document_key, html, pdf_url)
                 except Exception:
                     logger.exception("No se pudo enviar el reporte de extracción de %s.", document_key)
 

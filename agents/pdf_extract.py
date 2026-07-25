@@ -116,6 +116,55 @@ def posible_formula(text: str) -> bool:
     return (simbolos / len(t)) > 0.01
 
 
+def _limpiar_celda(celda) -> str:
+    texto = str(celda) if celda is not None else ""
+    # Colapsa saltos de linea internos de la celda y escapa el separador "|"
+    # para no romper la sintaxis de tabla markdown.
+    return " ".join(texto.split()).replace("|", "/")
+
+
+def tabla_a_markdown(tabla: list) -> str:
+    """Convierte una tabla detectada (filas/columnas de pdfplumber) a una
+    tabla markdown legible, conservando la correspondencia fila-columna que
+    se pierde cuando el PDF se aplana a texto corrido (ver docstring del
+    modulo). La primera fila se trata como encabezado."""
+    filas = [[_limpiar_celda(c) for c in fila] for fila in (tabla or [])]
+    if not filas:
+        return ""
+
+    ancho = len(filas[0])
+    if ancho == 0:
+        return ""
+
+    lineas = [
+        "| " + " | ".join(filas[0]) + " |",
+        "| " + " | ".join("---" for _ in range(ancho)) + " |",
+    ]
+    for fila in filas[1:]:
+        fila_ajustada = (fila + [""] * ancho)[:ancho]
+        lineas.append("| " + " | ".join(fila_ajustada) + " |")
+
+    return "\n".join(lineas)
+
+
+def tablas_a_texto(tablas: list | None) -> str:
+    """Renderiza todas las tablas detectadas de una pagina como bloques
+    markdown, para anexarlos al texto normalizado que usan tanto la revision
+    humana como la busqueda de texto y la IA. Sin esto, ambas terminan
+    viendo la misma tabla aplanada a texto corrido, donde una fila como
+    "Item / Infraccion / Condicion / Referencia legal" pierde que celda
+    pertenece a que columna."""
+    if not tablas:
+        return ""
+
+    bloques = [tabla_a_markdown(t) for t in tablas]
+    bloques = [b for b in bloques if b]
+    if not bloques:
+        return ""
+
+    return "\n\n".join(f"Tabla detectada:\n{b}" for b in bloques)
+
+
 def _pdfplumber_page_text(pdf_path: str, page_index: int) -> str:
     if not _HAS_PDFPLUMBER:
         return ""

@@ -285,6 +285,21 @@ const ACCESO_REQUERIDO_TEXTO =
 const PLANES_TEXTO_CORTO =
   "• <b>Básico</b> S/29 — 30 consultas/día\n• <b>Consultoría</b> S/79 — 100/día\n• <b>Empresarial</b> S/199 — sin límite";
 
+// Metodos que crean un mensaje nuevo del bot (para /limpiar). deleteMessage,
+// editMessageText, answerCallbackQuery, etc. no cuentan: no crean mensaje
+// nuevo o no traen chat_id/message_id util.
+const METODOS_RASTREABLES = new Set(["sendMessage", "sendDocument", "sendAudio", "sendPhoto"]);
+
+async function registrarMensajeBot(chatId: unknown, messageId: unknown): Promise<void> {
+  if (typeof chatId !== "string" || typeof messageId !== "number") return;
+
+  try {
+    await supabase.from("digemid_chat_mensajes").insert({ chat_id: chatId, message_id: messageId });
+  } catch (_error) {
+    // No bloquea el envio del mensaje si falla el registro para /limpiar.
+  }
+}
+
 async function telegram(method: string, payload: Record<string, unknown>) {
   const response = await fetch(`${TELEGRAM_API}/${method}`, {
     method: "POST",
@@ -299,7 +314,13 @@ async function telegram(method: string, payload: Record<string, unknown>) {
     throw new Error(`Telegram error ${response.status}: ${text}`);
   }
 
-  return await response.json();
+  const data = await response.json();
+
+  if (METODOS_RASTREABLES.has(method)) {
+    await registrarMensajeBot(payload.chat_id, data?.result?.message_id);
+  }
+
+  return data;
 }
 
 async function sendMessage(
@@ -503,6 +524,9 @@ async function enviarAudioRespuesta(chatId: string, wavBytes: Uint8Array, captio
   if (!response.ok) {
     throw new Error(`Telegram sendAudio error ${response.status}: ${await response.text()}`);
   }
+
+  const data = await response.json();
+  await registrarMensajeBot(chatId, data?.result?.message_id);
 }
 
 async function enviarDocumentoTexto(
@@ -525,6 +549,9 @@ async function enviarDocumentoTexto(
   if (!response.ok) {
     throw new Error(`Telegram sendDocument error ${response.status}: ${await response.text()}`);
   }
+
+  const data = await response.json();
+  await registrarMensajeBot(chatId, data?.result?.message_id);
 }
 
 const UMBRAL_BAJA_CALIDAD_NORMA = 0.5;
@@ -590,8 +617,8 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   <p>${escapeHtml(norma.titulo ?? "")}</p>
   <div class="nota">
     Corrige el texto en la plantilla .txt que te envié junto a este reporte,
-    comparando con el PDF adjunto, y reenvía ese mismo archivo .txt a este
-    chat cuando termines. No necesitas entrar a Supabase.
+    comparando con el PDF del enlace que te mandé en este chat, y reenvía ese
+    mismo archivo .txt a este chat cuando termines. No necesitas entrar a Supabase.
   </div>
   <table>
     <thead><tr><th>Página</th><th>Calidad</th><th>Motivo</th><th>Texto extraído (muestra)</th></tr></thead>
@@ -604,7 +631,7 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
 function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): string {
   const encabezado = [
     `# NORMA: ${documentKey}`,
-    "# Instrucciones: corrige el texto de cada pagina comparando con el PDF adjunto.",
+    "# Instrucciones: corrige el texto de cada pagina comparando con el PDF del enlace que se mando junto a este reporte.",
     "# No modifiques ni borres las lineas que empiezan con \"### PAGINA\".",
     "# Cuando termines, reenvia este mismo archivo (como documento, no como texto) a este chat.",
     "",
@@ -651,11 +678,14 @@ async function enviarRevisionNorma(chatId: string, documentKey: string) {
     );
 
     if (norma.pdf_url) {
-      await telegram("sendDocument", {
-        chat_id: chatId,
-        document: norma.pdf_url,
-        caption: `📄 PDF original — ${documentKey}`,
-      });
+      // El PDF ya esta respaldado en Supabase Storage (file_storage_path); se
+      // manda el link en vez de subirlo de nuevo a Telegram en cada revision,
+      // para no llenar el chat de documentos adjuntos repetidos.
+      await sendMessage(
+        chatId,
+        `📄 PDF original — ${escapeHtml(documentKey)}`,
+        { inline_keyboard: [[{ text: "⬇️ Abrir PDF", url: norma.pdf_url }]] },
+      );
     }
 
     const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
@@ -672,6 +702,45 @@ async function enviarRevisionNorma(chatId: string, documentKey: string) {
     console.error("NORMAREVISAR_ERROR:", error);
     return await sendMessage(chatId, `⚠️ Error al generar la revisión: ${escapeHtml(String(error))}`);
   }
+}
+
+const LIMITE_MENSAJES_LIMPIAR = 300;
+
+/** Borra los mensajes que el bot le mando a este chat (registrados en
+ * digemid_chat_mensajes por telegram()/enviarDocumentoTexto/enviarAudioRespuesta)
+ * para "vaciar" el chat sin dejar el historial lleno de PDFs y reportes
+ * viejos. Solo puede borrar mensajes del propio bot: Telegram Bot API no
+ * expone un "borrar historial completo" y este comando no toca lo que
+ * escribio el usuario. */
+async function limpiarChat(chatId: string): Promise<void> {
+  const { data: mensajes, error } = await supabase
+    .from("digemid_chat_mensajes")
+    .select("message_id")
+    .eq("chat_id", chatId)
+    .order("message_id", { ascending: false })
+    .limit(LIMITE_MENSAJES_LIMPIAR);
+
+  if (error) {
+    await sendMessage(chatId, `⚠️ No pude leer el historial para limpiar: ${escapeHtml(error.message)}`);
+    return;
+  }
+
+  let borrados = 0;
+  for (const fila of mensajes ?? []) {
+    try {
+      await telegram("deleteMessage", { chat_id: chatId, message_id: fila.message_id });
+      borrados++;
+    } catch (_error) {
+      // Mensaje ya borrado por el usuario o demasiado antiguo para Telegram: se sigue con el resto.
+    }
+  }
+
+  await supabase.from("digemid_chat_mensajes").delete().eq("chat_id", chatId);
+
+  await sendMessage(
+    chatId,
+    `🧹 Listo. Borré ${borrados} mensaje(s) que te mandé.\n\nOjo: solo puedo borrar mis propios mensajes, no los que tú escribiste.`,
+  );
 }
 
 /** Parsea la plantilla .txt devuelta por un admin y aplica la correccion. */
@@ -795,6 +864,12 @@ function formatAlertList(title: string, rows: any[]) {
       `📅 ${escapeHtml(row.published_date_display ?? row.published_date ?? "Sin fecha")}`,
     );
     lines.push(`🔗 ${escapeHtml(row.detail_url)}`);
+
+    const pdfUrl = mejorPdfUrl(row);
+    if (pdfUrl) {
+      lines.push(`📄 PDF: ${escapeHtml(pdfUrl)}`);
+    }
+
     lines.push("");
   }
 
@@ -905,6 +980,9 @@ function helpText(esAdmin = false) {
     "<b>/detalle 50-2026</b>",
     "Consulta una alerta por número o código.",
     "",
+    "<b>/limpiar</b>",
+    "Borra los mensajes que yo te mandé en este chat (no los que tú escribiste).",
+    "",
     "📌 <b>Opciones del menú</b>",
     "",
     "<b>🆕 Últimas 5</b>",
@@ -988,7 +1066,7 @@ function helpText(esAdmin = false) {
     "Lista las normas con páginas de baja confiabilidad pendientes de revisión.",
     "",
     "<b>/normarevisar document_key</b>",
-    "Te mando un reporte HTML, el PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
+    "Te mando un reporte HTML, el link al PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
   ];
 
   return [...base, ...admin].join("\n");
@@ -1166,46 +1244,11 @@ const WEEK_ALERT_SELECT =
 const RECENT_ALERT_SELECT =
   "id, document_key, title, published_date, published_date_display, created_at, source_section, file_url, detail_url, telegram_file_id, process_status";
 
-const MAX_PDFS_POR_CONSULTA = 3;
-
-async function enviarPdfAlerta(chatId: string, row: any): Promise<void> {
-  if (!row?.id) return;
-
-  const fileRef =
-    row.telegram_file_id ||
-    row.pdf_source_url ||
-    row.file_url ||
-    row.drive_file_url ||
-    row.drive_download_url;
-
-  if (!fileRef) return;
-
-  const numero = row.alert_number ?? row.document_key ?? "";
-  const titulo = String(row.alert_title ?? row.title ?? "").slice(0, 200);
-
-  try {
-    const result: any = await telegram("sendDocument", {
-      chat_id: chatId,
-      document: fileRef,
-      caption: `📄 <b>${escapeHtml(numero)}</b> — ${escapeHtml(titulo)}`,
-      parse_mode: "HTML",
-    });
-
-    if (!row.telegram_file_id) {
-      const fileId = result?.result?.document?.file_id;
-      if (fileId) {
-        await supabase.from("digemid_documentos").update({ telegram_file_id: fileId }).eq("id", row.id);
-      }
-    }
-  } catch (_error) {
-    // No bloquea la respuesta del bot si falla el envio del PDF adjunto.
-  }
-}
-
-async function enviarPdfsAlertas(chatId: string, rows: any[]): Promise<void> {
-  for (const row of rows.slice(0, MAX_PDFS_POR_CONSULTA)) {
-    await enviarPdfAlerta(chatId, row);
-  }
+// El PDF ya se conserva en Supabase (backup_pdfs_to_storage.py / file_storage_path)
+// ademas de la fuente oficial y Drive: las respuestas del bot mandan ese link en
+// vez de subir el archivo, para no llenar el chat de documentos adjuntos.
+function mejorPdfUrl(row: any): string | undefined {
+  return row?.pdf_source_url || row?.drive_file_url || row?.drive_download_url || row?.file_url || undefined;
 }
 
 async function getLatestAlerts(limit = 5) {
@@ -2414,13 +2457,11 @@ async function handleCommand(
       status: "ok",
     });
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (trimmed === "/hoy") {
@@ -2433,13 +2474,11 @@ async function handleCommand(
       status: "ok",
     });
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (trimmed === "/semana") {
@@ -2452,13 +2491,11 @@ async function handleCommand(
       status: "ok",
     });
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (trimmed === "/recientes") {
@@ -2471,13 +2508,11 @@ async function handleCommand(
       status: "ok",
     });
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatRecentAlertList(rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (trimmed === "/mes") {
@@ -2490,13 +2525,11 @@ async function handleCommand(
       status: "ok",
     });
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (trimmed.startsWith("/detalle")) {
@@ -2529,9 +2562,7 @@ async function handleCommand(
       );
     }
 
-    await sendMessage(chatId, formatAlertDetail(row), detailButtons(row));
-    await enviarPdfAlerta(chatId, row);
-    return;
+    return await sendMessage(chatId, formatAlertDetail(row), detailButtons(row));
   }
 
   if (trimmed.startsWith("/buscar")) {
@@ -2556,13 +2587,16 @@ async function handleCommand(
       status: "ok",
     });
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList(`🔎 <b>Resultados para:</b> ${escapeHtml(query)}`, rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
+  }
+
+  if (trimmed === "/limpiar") {
+    await logConsulta({ chatId, userId, command: "/limpiar", status: "ok" });
+    return await limpiarChat(chatId);
   }
 
   if (trimmed === "/chatid") {
@@ -3102,8 +3136,7 @@ async function handleCommand(
         status: "ok_redirigido_hoy",
       });
 
-      await sendMessage(chatId, formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows), alertasMenu());
-      return await enviarPdfsAlertas(chatId, rows);
+      return await sendMessage(chatId, formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows), alertasMenu());
     }
 
     if (ambito === "semana") {
@@ -3118,8 +3151,7 @@ async function handleCommand(
         status: "ok_redirigido_semana",
       });
 
-      await sendMessage(chatId, formatWeekAlertList(rows, total, 10), alertasMenu());
-      return await enviarPdfsAlertas(chatId, rows);
+      return await sendMessage(chatId, formatWeekAlertList(rows, total, 10), alertasMenu());
     }
 
     if (ambito === "mes") {
@@ -3134,8 +3166,7 @@ async function handleCommand(
         status: "ok_redirigido_mes",
       });
 
-      await sendMessage(chatId, formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows), alertasMenu());
-      return await enviarPdfsAlertas(chatId, rows);
+      return await sendMessage(chatId, formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows), alertasMenu());
     }
 
     if (esConsultaDeUltimasAlertas(question)) {
@@ -3152,12 +3183,11 @@ async function handleCommand(
         status: "ok_redirigido_ultimas",
       });
 
-      await sendMessage(
+      return await sendMessage(
         chatId,
         formatAlertList(titulo, rows),
         alertasMenu(),
       );
-      return await enviarPdfsAlertas(chatId, rows);
     }
 
     try {
@@ -3552,61 +3582,51 @@ async function handleCallback(update: TelegramUpdate) {
   if (data === "alertas:ultimas") {
     const rows = await getLatestAlerts(5);
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (data === "alertas:hoy") {
     const rows = await getTodayAlerts();
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (data === "alertas:semana") {
     const { rows, total } = await getAlertasSemana(10);
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (data === "alertas:recientes") {
     const rows = await getRecentAlerts(10);
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatRecentAlertList(rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (data === "alertas:mes") {
     const rows = await getMonthAlerts();
 
-    await sendMessage(
+    return await sendMessage(
       chatId,
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
-    return;
   }
 
   if (data === "alertas:buscar_info") {

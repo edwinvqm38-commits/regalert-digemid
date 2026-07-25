@@ -293,14 +293,41 @@ const PLANES_TEXTO_CORTO =
 // nuevo o no traen chat_id/message_id util.
 const METODOS_RASTREABLES = new Set(["sendMessage", "sendDocument", "sendAudio", "sendPhoto"]);
 
-async function registrarMensajeBot(chatId: unknown, messageId: unknown): Promise<void> {
+async function registrarMensajeBot(chatId: unknown, messageId: unknown, metodo?: string): Promise<void> {
   if (typeof chatId !== "string" || typeof messageId !== "number") return;
 
   try {
-    await supabase.from("digemid_chat_mensajes").insert({ chat_id: chatId, message_id: messageId });
+    await supabase.from("digemid_chat_mensajes").insert({ chat_id: chatId, message_id: messageId, metodo: metodo ?? null });
   } catch (_error) {
     // No bloquea el envio del mensaje si falla el registro para /limpiar.
   }
+}
+
+// Telegram encadena la reproduccion de audios (al terminar uno, sigue con el
+// audio anterior que haya en el chat: comportamiento del cliente, no algo que
+// el Bot API permita desactivar). Como cada respuesta de audio es
+// independiente (no una playlist), se borra el audio anterior del bot en ese
+// chat antes de mandar el nuevo, para que no quede nada con que encadenar.
+async function borrarAudiosAnteriores(chatId: string): Promise<void> {
+  const { data: mensajes } = await supabase
+    .from("digemid_chat_mensajes")
+    .select("message_id")
+    .eq("chat_id", chatId)
+    .eq("metodo", "sendAudio");
+
+  for (const fila of mensajes ?? []) {
+    try {
+      await telegram("deleteMessage", { chat_id: chatId, message_id: fila.message_id });
+    } catch (_error) {
+      // Ya borrado por el usuario o fuera del plazo de Telegram para borrar: se ignora.
+    }
+  }
+
+  await supabase
+    .from("digemid_chat_mensajes")
+    .delete()
+    .eq("chat_id", chatId)
+    .eq("metodo", "sendAudio");
 }
 
 async function telegram(method: string, payload: Record<string, unknown>) {
@@ -320,7 +347,7 @@ async function telegram(method: string, payload: Record<string, unknown>) {
   const data = await response.json();
 
   if (METODOS_RASTREABLES.has(method)) {
-    await registrarMensajeBot(payload.chat_id, data?.result?.message_id);
+    await registrarMensajeBot(payload.chat_id, data?.result?.message_id, method);
   }
 
   return data;
@@ -529,7 +556,7 @@ async function enviarAudioRespuesta(chatId: string, wavBytes: Uint8Array, captio
   }
 
   const data = await response.json();
-  await registrarMensajeBot(chatId, data?.result?.message_id);
+  await registrarMensajeBot(chatId, data?.result?.message_id, "sendAudio");
 }
 
 async function enviarDocumentoTexto(
@@ -554,7 +581,7 @@ async function enviarDocumentoTexto(
   }
 
   const data = await response.json();
-  await registrarMensajeBot(chatId, data?.result?.message_id);
+  await registrarMensajeBot(chatId, data?.result?.message_id, "sendDocument");
 }
 
 const UMBRAL_BAJA_CALIDAD_NORMA = 0.5;
@@ -3436,6 +3463,7 @@ async function handleCallback(update: TelegramUpdate) {
 
       await sendMessage(chatId, "🎙️ Generando audio...");
       const wavBytes = await generarAudioRespuesta(answerText);
+      await borrarAudiosAnteriores(chatId);
       return await enviarAudioRespuesta(chatId, wavBytes, "🔊 Respuesta en audio");
     } catch (error) {
       console.error("TTS_ERROR:", error);

@@ -2124,6 +2124,104 @@ async function answerConsulta(
   throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
 }
 
+function documentKeyDeFila(row: any): string | null {
+  return row.document_key ?? row.alert_number ?? null;
+}
+
+// Genera un resumen con IA sobre documentos ya identificados (por
+// document_key), en vez de por busqueda de texto/relevancia: se usa para las
+// preguntas de "ultima alerta"/"hoy"/"semana"/"mes", que ya se resuelven con
+// las mismas consultas ordenadas/contadas que /ultimas, /hoy, /semana y /mes
+// (ver ambitoTemporalAlertas), y solo les faltaba el resumen redactado.
+async function generarResumenDeFilas(
+  rows: any[],
+): Promise<{ answer: string; sources: { documentKey: string; url: string }[] } | null> {
+  const documentKeys = Array.from(
+    new Set(rows.slice(0, 3).map(documentKeyDeFila).filter((key): key is string => !!key)),
+  );
+
+  if (!documentKeys.length) return null;
+
+  const chunksPorDocumento = await Promise.all(
+    documentKeys.map((key) => supabase.rpc("paginas_por_document_key", { p_document_key: key, p_limite: 6 })),
+  );
+
+  const chunks = chunksPorDocumento.flatMap((r) => r.data ?? []);
+  if (!chunks.length) return null;
+
+  const context = buildConsultaContext(chunks);
+  const userContent =
+    `Contexto:\n\n${context}\n\n` +
+    "Pregunta: Resume de que trata este documento (o estos documentos, si hay mas de uno).";
+  const sources = consultaSources(chunks);
+
+  if (DEEPSEEK_API_KEY) {
+    try {
+      return { answer: await callDeepseek(userContent), sources };
+    } catch (error) {
+      console.error("RESUMEN_IA_DEEPSEEK_ERROR, probando respaldo Gemini:", error);
+    }
+  }
+
+  if (GEMINI_API_KEY) {
+    return { answer: await callGemini(userContent), sources };
+  }
+
+  return null;
+}
+
+// Envia el listado exacto (mismo texto que antes) sumando, cuando se puede
+// generar, un resumen en lenguaje natural con el mismo boton de audio que
+// /consulta. Si el resumen falla (IA caida, sin texto fuente, etc.) se cae
+// al listado solo, que es el comportamiento que ya existia.
+async function enviarListaConResumen(
+  chatId: string,
+  userId: string | undefined,
+  question: string,
+  status: string,
+  rows: any[],
+  listaTexto: string,
+) {
+  let resumen: { answer: string; sources: { documentKey: string; url: string }[] } | null = null;
+
+  try {
+    resumen = await generarResumenDeFilas(rows);
+  } catch (error) {
+    console.error("RESUMEN_IA_ERROR:", error);
+  }
+
+  const consultaId = await logConsulta({
+    chatId,
+    userId,
+    command: "/consulta",
+    queryText: question,
+    resultCount: rows.length,
+    status,
+    raw: resumen ? { answerText: resumen.answer } : undefined,
+  });
+
+  if (!resumen) {
+    return await sendMessage(chatId, listaTexto, alertasMenu());
+  }
+
+  const nivel = await getNivelUsuario(chatId);
+  const puedeEscucharAudio = isAdmin(chatId) || nivel !== "gratis";
+
+  const filasBotones: Array<Array<{ text: string; url?: string; callback_data?: string }>> = resumen.sources
+    .slice(0, 3)
+    .map((source) => [{ text: `📄 ${source.documentKey}`, url: source.url }]);
+
+  if (consultaId && puedeEscucharAudio) {
+    filasBotones.push([{ text: "🔊 Escuchar respuesta", callback_data: `tts:${consultaId}` }]);
+  }
+
+  return await sendMessage(
+    chatId,
+    `🤖 ${formatConsultaAnswer(resumen.answer)}\n\n${listaTexto}`,
+    { inline_keyboard: filasBotones },
+  );
+}
+
 async function enviarMiPerfil(chatId: string): Promise<void> {
   const { data: usuario, error: usuarioError } = await supabase
     .from("digemid_bot_usuarios")
@@ -3133,46 +3231,40 @@ async function handleCommand(
     if (ambito === "hoy") {
       const rows = await getTodayAlerts();
 
-      await logConsulta({
+      return await enviarListaConResumen(
         chatId,
         userId,
-        command: "/consulta",
-        queryText: question,
-        resultCount: rows.length,
-        status: "ok_redirigido_hoy",
-      });
-
-      return await sendMessage(chatId, formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows), alertasMenu());
+        question,
+        "ok_redirigido_hoy",
+        rows,
+        formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
+      );
     }
 
     if (ambito === "semana") {
       const { rows, total } = await getAlertasSemana(10);
 
-      await logConsulta({
+      return await enviarListaConResumen(
         chatId,
         userId,
-        command: "/consulta",
-        queryText: question,
-        resultCount: rows.length,
-        status: "ok_redirigido_semana",
-      });
-
-      return await sendMessage(chatId, formatWeekAlertList(rows, total, 10), alertasMenu());
+        question,
+        "ok_redirigido_semana",
+        rows,
+        formatWeekAlertList(rows, total, 10),
+      );
     }
 
     if (ambito === "mes") {
       const rows = await getMonthAlerts();
 
-      await logConsulta({
+      return await enviarListaConResumen(
         chatId,
         userId,
-        command: "/consulta",
-        queryText: question,
-        resultCount: rows.length,
-        status: "ok_redirigido_mes",
-      });
-
-      return await sendMessage(chatId, formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows), alertasMenu());
+        question,
+        "ok_redirigido_mes",
+        rows,
+        formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
+      );
     }
 
     if (esConsultaDeUltimasAlertas(question)) {
@@ -3180,19 +3272,13 @@ async function handleCommand(
       const rows = await getLatestAlerts(limite);
       const titulo = limite === 1 ? "🆕 <b>Última alerta DIGEMID</b>" : "🆕 <b>Últimas alertas DIGEMID</b>";
 
-      await logConsulta({
+      return await enviarListaConResumen(
         chatId,
         userId,
-        command: "/consulta",
-        queryText: question,
-        resultCount: rows.length,
-        status: "ok_redirigido_ultimas",
-      });
-
-      return await sendMessage(
-        chatId,
+        question,
+        "ok_redirigido_ultimas",
+        rows,
         formatAlertList(titulo, rows),
-        alertasMenu(),
       );
     }
 

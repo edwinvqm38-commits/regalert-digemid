@@ -40,6 +40,16 @@ STORAGE_BUCKET = "digemid-documentos"
 DELAY_BETWEEN_DESCARGAS_SEGUNDOS = 4.0
 MAX_REINTENTOS_429 = 3
 UMBRAL_BAJA_CALIDAD = 0.5
+PENDING_STATUSES = ("inventory_imported",)
+RETRYABLE_ERROR_STATUSES = ("text_extraction_error", "pdf_download_error")
+
+
+class PdfDownloadError(Exception):
+    def __init__(self, url: str, status_code: int | None, content_type: str | None, message: str):
+        super().__init__(message)
+        self.url = url
+        self.status_code = status_code
+        self.content_type = content_type
 
 
 def load_env():
@@ -72,10 +82,15 @@ def contar_universo(supabase) -> tuple[int, int]:
     return (total.count or 0), (con_texto.count or 0)
 
 
-def get_pending_normas(supabase, limit: int, document_key: str | None = None) -> list[dict]:
+def get_pending_normas(
+    supabase,
+    limit: int,
+    document_key: str | None = None,
+    retry_errors: bool = False,
+) -> list[dict]:
     query = (
         supabase.table(NORMAS_TABLE)
-        .select("id, document_key, pdf_url, file_name, titulo")
+        .select("id, document_key, pdf_url, file_name, titulo, process_status, raw")
         .not_.is_("pdf_url", "null")
         .neq("pdf_url", "")
     )
@@ -87,10 +102,11 @@ def get_pending_normas(supabase, limit: int, document_key: str | None = None) ->
     # "Pendiente" se determina por process_status, NO por si la norma ya
     # tiene alguna fila en digemid_norma_paginas. write_pages() inserta
     # pagina por pagina (no es una transaccion), asi que una norma puede
-    # haber fallado a mitad de camino con solo la pagina 1 escrita
-    # (process_status='text_extraction_error'); esa SI debe reintentarse
-    # (ver limpieza de paginas parciales en main()) para no quedar
-    # incompleta contando como "con texto" sin estarlo.
+    # haber fallado a mitad de camino con solo algunas paginas escritas.
+    # Las filas en error NO se reintentan en corridas programadas normales:
+    # si el pdf_url esta roto, el lote queda atrapado en las mismas normas
+    # cada hora y no avanza. Se reintentan solo con --retry-errors o
+    # --document-key explicito.
     #
     # Antes esto se resolvia consultando que norma_id ya aparecen en
     # digemid_norma_paginas, pero esa consulta trae UNA FILA POR PAGINA (no
@@ -102,9 +118,15 @@ def get_pending_normas(supabase, limit: int, document_key: str | None = None) ->
     # OJO: el limite se aplica DESPUES del filtro, no antes, para no quedar
     # atascado en las normas mas nuevas (order by anio desc) si esas ya
     # estan listas mientras quedan cientos mas antiguas sin procesar.
+    statuses = list(PENDING_STATUSES)
+    if retry_errors:
+        statuses.extend(RETRYABLE_ERROR_STATUSES)
+
+    status_filters = ["process_status.is.null"]
+    status_filters.extend(f"process_status.eq.{status}" for status in statuses)
     response = (
         query
-        .or_("process_status.is.null,process_status.eq.inventory_imported,process_status.eq.text_extraction_error")
+        .or_(",".join(status_filters))
         .order("anio", desc=True)
         .execute()
     )
@@ -135,7 +157,28 @@ def download_pdf(url: str, local_path: Path) -> Path:
             logger.warning("429 en %s (intento %s). Espero %.1fs.", url, intento, espera)
             time.sleep(espera)
             continue
-        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "")
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise PdfDownloadError(
+                url=url,
+                status_code=response.status_code,
+                content_type=content_type,
+                message=f"Descarga PDF fallida: HTTP {response.status_code} en {url}",
+            ) from exc
+
+        if not response.content.startswith(b"%PDF"):
+            raise PdfDownloadError(
+                url=url,
+                status_code=response.status_code,
+                content_type=content_type,
+                message=(
+                    "Descarga invalida: la respuesta no parece un PDF "
+                    f"(content-type={content_type or 'sin content-type'}) en {url}"
+                ),
+            )
+
         local_path.write_bytes(response.content)
         return local_path
 
@@ -204,7 +247,14 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
     return stats
 
 
-def mark_norma(supabase, norma_id: str, status: str, stats: dict | None = None) -> None:
+def mark_norma(
+    supabase,
+    norma_id: str,
+    status: str,
+    stats: dict | None = None,
+    raw: dict | None = None,
+    error_info: dict | None = None,
+) -> None:
     now = datetime.now(timezone.utc).isoformat()
     payload = {"process_status": status, "updated_at": now}
 
@@ -212,7 +262,63 @@ def mark_norma(supabase, norma_id: str, status: str, stats: dict | None = None) 
         payload["ocr_required"] = stats["ocr_usado"]
         payload["has_tables"] = stats["con_tablas"] > 0
 
+    if error_info is not None:
+        next_raw = dict(raw or {})
+        next_raw["text_extraction_last_error"] = {
+            **error_info,
+            "status": status,
+            "occurred_at": now,
+        }
+        payload["raw"] = next_raw
+
     supabase.table(NORMAS_TABLE).update(payload).eq("id", norma_id).execute()
+
+
+def _fetch_norma_status_rows(supabase) -> list[dict]:
+    page_size = 1000
+    offset = 0
+    rows: list[dict] = []
+
+    while True:
+        response = (
+            supabase.table(NORMAS_TABLE)
+            .select("id, process_status, pdf_url")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        batch = response.data or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            return rows
+        offset += page_size
+
+
+def contar_estado_normativa(supabase) -> dict:
+    rows = _fetch_norma_status_rows(supabase)
+    completados = {"text_extracted", "text_extracted_baja_calidad"}
+    pendientes = set(PENDING_STATUSES)
+    errores_reintento = set(RETRYABLE_ERROR_STATUSES)
+
+    sin_texto = [row for row in rows if row.get("process_status") not in completados]
+    return {
+        "total": len(rows),
+        "con_texto": sum(1 for row in rows if row.get("process_status") in completados),
+        "pendientes_con_pdf": sum(
+            1
+            for row in rows
+            if row.get("process_status") in pendientes and (row.get("pdf_url") or "").strip()
+        ),
+        "errores_con_pdf": sum(
+            1
+            for row in rows
+            if row.get("process_status") in errores_reintento and (row.get("pdf_url") or "").strip()
+        ),
+        "sin_pdf_sin_texto": sum(
+            1
+            for row in sin_texto
+            if not (row.get("pdf_url") or "").strip()
+        ),
+    }
 
 
 def _escapar_html(texto: str | None) -> str:
@@ -321,7 +427,11 @@ def enviar_progreso_telegram(
     total: int,
     con_texto: int,
     procesadas_ahora: int,
+    errores_ahora: int,
     normas_baja: int,
+    pendientes_con_pdf: int = 0,
+    errores_con_pdf: int = 0,
+    sin_pdf_sin_texto: int = 0,
     normas_con_tablas: int = 0,
     normas_con_formula: int = 0,
 ) -> None:
@@ -337,7 +447,16 @@ def enviar_progreso_telegram(
         f"Total de normas/reglamentos: <b>{total}</b>",
         f"Con texto extraído: <b>{con_texto}/{total}</b>",
         f"Procesadas en esta corrida: <b>{procesadas_ahora}</b>",
+        f"Errores en esta corrida: <b>{errores_ahora}</b>",
     ]
+
+    if pendientes_con_pdf:
+        lines.append(f"Pendientes listos con PDF: <b>{pendientes_con_pdf}</b>")
+    if errores_con_pdf:
+        lines.append(f"Con error previo y PDF: <b>{errores_con_pdf}</b> (no se reintentan en automático)")
+    if sin_pdf_sin_texto:
+        lines.append(f"Sin PDF directo todavía: <b>{sin_pdf_sin_texto}</b>")
+
     if normas_baja:
         lines.append(f"⚠️ Con baja confiabilidad: <b>{normas_baja}</b> (revisar antes de confiar en consultas)")
     else:
@@ -365,16 +484,37 @@ def main():
                         help="Reprocesar SOLO esta norma (borra sus páginas y las regenera).")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-telegram", action="store_true")
+    parser.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="Reintentar normas en text_extraction_error/pdf_download_error. Usar manualmente, no en schedule.",
+    )
     args = parser.parse_args()
 
     load_env()
     supabase = get_supabase()
 
-    total_universo, con_texto_antes = contar_universo(supabase)
-    normas = get_pending_normas(supabase, args.limit, args.document_key)
+    estado_antes = contar_estado_normativa(supabase)
+    total_universo = estado_antes["total"]
+    con_texto_antes = estado_antes["con_texto"]
+    normas = get_pending_normas(
+        supabase,
+        args.limit,
+        args.document_key,
+        retry_errors=args.retry_errors,
+    )
     logger.info(
-        "Universo: %s normas | con texto: %s | pendientes con pdf_url en este lote: %s",
-        total_universo, con_texto_antes, len(normas),
+        (
+            "Universo: %s normas | con texto: %s | pendientes con pdf_url: %s | "
+            "errores con pdf: %s | sin pdf sin texto: %s | lote: %s | retry_errors=%s"
+        ),
+        total_universo,
+        con_texto_antes,
+        estado_antes["pendientes_con_pdf"],
+        estado_antes["errores_con_pdf"],
+        estado_antes["sin_pdf_sin_texto"],
+        len(normas),
+        args.retry_errors,
     )
 
     procesadas = 0
@@ -398,16 +538,12 @@ def main():
                 procesadas += 1
                 continue
 
-            # Limpia cualquier pagina parcial de un intento anterior fallido
-            # antes de reescribir (no-op si la norma no tenia ninguna): la
-            # insercion es pagina por pagina, no transaccional, asi que un
-            # intento previo pudo haber dejado algunas paginas sueltas sin
-            # completar la norma, lo que choca con la clave unica al
-            # reintentar.
-            supabase.table(PAGE_TABLE).delete().eq("norma_id", norma["id"]).execute()
-
             local_path = temp_dir / file_name
             download_pdf(pdf_url, local_path)
+
+            # Limpia cualquier pagina parcial de un intento anterior fallido
+            # solo despues de confirmar que el PDF aun descarga correctamente.
+            supabase.table(PAGE_TABLE).delete().eq("norma_id", norma["id"]).execute()
 
             # Respaldo del PDF como evidencia durable (reusa el archivo ya descargado).
             object_path = f"normas/{document_key}/{file_name}"
@@ -454,16 +590,39 @@ def main():
             errores += 1
             logger.exception("Error procesando %s: %s", document_key, error)
             if not args.dry_run:
-                mark_norma(supabase, norma["id"], "text_extraction_error")
+                status = "pdf_download_error" if isinstance(error, PdfDownloadError) else "text_extraction_error"
+                error_info = {
+                    "message": str(error)[:1000],
+                    "type": type(error).__name__,
+                    "pdf_url": pdf_url,
+                }
+                if isinstance(error, PdfDownloadError):
+                    error_info["http_status"] = error.status_code
+                    error_info["content_type"] = error.content_type
+                mark_norma(
+                    supabase,
+                    norma["id"],
+                    status,
+                    raw=norma.get("raw") if isinstance(norma.get("raw"), dict) else {},
+                    error_info=error_info,
+                )
 
     logger.info("Finalizado. Procesadas: %s | Errores: %s | Con baja calidad: %s",
                 procesadas, errores, normas_baja_calidad)
 
     if not args.dry_run and not args.no_telegram:
-        _, con_texto_despues = contar_universo(supabase)
+        estado_despues = contar_estado_normativa(supabase)
         enviar_progreso_telegram(
-            total_universo, con_texto_despues, procesadas, normas_baja_calidad,
-            normas_con_tablas, normas_con_formula,
+            total_universo,
+            estado_despues["con_texto"],
+            procesadas,
+            errores,
+            normas_baja_calidad,
+            estado_despues["pendientes_con_pdf"],
+            estado_despues["errores_con_pdf"],
+            estado_despues["sin_pdf_sin_texto"],
+            normas_con_tablas,
+            normas_con_formula,
         )
 
 

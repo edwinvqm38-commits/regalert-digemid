@@ -21,6 +21,14 @@ on:
         required: false
         default: ""
         type: string
+      retry_errors:
+        description: "Reintentar normas con error previo"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
   # Corrida cada hora, lotes chicos (5) para ponerse al dia con el atraso sin
   # generar rafagas grandes contra digemid.minsa.gob.pe: reparte la carga en
@@ -103,6 +111,9 @@ jobs:
           fi
           if [[ -n "${{ inputs.document_key }}" ]]; then
             CMD+=(--document-key "${{ inputs.document_key }}")
+          fi
+          if [[ "${{ github.event_name }}" != "schedule" && "${{ inputs.retry_errors }}" == "true" ]]; then
+            CMD+=(--retry-errors)
           fi
 
           printf 'Ejecutando: %q ' "${CMD[@]}"

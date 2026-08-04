@@ -211,11 +211,13 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         "ocr_usado": False,
         "con_tablas": 0,
         "con_formula": 0,
+        "paginas_baja_calidad": [],
     }
 
     for page in extracciones:
         if page.quality < UMBRAL_BAJA_CALIDAD:
             stats["baja_calidad"] += 1
+            stats["paginas_baja_calidad"].append(page.page_number)
         if page.ocr_used:
             stats["ocr_usado"] = True
         if page.has_tables:
@@ -319,6 +321,45 @@ def contar_estado_normativa(supabase) -> dict:
             if not (row.get("pdf_url") or "").strip()
         ),
     }
+
+
+def nivel_certeza_norma(promedio: float, stats: dict) -> str:
+    if stats.get("baja_calidad", 0) > 0 or promedio < UMBRAL_BAJA_CALIDAD:
+        return "baja"
+    if promedio < 0.85 or stats.get("ocr_usado") or stats.get("con_tablas", 0) > 0 or stats.get("con_formula", 0) > 0:
+        return "media"
+    return "alta"
+
+
+def get_pdf_needs_for_review(supabase, limit: int = 5) -> dict:
+    broken = (
+        supabase.table(NORMAS_TABLE)
+        .select("document_key, titulo, source_url, pdf_url, process_status")
+        .in_("process_status", ["pdf_download_error", "text_extraction_error"])
+        .order("updated_at", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+        or []
+    )
+    missing_rows = (
+        supabase.table(NORMAS_TABLE)
+        .select("document_key, titulo, source_url, pdf_url, process_status")
+        .order("anio", desc=True)
+        .execute()
+        .data
+        or []
+    )
+    missing = [
+        row for row in missing_rows
+        if row.get("process_status") not in ("text_extracted", "text_extracted_baja_calidad")
+        and not (row.get("pdf_url") or "").strip()
+    ][:limit]
+    return {"broken": broken, "missing": missing}
+
+
+def format_review_command(document_key: str) -> str:
+    return f"<code>/normarevisar {_escapar_html(document_key)}</code>"
 
 
 def _escapar_html(texto: str | None) -> str:
@@ -434,6 +475,8 @@ def enviar_progreso_telegram(
     sin_pdf_sin_texto: int = 0,
     normas_con_tablas: int = 0,
     normas_con_formula: int = 0,
+    processed_summaries: list[dict] | None = None,
+    pdf_needs: dict | None = None,
 ) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
@@ -466,6 +509,50 @@ def enviar_progreso_telegram(
         lines.append(f"📊 Con tablas detectadas: <b>{normas_con_tablas}</b> (guardadas como estructura, no solo texto plano)")
     if normas_con_formula:
         lines.append(f"🧮 Con posible fórmula/notación técnica: <b>{normas_con_formula}</b> (requieren revisión manual)")
+
+    summaries = processed_summaries or []
+    if summaries:
+        certeza_counts = {"alta": 0, "media": 0, "baja": 0}
+        for item in summaries:
+            certeza_counts[item["certeza"]] = certeza_counts.get(item["certeza"], 0) + 1
+        lines.extend([
+            "",
+            "Nivel de certeza en esta corrida:",
+            f"Alta: <b>{certeza_counts.get('alta', 0)}</b> | Media: <b>{certeza_counts.get('media', 0)}</b> | Baja: <b>{certeza_counts.get('baja', 0)}</b>",
+        ])
+
+        revisar = [
+            item for item in summaries
+            if item["certeza"] != "alta" or item.get("baja_calidad", 0) > 0
+        ][:5]
+        if revisar:
+            lines.append("")
+            lines.append("Revisar/confirmar transcripción:")
+            for item in revisar:
+                paginas = item.get("paginas_baja_calidad") or []
+                paginas_txt = f" págs. {paginas[:8]}" if paginas else ""
+                lines.append(
+                    f"- {_escapar_html(item['document_key'])}: certeza <b>{item['certeza']}</b>, "
+                    f"calidad prom. <b>{item['promedio']:.2f}</b>{_escapar_html(paginas_txt)} → "
+                    f"{format_review_command(item['document_key'])}"
+                )
+
+    if pdf_needs:
+        broken = (pdf_needs.get("broken") or [])[:3]
+        missing = (pdf_needs.get("missing") or [])[:3]
+        if broken or missing:
+            lines.append("")
+            lines.append("PDFs por confirmar/subir:")
+        for row in broken:
+            lines.append(
+                f"- URL rota: <b>{_escapar_html(row.get('document_key'))}</b> "
+                f"({_escapar_html((row.get('titulo') or '')[:60])})"
+            )
+        for row in missing:
+            lines.append(
+                f"- Sin PDF: <b>{_escapar_html(row.get('document_key'))}</b> "
+                f"({_escapar_html((row.get('titulo') or '')[:60])})"
+            )
 
     try:
         requests.post(
@@ -522,6 +609,7 @@ def main():
     normas_baja_calidad = 0
     normas_con_tablas = 0
     normas_con_formula = 0
+    processed_summaries: list[dict] = []
     temp_dir = Path("tmp") / "normativa_text"
 
     for index, norma in enumerate(normas):
@@ -561,6 +649,7 @@ def main():
             promedio = sum(p.quality for p in extracciones) / max(1, len(extracciones))
             estado = "text_extracted" if promedio >= UMBRAL_BAJA_CALIDAD else "text_extracted_baja_calidad"
             mark_norma(supabase, norma["id"], estado, stats)
+            certeza = nivel_certeza_norma(promedio, stats)
 
             if stats["baja_calidad"] > 0:
                 normas_baja_calidad += 1
@@ -569,10 +658,18 @@ def main():
             if stats["con_formula"] > 0:
                 normas_con_formula += 1
 
+            processed_summaries.append({
+                "document_key": document_key,
+                "certeza": certeza,
+                "promedio": promedio,
+                "baja_calidad": stats["baja_calidad"],
+                "paginas_baja_calidad": stats["paginas_baja_calidad"],
+            })
+
             procesadas += 1
             logger.info(
-                "%s | páginas: %s | calidad prom: %.2f | baja calidad: %s | con tablas: %s | posible fórmula: %s",
-                document_key, len(extracciones), promedio,
+                "%s | páginas: %s | certeza: %s | calidad prom: %.2f | baja calidad: %s | con tablas: %s | posible fórmula: %s",
+                document_key, len(extracciones), certeza, promedio,
                 stats["baja_calidad"], stats["con_tablas"], stats["con_formula"],
             )
 
@@ -612,6 +709,7 @@ def main():
 
     if not args.dry_run and not args.no_telegram:
         estado_despues = contar_estado_normativa(supabase)
+        pdf_needs = get_pdf_needs_for_review(supabase)
         enviar_progreso_telegram(
             total_universo,
             estado_despues["con_texto"],
@@ -623,6 +721,8 @@ def main():
             estado_despues["sin_pdf_sin_texto"],
             normas_con_tablas,
             normas_con_formula,
+            processed_summaries,
+            pdf_needs,
         )
 
 

@@ -1,0 +1,178 @@
+name: TEMP - Enviar reporte revision RM-607-2024
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/temp-rm607-review-report.yml"
+
+jobs:
+  enviar-reporte:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias minimas
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests supabase python-dotenv
+
+      - name: Enviar reporte mejorado RM-607-2024
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import html
+          import os
+          import requests
+          from supabase import create_client
+
+          DOCUMENT_KEY = "RM-607-2024"
+          UMBRAL = 0.5
+
+          token = os.environ["TELEGRAM_BOT_TOKEN"]
+          chat_id = os.environ.get("TELEGRAM_ADMIN_CHAT_ID") or os.environ.get("TELEGRAM_CHAT_ID")
+          if not chat_id:
+              raise SystemExit("Falta TELEGRAM_ADMIN_CHAT_ID/TELEGRAM_CHAT_ID")
+
+          supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+
+          norma = (
+              supabase.table("digemid_normas")
+              .select("id, document_key, titulo, pdf_url, process_status")
+              .eq("document_key", DOCUMENT_KEY)
+              .limit(1)
+              .execute()
+              .data
+              or []
+          )[0]
+
+          paginas = (
+              supabase.table("digemid_norma_paginas")
+              .select("page_number, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw, revisado_manual")
+              .eq("norma_id", norma["id"])
+              .order("page_number")
+              .execute()
+              .data
+              or []
+          )
+
+          low = [
+              p for p in paginas
+              if float(p.get("quality_score") or 0) < UMBRAL and not p.get("revisado_manual")
+          ]
+          avg = sum(float(p.get("quality_score") or 0) for p in paginas) / max(1, len(paginas))
+          certeza = "baja" if low or avg < UMBRAL else ("media" if avg < 0.85 else "alta")
+
+          lines = [
+              "📚 <b>Reporte ejemplo normativa DIGEMID</b>",
+              "",
+              f"Norma: <b>{html.escape(DOCUMENT_KEY)}</b>",
+              f"Título: {html.escape(norma.get('titulo') or '')}",
+              f"Estado: <b>{html.escape(norma.get('process_status') or '')}</b>",
+              f"Páginas extraídas: <b>{len(paginas)}</b>",
+              f"Calidad promedio: <b>{avg:.2f}</b>",
+              f"Nivel de certeza: <b>{certeza.upper()}</b>",
+              f"Páginas que requieren revisión: <b>{len(low)}</b>",
+          ]
+          if low:
+              lines.append("")
+              lines.append("Páginas críticas:")
+              for p in low[:10]:
+                  detail = [
+                      f"pág. {p['page_number']}",
+                      f"calidad {float(p.get('quality_score') or 0):.2f}",
+                      f"método {html.escape(p.get('extraction_method') or '?')}",
+                  ]
+                  if p.get("ocr_confidence") is not None:
+                      detail.append(f"OCR {float(p['ocr_confidence']):.2f}")
+                  lines.append("- " + " | ".join(detail))
+              lines.append("")
+              lines.append(f"Para corregir desde Telegram usa: <code>/normarevisar {html.escape(DOCUMENT_KEY)}</code>")
+
+          response = requests.post(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "HTML"},
+              timeout=30,
+          )
+          response.raise_for_status()
+
+          rows = []
+          for p in low:
+              text = html.escape((p.get("text_normalized") or p.get("text_raw") or "")[:900])
+              rows.append(
+                  "<tr>"
+                  f"<td>{p['page_number']}</td>"
+                  f"<td>{p.get('quality_score')}</td>"
+                  f"<td>{html.escape(p.get('extraction_method') or '?')}</td>"
+                  f"<td><pre>{text}</pre></td>"
+                  "</tr>"
+              )
+
+          report_html = f"""<!doctype html>
+          <html lang="es"><head><meta charset="utf-8">
+          <title>Revision {html.escape(DOCUMENT_KEY)}</title>
+          <style>
+          body {{ font-family: system-ui, sans-serif; margin: 2rem; }}
+          table {{ border-collapse: collapse; width: 100%; }}
+          td, th {{ border: 1px solid #ccc; padding: .5rem; vertical-align: top; }}
+          pre {{ white-space: pre-wrap; word-break: break-word; margin: 0; }}
+          .nota {{ background: #fff8e1; border: 1px solid #ffe082; padding: .75rem; }}
+          </style></head><body>
+          <h1>Revision de transcripcion - {html.escape(DOCUMENT_KEY)}</h1>
+          <p>{html.escape(norma.get('titulo') or '')}</p>
+          <div class="nota">Nivel de certeza: <b>{certeza.upper()}</b>. Corrige la plantilla TXT comparando contra el PDF original y reenviala al bot.</div>
+          <table><thead><tr><th>Pagina</th><th>Calidad</th><th>Metodo</th><th>Muestra</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody></table>
+          </body></html>"""
+
+          files = {"document": (f"revision_{DOCUMENT_KEY}.html", report_html.encode("utf-8"), "text/html")}
+          response = requests.post(
+              f"https://api.telegram.org/bot{token}/sendDocument",
+              data={"chat_id": chat_id, "caption": f"📋 Reporte HTML de revisión - {DOCUMENT_KEY}"},
+              files=files,
+              timeout=30,
+          )
+          response.raise_for_status()
+
+          if norma.get("pdf_url"):
+              response = requests.post(
+                  f"https://api.telegram.org/bot{token}/sendDocument",
+                  json={"chat_id": chat_id, "document": norma["pdf_url"], "caption": f"📄 PDF original - {DOCUMENT_KEY}"},
+                  timeout=30,
+              )
+              response.raise_for_status()
+
+          plantilla = [f"# NORMA: {DOCUMENT_KEY}", "# Corrige cada bloque y reenvia este TXT como documento.", ""]
+          for p in low:
+              motivo = f"calidad actual: {p.get('quality_score')}, metodo: {p.get('extraction_method') or '?'}"
+              plantilla.append(f"### PAGINA {p['page_number']} ({motivo})")
+              plantilla.append(p.get("text_normalized") or p.get("text_raw") or "")
+              plantilla.append("")
+
+          response = requests.post(
+              f"https://api.telegram.org/bot{token}/sendDocument",
+              data={"chat_id": chat_id, "caption": "✏️ Plantilla TXT para corregir y reenviar al bot"},
+              files={"document": (f"plantilla_{DOCUMENT_KEY}.txt", "\n".join(plantilla).encode("utf-8"), "text/plain")},
+              timeout=30,
+          )
+          response.raise_for_status()
+          print("Reporte enviado a Telegram.")
+          PY

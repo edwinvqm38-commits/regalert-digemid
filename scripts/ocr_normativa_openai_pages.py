@@ -1,4 +1,4 @@
-"""Reprocesa paginas normativas de baja calidad con vision OCR via OpenAI.
+"""Reprocesa paginas normativas de baja calidad con vision OCR via API.
 
 Uso recomendado:
   1. Correr primero en dry-run para ver candidatas.
@@ -11,7 +11,6 @@ la extraccion previa en metadata cuando se reemplaza text_raw/text_normalized.
 
 import argparse
 import base64
-import io
 import json
 import logging
 import os
@@ -36,9 +35,12 @@ logger = logging.getLogger(__name__)
 PAGE_TABLE = "digemid_norma_paginas"
 NORMAS_TABLE = "digemid_normas"
 STORAGE_BUCKET = "digemid-documentos"
-DEFAULT_MODEL = "gpt-5.6"
+DEFAULT_PROVIDER = "openrouter"
+DEFAULT_OPENAI_MODEL = "gpt-5.6"
+DEFAULT_OPENROUTER_MODEL = "openrouter/auto"
 DEFAULT_DETAIL = "original"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def load_env() -> None:
@@ -62,8 +64,13 @@ def parse_args():
     parser.add_argument("--all-pages", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--replace-text", action="store_true")
-    parser.add_argument("--model", default=os.getenv("OPENAI_OCR_MODEL", DEFAULT_MODEL))
-    parser.add_argument("--detail", default=os.getenv("OPENAI_OCR_DETAIL", DEFAULT_DETAIL))
+    parser.add_argument(
+        "--provider",
+        choices=["openai", "openrouter"],
+        default=os.getenv("VISION_OCR_PROVIDER", DEFAULT_PROVIDER),
+    )
+    parser.add_argument("--model")
+    parser.add_argument("--detail", default=os.getenv("VISION_OCR_DETAIL", DEFAULT_DETAIL))
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()
     if args.limit <= 0:
@@ -72,6 +79,11 @@ def parse_args():
         raise ValueError("--dpi debe ser mayor que cero")
     if args.replace_text and not args.apply:
         raise ValueError("--replace-text requiere --apply")
+    if not args.model:
+        if args.provider == "openai":
+            args.model = os.getenv("OPENAI_OCR_MODEL", DEFAULT_OPENAI_MODEL)
+        else:
+            args.model = os.getenv("OPENROUTER_OCR_MODEL", DEFAULT_OPENROUTER_MODEL)
     return args
 
 
@@ -259,6 +271,118 @@ def transcribe_page_openai(
     }
 
 
+def transcribe_page_openrouter(
+    api_key: str,
+    model: str,
+    document_key: str,
+    title: str | None,
+    page_number: int,
+    image_base64: str,
+) -> dict:
+    prompt = (
+        "Transcribe literalmente esta pagina de una norma legal peruana. "
+        "No resumas, no corrijas el contenido legal y no inventes texto. "
+        "Conserva saltos de linea importantes, numerales, articulos, fechas, "
+        "unidades, tablas y encabezados. Si una palabra no es legible escribe "
+        "[ilegible]. Devuelve solo JSON valido con estas claves: "
+        "transcripcion, tablas_markdown, advertencias, confianza_estimada."
+    )
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Documento: {document_key}\n"
+                            f"Titulo: {title or ''}\n"
+                            f"Pagina: {page_number}\n\n{prompt}"
+                        ),
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{image_base64}",
+                        },
+                    },
+                ],
+            }
+        ],
+        "temperature": 0,
+    }
+    response = requests.post(
+        OPENROUTER_CHAT_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/edwinvqm38-commits/regalert-digemid",
+            "X-Title": "RegAlert DIGEMID Vision OCR",
+        },
+        json=payload,
+        timeout=180,
+    )
+    response.raise_for_status()
+    data = response.json()
+    output_text = (
+        ((data.get("choices") or [{}])[0].get("message") or {}).get("content")
+        or ""
+    )
+    if isinstance(output_text, list):
+        output_text = "\n".join(
+            item.get("text", "")
+            for item in output_text
+            if isinstance(item, dict)
+        ).strip()
+    if not output_text:
+        raise ValueError("OpenRouter no devolvio contenido")
+
+    parsed = extract_json(str(output_text))
+    transcript = norm_text(parsed.get("transcripcion"))
+    if not transcript:
+        raise ValueError("La transcripcion IA vino vacia")
+    return {
+        "raw_response_id": data.get("id"),
+        "transcripcion": parsed.get("transcripcion") or "",
+        "tablas_markdown": parsed.get("tablas_markdown") or "",
+        "advertencias": parsed.get("advertencias") or [],
+        "confianza_estimada": parsed.get("confianza_estimada"),
+    }
+
+
+def transcribe_page_with_provider(
+    api_key: str,
+    provider: str,
+    model: str,
+    detail: str,
+    document_key: str,
+    title: str | None,
+    page_number: int,
+    image_base64: str,
+) -> dict:
+    if provider == "openai":
+        return transcribe_page_openai(
+            api_key=api_key,
+            model=model,
+            detail=detail,
+            document_key=document_key,
+            title=title,
+            page_number=page_number,
+            image_base64=image_base64,
+        )
+    if provider == "openrouter":
+        return transcribe_page_openrouter(
+            api_key=api_key,
+            model=model,
+            document_key=document_key,
+            title=title,
+            page_number=page_number,
+            image_base64=image_base64,
+        )
+    raise ValueError(f"Proveedor no soportado: {provider}")
+
+
 def build_replacement_text(ai_result: dict) -> str:
     text = (ai_result.get("transcripcion") or "").strip()
     tables = (ai_result.get("tablas_markdown") or "").strip()
@@ -271,6 +395,7 @@ def update_page(supabase, page: dict, ai_result: dict, args) -> None:
     now = datetime.now(timezone.utc).isoformat()
     metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
     metadata["openai_vision_ocr"] = {
+        "provider": args.provider,
         "model": args.model,
         "detail": args.detail,
         "dpi": args.dpi,
@@ -304,9 +429,14 @@ def update_page(supabase, page: dict, ai_result: dict, args) -> None:
 def main() -> None:
     args = parse_args()
     load_env()
-    api_key = os.getenv("OPENAI_API_KEY")
+    if args.provider == "openai":
+        api_key = os.getenv("OPENAI_API_KEY")
+        api_key_name = "OPENAI_API_KEY"
+    else:
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        api_key_name = "OPENROUTER_API_KEY"
     if not api_key and args.apply:
-        raise ValueError("Falta OPENAI_API_KEY")
+        raise ValueError(f"Falta {api_key_name}")
 
     supabase = get_supabase()
     pages = get_candidate_pages(supabase, args)
@@ -338,8 +468,9 @@ def main() -> None:
         finally:
             tmp_path.unlink(missing_ok=True)
 
-        ai_result = transcribe_page_openai(
+        ai_result = transcribe_page_with_provider(
             api_key=api_key,
+            provider=args.provider,
             model=args.model,
             detail=args.detail,
             document_key=document_key,

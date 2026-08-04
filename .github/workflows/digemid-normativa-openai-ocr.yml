@@ -21,6 +21,19 @@ on:
         required: false
         default: ""
         type: string
+      provider:
+        description: "Proveedor de vision OCR"
+        required: true
+        default: "openrouter"
+        type: choice
+        options:
+          - openrouter
+          - openai
+      model:
+        description: "Modelo vision OCR (opcional; usa variable por defecto si queda vacio)"
+        required: false
+        default: ""
+        type: string
       quality_below:
         description: "Procesar paginas con calidad menor a este valor"
         required: false
@@ -44,8 +57,10 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENAI_OCR_MODEL: ${{ vars.OPENAI_OCR_MODEL || 'gpt-5.6' }}
-      OPENAI_OCR_DETAIL: ${{ vars.OPENAI_OCR_DETAIL || 'original' }}
+      OPENROUTER_OCR_MODEL: ${{ vars.OPENROUTER_OCR_MODEL || 'openrouter/auto' }}
+      VISION_OCR_DETAIL: ${{ vars.VISION_OCR_DETAIL || 'original' }}
 
     steps:
       - name: Descargar repositorio
@@ -70,6 +85,7 @@ jobs:
             python scripts/ocr_normativa_openai_pages.py
             --limit "${{ inputs.limit }}"
             --quality-below "${{ inputs.quality_below }}"
+            --provider "${{ inputs.provider }}"
           )
 
           if [[ "${{ inputs.mode }}" == "apply" ]]; then
@@ -82,6 +98,9 @@ jobs:
 
           if [[ -n "${{ inputs.document_key }}" ]]; then
             CMD+=(--document-key "${{ inputs.document_key }}")
+          fi
+          if [[ -n "${{ inputs.model }}" ]]; then
+            CMD+=(--model "${{ inputs.model }}")
           fi
 
           printf 'Ejecutando: %q ' "${CMD[@]}"

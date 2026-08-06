@@ -51,14 +51,25 @@ class NormativePdfDetectorAgent:
         self.supabase: Client = create_client(url, key)
         self.table_name = "digemid_documentos"
         self.session = requests.Session()
+        # El User-Agent generico ("Mozilla/5.0" a secas) y la falta de Referer
+        # hacian que el WAF de DIGEMID devolviera 403 en el 100% de los
+        # pedidos (confirmado en logs de produccion). Estos headers son los
+        # mismos que ya usa scripts/crawl_normativa_pdf_urls.py contra el
+        # mismo dominio y ahi si pasan el WAF.
         self.session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
+                "Referer": "https://www.digemid.minsa.gob.pe/",
+                "Upgrade-Insecure-Requests": "1",
             }
         )
         self.ignored_link_connection_errors = 0
+        self.max_retries_429 = 3
 
     def fetch_pending_documents(self) -> list[dict]:
         response = (
@@ -94,11 +105,23 @@ class NormativePdfDetectorAgent:
         return "application/pdf" in self.head_content_type(url)
 
     def fetch_detail_response(self, url: str) -> requests.Response:
-        response = self.session.get(
-            url,
-            timeout=20,
-            allow_redirects=True,
-        )
+        response = None
+        for attempt in range(1, self.max_retries_429 + 1):
+            response = self.session.get(
+                url,
+                timeout=20,
+                allow_redirects=True,
+            )
+            if response.status_code == 429 and attempt < self.max_retries_429:
+                wait_seconds = float(response.headers.get("Retry-After", 10 * attempt))
+                logger.warning(
+                    "429 en %s (intento %s/%s). Espero %.1fs.",
+                    url, attempt, self.max_retries_429, wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+            break
+
         response.raise_for_status()
         return response
 

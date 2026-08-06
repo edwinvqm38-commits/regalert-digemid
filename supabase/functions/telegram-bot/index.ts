@@ -103,6 +103,7 @@ type TelegramUpdate = {
       file_name?: string;
       mime_type?: string;
     };
+    caption?: string;
   };
   callback_query?: {
     id: string;
@@ -736,6 +737,121 @@ async function aplicarRevisionManualNorma(
   return { ok: true, mensaje: "ok", documentKey, paginasActualizadas: actualizadas };
 }
 
+const NORMATIVA_STORAGE_BUCKET = "digemid-documentos";
+
+/** Envia las instrucciones para subir a mano el PDF de UNA norma puntual.
+ * El caption exigido ("/normapdf DOCUMENT_KEY") es lo que ata el PDF a esa
+ * norma exacta: no depende de ningun estado de conversacion, asi que no hay
+ * forma de que el PDF de una norma termine aplicado a otra por error de
+ * orden o de mensajes cruzados. */
+async function enviarInstruccionNormaPdf(chatId: string, documentKey: string): Promise<Response> {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("document_key, titulo, pdf_url, process_status")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) {
+    return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
+  }
+
+  return await sendMessage(
+    chatId,
+    `📄 Para subir el PDF de <b>${escapeHtml(documentKey)}</b>` +
+      `${norma.titulo ? ` (${escapeHtml(norma.titulo)})` : ""}:\n\n` +
+      "1. Adjunta el archivo PDF en este chat.\n" +
+      "2. En el pie de foto (caption) del archivo, escribe exactamente:\n" +
+      `<code>/normapdf ${escapeHtml(documentKey)}</code>\n\n` +
+      "El caption es obligatorio: así el PDF queda atado únicamente a esta norma y no se puede mezclar con otra.",
+  );
+}
+
+/** Guarda el PDF que un admin subio a mano para UNA norma puntual: lo valida,
+ * lo sube a Supabase Storage (mismo bucket que usa el respaldo automatico) y
+ * deja la norma en cola para que la corrida horaria de
+ * extract_normativa_text_simple.py la descargue y extraiga el texto. */
+async function manejarPdfManual(
+  chatId: string,
+  documentKey: string,
+  fileId: string,
+  fileName: string,
+): Promise<Response> {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) {
+    await sendMessage(
+      chatId,
+      `⚠️ No encontré ninguna norma con document_key "${escapeHtml(documentKey)}". ` +
+        "Verifica el texto del pie de foto (caption) del PDF.",
+    );
+    return new Response("OK", { status: 200 });
+  }
+
+  try {
+    const bytes = await descargarArchivoTelegram(fileId);
+
+    const esPdfValido = bytes.length > 10 * 1024 &&
+      bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46; // %PDF
+
+    if (!esPdfValido) {
+      await sendMessage(
+        chatId,
+        `⚠️ El archivo no parece un PDF válido (no empieza con %PDF o es muy pequeño). ` +
+          `No se guardó nada para "${escapeHtml(documentKey)}".`,
+      );
+      return new Response("OK", { status: 200 });
+    }
+
+    const nombreSeguro = (fileName || `${documentKey}.pdf`).replace(/[^A-Za-z0-9._-]+/g, "-");
+    const rutaObjeto = `normas/${documentKey}/${nombreSeguro}`;
+
+    const { error: errorSubida } = await supabase.storage
+      .from(NORMATIVA_STORAGE_BUCKET)
+      .upload(rutaObjeto, bytes, { contentType: "application/pdf", upsert: true });
+
+    if (errorSubida) throw errorSubida;
+
+    // URL firmada de 48h: sobra tiempo para que la corrida horaria (cada 1h)
+    // la descargue y extraiga el texto; no necesita ser permanente porque
+    // file_storage_path ya queda como respaldo durable una vez procesada.
+    const { data: firmada, error: errorFirma } = await supabase.storage
+      .from(NORMATIVA_STORAGE_BUCKET)
+      .createSignedUrl(rutaObjeto, 60 * 60 * 48);
+
+    if (errorFirma || !firmada?.signedUrl) {
+      throw errorFirma ?? new Error("No se pudo generar la URL firmada del PDF.");
+    }
+
+    await supabase
+      .from("digemid_normas")
+      .update({
+        pdf_url: firmada.signedUrl,
+        file_storage_path: rutaObjeto,
+        process_status: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", norma.id);
+
+    await sendMessage(
+      chatId,
+      `✅ PDF recibido para <b>${escapeHtml(documentKey)}</b>. Quedó en cola: la próxima corrida ` +
+        "horaria (máx. 1h) lo descargará, extraerá el texto y te avisará si detecta tablas o baja calidad.",
+    );
+  } catch (error) {
+    console.error("NORMAPDF_UPLOAD_ERROR:", error);
+    await sendMessage(
+      chatId,
+      `⚠️ No pude guardar el PDF de "${escapeHtml(documentKey)}": ${escapeHtml(String(error))}`,
+    );
+  }
+
+  return new Response("OK", { status: 200 });
+}
+
 async function upsertUsuario(update: TelegramUpdate, chatId: string): Promise<{ isNew: boolean }> {
   const from = update.message?.from ?? update.callback_query?.from;
 
@@ -986,6 +1102,12 @@ function helpText(esAdmin = false) {
     "",
     "<b>/normasrevisar</b>",
     "Lista las normas con páginas de baja confiabilidad pendientes de revisión.",
+    "",
+    "<b>/normassinpdf</b>",
+    "Lista las normas sin PDF confirmado, con botón para subirlo a mano una por una.",
+    "",
+    "<b>/normapdf document_key</b>",
+    "Instrucciones para subir el PDF de una norma puntual (adjunta el PDF con ese mismo comando como caption).",
     "",
     "<b>/normarevisar document_key</b>",
     "Te mando un reporte HTML, el PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
@@ -2885,6 +3007,59 @@ async function handleCommand(
     return await enviarRevisionNorma(chatId, documentKey);
   }
 
+  if (trimmed === "/normassinpdf") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { data: normas, error } = await supabase
+      .from("digemid_normas")
+      .select("document_key, titulo, process_status, pdf_url")
+      .or("pdf_url.is.null,pdf_url.eq.,process_status.eq.pdf_download_error,process_status.eq.text_extraction_error")
+      .order("anio", { ascending: false })
+      .limit(30);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al consultar: ${escapeHtml(error.message)}`);
+    }
+
+    if (!normas || !normas.length) {
+      return await sendMessage(chatId, "✅ No hay normas pendientes de PDF en este momento.");
+    }
+
+    const lineas = [
+      "📄 <b>Normas sin PDF confirmado</b>",
+      "",
+      "Toca una para ver cómo subir su PDF manualmente (una por una, sin riesgo de mezclarlas):",
+    ];
+    const botones = normas.map((n: any) => [
+      {
+        text: `${n.document_key}${n.process_status ? ` (${n.process_status})` : " (sin PDF)"}`,
+        callback_data: `normapdf:${n.document_key}`,
+      },
+    ]);
+
+    return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
+  }
+
+  if (trimmed.startsWith("/normapdf")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const documentKey = trimmed.replace("/normapdf", "").trim();
+
+    if (!documentKey) {
+      return await sendMessage(
+        chatId,
+        "Escribe el document_key de la norma.\n\nEjemplo:\n<code>/normapdf RM-100-2024</code>\n\n" +
+          "Usa <code>/normassinpdf</code> para ver cuáles no tienen PDF.",
+      );
+    }
+
+    return await enviarInstruccionNormaPdf(chatId, documentKey);
+  }
+
   if (trimmed.startsWith("/invitar")) {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -3294,6 +3469,15 @@ async function handleCallback(update: TelegramUpdate) {
 
     const documentKey = data.slice("normarevisar:".length);
     return await enviarRevisionNorma(chatId, documentKey);
+  }
+
+  if (data.startsWith("normapdf:")) {
+    if (!isAdmin(chatId)) {
+      return;
+    }
+
+    const documentKey = data.slice("normapdf:".length);
+    return await enviarInstruccionNormaPdf(chatId, documentKey);
   }
 
   if (data.startsWith("tts:")) {
@@ -3728,6 +3912,33 @@ serve(async (req: Request) => {
     if (update.message?.document) {
       if (!isAdmin(chatId)) {
         return new Response("OK", { status: 200 });
+      }
+
+      const documentoRecibido = update.message.document;
+      const esPdf = documentoRecibido.mime_type === "application/pdf" ||
+        (documentoRecibido.file_name ?? "").toLowerCase().endsWith(".pdf");
+
+      if (esPdf) {
+        const caption = (update.message.caption ?? "").trim();
+        const matchCaption = caption.match(/^\/normapdf\s+(\S+)/i);
+
+        if (!matchCaption) {
+          await sendMessage(
+            chatId,
+            "⚠️ Para subir el PDF de una norma, escribe <code>/normapdf DOCUMENT_KEY</code> como pie de foto " +
+              "(caption) del archivo — así el PDF queda atado únicamente a esa norma y no se mezcla con otra.\n\n" +
+              "Ejemplo de caption: <code>/normapdf RM-100-2024</code>\n\n" +
+              "Usa <code>/normassinpdf</code> para ver qué normas lo necesitan.",
+          );
+          return new Response("OK", { status: 200 });
+        }
+
+        return await manejarPdfManual(
+          chatId,
+          matchCaption[1].trim(),
+          documentoRecibido.file_id,
+          documentoRecibido.file_name ?? "",
+        );
       }
 
       try {

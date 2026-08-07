@@ -9,6 +9,7 @@ sobrecargar ni ser bloqueados por el servidor de DIGEMID.
 import argparse
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import urljoin
@@ -93,26 +94,44 @@ def fetch_html(url: str) -> str | None:
     return None
 
 
+def es_nombre_archivo_valido(url: str) -> bool:
+    # Algunas paginas de DIGEMID traen un enlace roto/plantilla que termina
+    # en "/.pdf" (nombre de archivo vacio) — no es un PDF real, se descarta.
+    nombre_archivo = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    return nombre_archivo != ".pdf" and len(nombre_archivo) > len(".pdf")
+
+
 def elegir_pdf(html: str, base_url: str) -> str | None:
     soup = BeautifulSoup(html, "html.parser")
     candidatos: list[str] = []
 
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        if not href.lower().endswith(".pdf"):
+        # ".pdf" en cualquier parte del href (no solo al final) para cubrir
+        # enlaces con querystring, ej. "...resolucion.pdf?download=1".
+        if ".pdf" not in href.lower():
             continue
 
         url = urljoin(base_url, href)
-        # Algunas paginas de DIGEMID traen un enlace roto/plantilla que termina
-        # en "/.pdf" (nombre de archivo vacio) — no es un PDF real, se descarta.
-        nombre_archivo = url.rsplit("/", 1)[-1]
-        if nombre_archivo == ".pdf" or len(nombre_archivo) <= len(".pdf"):
-            continue
+        if es_nombre_archivo_valido(url):
+            candidatos.append(url)
 
-        candidatos.append(url)
+    if not candidatos:
+        # Segundo intento: algunas normas (ej. portal gob.pe, paginas antiguas
+        # de DIGEMID) no traen el PDF en un <a href> plano sino embebido en un
+        # bloque de datos de la pagina (JSON de un framework, atributo
+        # data-*, visor). Se busca cualquier URL absoluta que contenga ".pdf"
+        # en el HTML crudo como respaldo, sin exigir que venga de un <a>.
+        for match in re.finditer(r'https?://[^\s"\'<>\\]+\.pdf(?:\?[^\s"\'<>\\]*)?', html, re.IGNORECASE):
+            url = match.group(0)
+            if es_nombre_archivo_valido(url):
+                candidatos.append(url)
 
     if not candidatos:
         return None
+
+    # Deduplicar preservando el orden de aparicion.
+    candidatos = list(dict.fromkeys(candidatos))
 
     # Preferir PDFs del repositorio oficial de normatividad.
     def prioridad(u: str) -> int:

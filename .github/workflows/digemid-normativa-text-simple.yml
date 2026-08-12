@@ -21,6 +21,11 @@ on:
         required: false
         default: ""
         type: string
+      document_keys:
+        description: "Reprocesar varias normas (opcional, separadas por coma; ignora document_key si se usa este)"
+        required: false
+        default: ""
+        type: string
       retry_errors:
         description: "Reintentar normas con error previo"
         required: false
@@ -109,7 +114,9 @@ jobs:
           if [[ "$MODE" != "apply" ]]; then
             CMD+=(--dry-run)
           fi
-          if [[ -n "${{ inputs.document_key }}" ]]; then
+          if [[ -n "${{ inputs.document_keys }}" ]]; then
+            CMD+=(--document-keys "${{ inputs.document_keys }}")
+          elif [[ -n "${{ inputs.document_key }}" ]]; then
             CMD+=(--document-key "${{ inputs.document_key }}")
           fi
           if [[ "${{ github.event_name }}" != "schedule" && "${{ inputs.retry_errors }}" == "true" ]]; then

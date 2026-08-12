@@ -560,6 +560,30 @@ async function getPaginasBajaCalidad(documentKey: string) {
   return { norma, paginas: paginas ?? [] };
 }
 
+/** Igual que getPaginasBajaCalidad pero para paginas con tablas detectadas
+ * cuya correspondencia fila-columna nadie confirmo contra el PDF: el texto
+ * puede tener quality_score alto (es legible) y aun asi tener una tabla con
+ * columnas mal asignadas, como se confirmo a mano en DS-13-2022. */
+async function getPaginasConTablas(documentKey: string) {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, pdf_url")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) return null;
+
+  const { data: paginas } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw")
+    .eq("norma_id", norma.id)
+    .eq("has_tables", true)
+    .eq("tabla_verificada", false)
+    .order("page_number");
+
+  return { norma, paginas: paginas ?? [] };
+}
+
 function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   const filas = paginas
     .map((p) => {
@@ -685,6 +709,59 @@ async function enviarRevisionNorma(chatId: string, documentKey: string) {
   }
 }
 
+/** Igual que enviarRevisionNorma pero para paginas con tablas sin verificar
+ * (texto legible, pero nadie confirmo que la tabla quedo bien reconstruida
+ * columna por columna). Reutiliza el mismo reporte HTML y la misma
+ * plantilla .txt: el admin compara la tabla en Markdown contra el PDF y, si
+ * esta bien, reenvia el archivo sin cambios; si esta mal, corrige el bloque
+ * de la tabla a mano antes de reenviarlo. */
+async function enviarRevisionTablas(chatId: string, documentKey: string) {
+  try {
+    const resultado = await getPaginasConTablas(documentKey);
+
+    if (!resultado) {
+      return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
+    }
+
+    const { norma, paginas } = resultado;
+
+    if (!paginas.length) {
+      return await sendMessage(chatId, `✅ "${escapeHtml(documentKey)}" no tiene tablas pendientes de verificación.`);
+    }
+
+    const html = construirReporteHtmlRevision(norma, paginas);
+    await enviarDocumentoTexto(
+      chatId,
+      html,
+      `tablas_${documentKey}.html`,
+      "text/html",
+      `📋 Reporte de tablas — ${documentKey} (${paginas.length} página(s))`,
+    );
+
+    if (norma.pdf_url) {
+      await telegram("sendDocument", {
+        chat_id: chatId,
+        document: norma.pdf_url,
+        caption: `📄 PDF original — ${documentKey}`,
+      });
+    }
+
+    const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
+    await enviarDocumentoTexto(
+      chatId,
+      plantilla,
+      `tablas_${documentKey}.txt`,
+      "text/plain",
+      "✏️ Compara el bloque \"Tabla:\" de cada página contra el PDF. Si la tabla está bien asignada (exportador/importador, montos, plazos, etc.), reenvía este mismo archivo sin cambios; si está mal, corrígela y reenvíalo.",
+    );
+
+    return new Response("OK", { status: 200 });
+  } catch (error) {
+    console.error("TABLAREVISAR_ERROR:", error);
+    return await sendMessage(chatId, `⚠️ Error al generar la revisión de tablas: ${escapeHtml(String(error))}`);
+  }
+}
+
 /** Parsea la plantilla .txt devuelta por un admin y aplica la correccion. */
 async function aplicarRevisionManualNorma(
   contenido: string,
@@ -736,6 +813,11 @@ async function aplicarRevisionManualNorma(
         extraction_method: "revision_manual",
         revisado_manual: true,
         revisado_en: ahora,
+        // Cualquier pagina que un admin reenvia via este flujo ya fue
+        // comparada contra el PDF (venga de /normarevisar o /tablarevisar),
+        // asi que tambien sale de la cola de tablas pendientes si aplicaba.
+        tabla_verificada: true,
+        tabla_verificada_en: ahora,
         updated_at: ahora,
       })
       .eq("norma_id", norma.id)
@@ -799,7 +881,7 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
 
   const { data: paginas, error } = await supabase
     .from("digemid_norma_paginas")
-    .select("page_number, quality_score, extraction_method, posible_formula, revisado_manual, has_tables")
+    .select("page_number, quality_score, extraction_method, posible_formula, revisado_manual, has_tables, tabla_verificada")
     .eq("norma_id", norma.id)
     .order("page_number");
 
@@ -818,6 +900,7 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
   const formulas = paginas.filter((p) => p.posible_formula).length;
   const revisadas = paginas.filter((p) => p.revisado_manual).length;
   const tablas = paginas.filter((p) => p.has_tables).length;
+  const tablasSinVerificar = paginas.filter((p) => p.has_tables && !p.tabla_verificada).length;
   const ocr = paginas.filter((p) => (p.extraction_method ?? "").toLowerCase().includes("ocr")).length;
 
   let veredicto: string;
@@ -828,12 +911,18 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
       bajaSinRevisar > 0 ? `${bajaSinRevisar} página(s) de calidad muy baja sin revisar` : null,
       formulas > 0 ? `${formulas} página(s) con posible fórmula/notación técnica` : null,
     ].filter(Boolean).join(" y ") + ".";
-  } else if (tablas > 0 || ocr > 0 || media > 0) {
+  } else if (tablasSinVerificar > 0 || ocr > 0 || media > 0) {
     veredicto = "🟡 Usar con precaución";
-    detalle = "Tiene tablas, texto vía OCR o páginas de calidad media. La IA ya avisa de esto en sus respuestas, pero ningún admin lo confirmó a mano.";
+    detalle = [
+      tablasSinVerificar > 0 ? `${tablasSinVerificar} página(s) con tabla sin verificar` : null,
+      ocr > 0 ? `${ocr} página(s) vía OCR` : null,
+      media > 0 ? `${media} página(s) de calidad media` : null,
+    ].filter(Boolean).join(", ") + ". La IA ya avisa de esto en sus respuestas, pero ningún admin lo confirmó a mano.";
   } else {
-    veredicto = "✅ Confiable (heurística alta)";
-    detalle = "Todo el texto es de calidad alta y no depende de tablas ni OCR. Aun así, ningún admin la ha confirmado con /normarevisar.";
+    veredicto = "✅ Confiable";
+    detalle = tablas > 0
+      ? "Todas las tablas ya fueron verificadas a mano y el resto del texto es de calidad alta."
+      : "Todo el texto es de calidad alta y no depende de tablas ni OCR. Aun así, ningún admin la ha confirmado con /normarevisar.";
   }
 
   const lineas = [
@@ -844,7 +933,7 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
     `Calidad alta (≥0.85): ${alta} (${porcentaje(alta, total)})`,
     `Calidad media (0.5–0.85): ${media} (${porcentaje(media, total)})`,
     `Calidad muy baja (<0.5): ${baja} (${porcentaje(baja, total)})`,
-    `Con tablas: ${tablas}`,
+    `Con tablas: ${tablas} (${tablasSinVerificar} sin verificar)`,
     `Extraídas vía OCR: ${ocr} (${porcentaje(ocr, total)})`,
     `Con posible fórmula sin reconstruir: ${formulas}`,
     `Revisadas manualmente por un admin: ${revisadas} de ${total} (${porcentaje(revisadas, total)})`,
@@ -857,6 +946,9 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
 
   if (bajaSinRevisar > 0) {
     lineas.push("", `Usa <code>/normarevisar ${escapeHtml(documentKey)}</code> para corregir las páginas pendientes.`);
+  }
+  if (tablasSinVerificar > 0) {
+    lineas.push("", `Usa <code>/tablarevisar ${escapeHtml(documentKey)}</code> para verificar las tablas pendientes.`);
   }
 
   return lineas.join("\n");
@@ -872,7 +964,7 @@ async function construirReporteEstadoGlobal(): Promise<string> {
     return count ?? 0;
   }
 
-  const [total, alta, media, baja, bajaSinRevisar, formulas, revisadas, tablas, ocr] = await Promise.all([
+  const [total, alta, media, baja, bajaSinRevisar, formulas, revisadas, tablas, tablasSinVerificar, ocr] = await Promise.all([
     contar((q) => q),
     contar((q) => q.gte("quality_score", 0.85)),
     contar((q) => q.gte("quality_score", UMBRAL_BAJA_CALIDAD_NORMA).lt("quality_score", 0.85)),
@@ -881,6 +973,7 @@ async function construirReporteEstadoGlobal(): Promise<string> {
     contar((q) => q.eq("posible_formula", true)),
     contar((q) => q.eq("revisado_manual", true)),
     contar((q) => q.eq("has_tables", true)),
+    contar((q) => q.eq("has_tables", true).eq("tabla_verificada", false)),
     contar((q) => q.ilike("extraction_method", "%ocr%")),
   ]);
 
@@ -891,7 +984,7 @@ async function construirReporteEstadoGlobal(): Promise<string> {
     `Calidad alta (≥0.85): ${alta} (${porcentaje(alta, total)})`,
     `Calidad media (0.5–0.85): ${media} (${porcentaje(media, total)})`,
     `Calidad muy baja (<0.5): ${baja} (${porcentaje(baja, total)})`,
-    `Con tablas: ${tablas}`,
+    `Con tablas: ${tablas} (<b>${tablasSinVerificar}</b> sin verificar)`,
     `Extraídas vía OCR: ${ocr} (${porcentaje(ocr, total)})`,
     `Con posible fórmula sin reconstruir: ${formulas}`,
     `Revisadas manualmente por un admin: <b>${revisadas}</b> de ${total} (${porcentaje(revisadas, total)})`,
@@ -899,7 +992,7 @@ async function construirReporteEstadoGlobal(): Promise<string> {
     "",
     "⚠️ Los gráficos (barras, circulares, etc.) todavía no se detectan ni extraen — solo texto y tablas. Si una norma depende de datos que solo están en un gráfico, esa información no llega a la base.",
     "",
-    "Usa <code>/normaestado document_key</code> para el detalle de una norma puntual, o <code>/normasrevisar</code> para ver cuáles tienen páginas de baja calidad pendientes.",
+    "Usa <code>/normaestado document_key</code> para el detalle de una norma puntual, <code>/normasrevisar</code> para páginas de baja calidad, o <code>/tablasrevisar</code> para tablas sin verificar.",
   ];
 
   return lineas.join("\n");
@@ -1250,6 +1343,12 @@ function helpText(esAdmin = false) {
     "",
     "<b>/normarevisar document_key</b>",
     "Te mando un reporte HTML, el PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
+    "",
+    "<b>/tablasrevisar</b>",
+    "Lista las normas con tablas cuya correspondencia fila-columna nadie confirmó contra el PDF (texto legible, pero tabla sin verificar).",
+    "",
+    "<b>/tablarevisar document_key</b>",
+    "Igual que /normarevisar pero para tablas: te mando el PDF y la tabla en Markdown extraída. Si está bien, reenvía el archivo sin cambios; si está mal, corrígela y reenvíala.",
     "",
     "<b>/normaestado [document_key]</b>",
     "Reporte de fidelidad: calidad de texto, tablas, OCR, fórmulas y revisión manual. Sin argumento, resume toda la base; con document_key, el detalle de esa norma con un veredicto (confiable / usar con precaución / necesita revisión).",
@@ -3193,6 +3292,64 @@ async function handleCommand(
     return await enviarRevisionNorma(chatId, documentKey);
   }
 
+  if (trimmed === "/tablasrevisar") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { data: paginas, error } = await supabase
+      .from("digemid_norma_paginas")
+      .select("norma_id, digemid_normas(document_key, titulo)")
+      .eq("has_tables", true)
+      .eq("tabla_verificada", false);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al consultar: ${escapeHtml(error.message)}`);
+    }
+
+    if (!paginas || !paginas.length) {
+      return await sendMessage(chatId, "✅ No hay tablas pendientes de verificación.");
+    }
+
+    const porNorma = new Map<string, { titulo: string; count: number }>();
+    for (const p of paginas as any[]) {
+      const key = p.digemid_normas?.document_key ?? "?";
+      const previo = porNorma.get(key);
+      porNorma.set(key, {
+        titulo: p.digemid_normas?.titulo ?? "",
+        count: (previo?.count ?? 0) + 1,
+      });
+    }
+
+    const lineas = [
+      "📋 <b>Normas con tablas sin verificar</b>",
+      "",
+      "El texto ya es legible, pero nadie confirmó que las columnas de la tabla (exportador/importador, montos, plazos, etc.) quedaron bien asignadas. Toca una para revisarla:",
+    ];
+    const botones = [...porNorma.entries()].map(([documentKey, info]) => [
+      { text: `${documentKey} — ${info.count} página(s)`, callback_data: `tablarevisar:${documentKey}` },
+    ]);
+
+    return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
+  }
+
+  if (trimmed.startsWith("/tablarevisar")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const documentKey = trimmed.replace("/tablarevisar", "").trim();
+
+    if (!documentKey) {
+      return await sendMessage(
+        chatId,
+        "Escribe el document_key de la norma.\n\nEjemplo:\n<code>/tablarevisar DS-13-2022</code>\n\nUsa <code>/tablasrevisar</code> para ver cuáles tienen tablas pendientes.",
+      );
+    }
+
+    return await enviarRevisionTablas(chatId, documentKey);
+  }
+
   if (trimmed === "/normassinpdf") {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -3672,6 +3829,15 @@ async function handleCallback(update: TelegramUpdate) {
 
     const documentKey = data.slice("normarevisar:".length);
     return await enviarRevisionNorma(chatId, documentKey);
+  }
+
+  if (data.startsWith("tablarevisar:")) {
+    if (!isAdmin(chatId)) {
+      return;
+    }
+
+    const documentKey = data.slice("tablarevisar:".length);
+    return await enviarRevisionTablas(chatId, documentKey);
   }
 
   if (data.startsWith("normapdf:")) {
@@ -4162,7 +4328,7 @@ serve(async (req: Request) => {
         console.error("DOCUMENTO_REVISION_ERROR:", error);
         await sendMessage(
           chatId,
-          "⚠️ No pude procesar ese archivo. Verifica que sea la plantilla generada por /normarevisar, sin modificar los encabezados de página.",
+          "⚠️ No pude procesar ese archivo. Verifica que sea la plantilla generada por /normarevisar o /tablarevisar, sin modificar los encabezados de página.",
         );
       }
 

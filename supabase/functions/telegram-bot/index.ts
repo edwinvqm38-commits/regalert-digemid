@@ -776,6 +776,135 @@ async function enviarInstruccionNormaPdf(chatId: string, documentKey: string): P
   );
 }
 
+function porcentaje(n: number, total: number): string {
+  if (!total) return "0%";
+  return `${((n / total) * 100).toFixed(1)}%`;
+}
+
+/** Reporte de fidelidad para UNA norma: agrega las señales de calidad ya
+ * guardadas por página (quality_score, ocr_confidence, posible_formula,
+ * has_tables, revisado_manual) en un veredicto legible. No mide gráficos
+ * (barras, circulares, etc.): hoy no se detectan ni extraen, así que ese
+ * dato queda como advertencia fija en el reporte global. */
+async function construirReporteEstadoNorma(documentKey: string): Promise<string> {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) {
+    return `⚠️ No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`;
+  }
+
+  const { data: paginas, error } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, quality_score, extraction_method, posible_formula, revisado_manual, has_tables")
+    .eq("norma_id", norma.id)
+    .order("page_number");
+
+  if (error) {
+    return `⚠️ Error al consultar: ${escapeHtml(error.message)}`;
+  }
+  if (!paginas || !paginas.length) {
+    return `⚠️ La norma ${escapeHtml(documentKey)} no tiene páginas registradas todavía.`;
+  }
+
+  const total = paginas.length;
+  const alta = paginas.filter((p) => (p.quality_score ?? 0) >= 0.85).length;
+  const media = paginas.filter((p) => (p.quality_score ?? 0) >= UMBRAL_BAJA_CALIDAD_NORMA && (p.quality_score ?? 0) < 0.85).length;
+  const baja = paginas.filter((p) => (p.quality_score ?? 0) < UMBRAL_BAJA_CALIDAD_NORMA).length;
+  const bajaSinRevisar = paginas.filter((p) => (p.quality_score ?? 0) < UMBRAL_BAJA_CALIDAD_NORMA && !p.revisado_manual).length;
+  const formulas = paginas.filter((p) => p.posible_formula).length;
+  const revisadas = paginas.filter((p) => p.revisado_manual).length;
+  const tablas = paginas.filter((p) => p.has_tables).length;
+  const ocr = paginas.filter((p) => (p.extraction_method ?? "").toLowerCase().includes("ocr")).length;
+
+  let veredicto: string;
+  let detalle: string;
+  if (bajaSinRevisar > 0 || formulas > 0) {
+    veredicto = "⚠️ Necesita revisión manual";
+    detalle = [
+      bajaSinRevisar > 0 ? `${bajaSinRevisar} página(s) de calidad muy baja sin revisar` : null,
+      formulas > 0 ? `${formulas} página(s) con posible fórmula/notación técnica` : null,
+    ].filter(Boolean).join(" y ") + ".";
+  } else if (tablas > 0 || ocr > 0 || media > 0) {
+    veredicto = "🟡 Usar con precaución";
+    detalle = "Tiene tablas, texto vía OCR o páginas de calidad media. La IA ya avisa de esto en sus respuestas, pero ningún admin lo confirmó a mano.";
+  } else {
+    veredicto = "✅ Confiable (heurística alta)";
+    detalle = "Todo el texto es de calidad alta y no depende de tablas ni OCR. Aun así, ningún admin la ha confirmado con /normarevisar.";
+  }
+
+  const lineas = [
+    `📊 <b>Estado de fidelidad — ${escapeHtml(documentKey)}</b>`,
+    norma.titulo ? escapeHtml(norma.titulo) : "",
+    "",
+    `Páginas totales: <b>${total}</b>`,
+    `Calidad alta (≥0.85): ${alta} (${porcentaje(alta, total)})`,
+    `Calidad media (0.5–0.85): ${media} (${porcentaje(media, total)})`,
+    `Calidad muy baja (<0.5): ${baja} (${porcentaje(baja, total)})`,
+    `Con tablas: ${tablas}`,
+    `Extraídas vía OCR: ${ocr} (${porcentaje(ocr, total)})`,
+    `Con posible fórmula sin reconstruir: ${formulas}`,
+    `Revisadas manualmente por un admin: ${revisadas} de ${total} (${porcentaje(revisadas, total)})`,
+    "",
+    `<b>Veredicto: ${veredicto}</b>`,
+    detalle,
+    "",
+    "⚠️ Los gráficos (barras, circulares, etc.) no se detectan ni extraen todavía — si esta norma depende de datos que solo están en un gráfico, no está cubierto por este reporte.",
+  ];
+
+  if (bajaSinRevisar > 0) {
+    lineas.push("", `Usa <code>/normarevisar ${escapeHtml(documentKey)}</code> para corregir las páginas pendientes.`);
+  }
+
+  return lineas.join("\n");
+}
+
+/** Mismo reporte que construirReporteEstadoNorma pero agregado sobre toda la
+ * base, usando conteos (head:true) en vez de traer todas las filas. */
+async function construirReporteEstadoGlobal(): Promise<string> {
+  async function contar(build: (q: any) => any): Promise<number> {
+    const base = supabase.from("digemid_norma_paginas").select("id", { count: "exact", head: true });
+    const { count, error } = await build(base);
+    if (error) throw new Error(error.message);
+    return count ?? 0;
+  }
+
+  const [total, alta, media, baja, bajaSinRevisar, formulas, revisadas, tablas, ocr] = await Promise.all([
+    contar((q) => q),
+    contar((q) => q.gte("quality_score", 0.85)),
+    contar((q) => q.gte("quality_score", UMBRAL_BAJA_CALIDAD_NORMA).lt("quality_score", 0.85)),
+    contar((q) => q.lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)),
+    contar((q) => q.lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA).eq("revisado_manual", false)),
+    contar((q) => q.eq("posible_formula", true)),
+    contar((q) => q.eq("revisado_manual", true)),
+    contar((q) => q.eq("has_tables", true)),
+    contar((q) => q.ilike("extraction_method", "%ocr%")),
+  ]);
+
+  const lineas = [
+    "📊 <b>Estado de fidelidad — toda la base</b>",
+    "",
+    `Páginas totales: <b>${total}</b>`,
+    `Calidad alta (≥0.85): ${alta} (${porcentaje(alta, total)})`,
+    `Calidad media (0.5–0.85): ${media} (${porcentaje(media, total)})`,
+    `Calidad muy baja (<0.5): ${baja} (${porcentaje(baja, total)})`,
+    `Con tablas: ${tablas}`,
+    `Extraídas vía OCR: ${ocr} (${porcentaje(ocr, total)})`,
+    `Con posible fórmula sin reconstruir: ${formulas}`,
+    `Revisadas manualmente por un admin: <b>${revisadas}</b> de ${total} (${porcentaje(revisadas, total)})`,
+    `Calidad muy baja aún sin revisar: ${bajaSinRevisar}`,
+    "",
+    "⚠️ Los gráficos (barras, circulares, etc.) todavía no se detectan ni extraen — solo texto y tablas. Si una norma depende de datos que solo están en un gráfico, esa información no llega a la base.",
+    "",
+    "Usa <code>/normaestado document_key</code> para el detalle de una norma puntual, o <code>/normasrevisar</code> para ver cuáles tienen páginas de baja calidad pendientes.",
+  ];
+
+  return lineas.join("\n");
+}
+
 /** Guarda el PDF que un admin subio a mano para UNA norma puntual: lo valida,
  * lo sube a Supabase Storage (mismo bucket que usa el respaldo automatico) y
  * deja la norma en cola para que la corrida horaria de
@@ -1121,6 +1250,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/normarevisar document_key</b>",
     "Te mando un reporte HTML, el PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
+    "",
+    "<b>/normaestado [document_key]</b>",
+    "Reporte de fidelidad: calidad de texto, tablas, OCR, fórmulas y revisión manual. Sin argumento, resume toda la base; con document_key, el detalle de esa norma con un veredicto (confiable / usar con precaución / necesita revisión).",
   ];
 
   return [...base, ...admin].join("\n");
@@ -3112,6 +3244,23 @@ async function handleCommand(
     }
 
     return await enviarInstruccionNormaPdf(chatId, documentKey);
+  }
+
+  if (trimmed === "/normaestado" || trimmed.startsWith("/normaestado ")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const documentKey = trimmed.replace("/normaestado", "").trim();
+
+    try {
+      const reporte = documentKey
+        ? await construirReporteEstadoNorma(documentKey)
+        : await construirReporteEstadoGlobal();
+      return await sendMessage(chatId, reporte);
+    } catch (error) {
+      return await sendMessage(chatId, `⚠️ Error al calcular el estado: ${escapeHtml(String(error))}`);
+    }
   }
 
   if (trimmed.startsWith("/invitar")) {

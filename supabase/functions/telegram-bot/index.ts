@@ -597,22 +597,45 @@ function esFilaSeparadoraMarkdown(celdas: string[]): boolean {
   return celdas.length > 0 && celdas.every((c) => /^:?-{2,}:?$/.test(c));
 }
 
-/** Las tablas que ya estan guardadas en la base se generaron sin acolchar
- * columnas (pipes pegados al texto, sin espacio), lo que en un visor de
- * texto plano se ve como texto corrido y no como tabla. Esto reformatea
- * cualquier bloque "| ... |" ya existente para que se vea como grilla,
- * sin tocar lo que hay guardado en Supabase (solo el texto que se envia
- * al admin para revisar). Las tablas nuevas ya salen acolchadas desde
- * agents/pdf_extract.py.
- *
- * Sin tope de ancho: un tope hacia que las celdas que lo superan quedaran
- * sin acolchar, y como esas celdas varian de largo fila a fila, las
- * columnas siguientes quedaban en una posicion horizontal distinta en cada
- * linea (la tabla se veia descuadrada). Sin tope las lineas pueden ser
- * largas, pero cada columna alinea siempre en la misma posicion. */
-function repararEspaciadoTablasMarkdown(texto: string): string {
+/** Etiqueta legible de una columna para el formato editable: usa el texto
+ * del encabezado, o "Columna N" si venia vacio (columnas sin titulo son
+ * comunes en las normas, ej. la 2da columna de varias tablas de DS-13-2022). */
+function etiquetaColumna(header: string, indice: number): string {
+  const limpio = header.trim();
+  return limpio || `Columna ${indice + 1}`;
+}
+
+/** Convierte una tabla ya partida en filas a un formato "Etiqueta: valor"
+ * por fila, en vez de columnas alineadas con pipes. Ningun acolchado con
+ * espacios puede verse bien en un editor de texto que envuelve lineas
+ * largas (confirmado por el usuario): un campo por linea nunca se
+ * desalinea, sin importar el ancho de la celda ni del editor. */
+function tablaATextoEditable(filas: string[][], indiceSeparador: number, numeroTabla: number): string[] {
+  const encabezados = filas[indiceSeparador - 1].map((h, i) => etiquetaColumna(h, i));
+  const cuerpo = filas.slice(indiceSeparador + 1);
+
+  const lineas: string[] = [
+    `===== TABLA ${numeroTabla} (edita solo el texto despues de ":" en cada linea; no cambies las etiquetas ni las lineas "=====") =====`,
+  ];
+
+  cuerpo.forEach((fila, idx) => {
+    lineas.push(`-- Fila ${idx + 1} --`);
+    encabezados.forEach((etiqueta, col) => {
+      lineas.push(`${etiqueta}: ${fila[col] ?? ""}`);
+    });
+  });
+
+  lineas.push(`===== FIN TABLA ${numeroTabla} =====`);
+  return lineas;
+}
+
+/** Reemplaza cada bloque "| ... |" de tabla real en el texto de una pagina
+ * por su version en formato editable (tablaATextoEditable). El texto que no
+ * es tabla queda intacto. Usada al armar la plantilla .txt que ve el admin. */
+function convertirTablasATextoEditable(texto: string): string {
   const lineas = texto.split("\n");
   const resultado: string[] = [];
+  let numeroTabla = 0;
   let i = 0;
 
   while (i < lineas.length) {
@@ -636,25 +659,100 @@ function repararEspaciadoTablasMarkdown(texto: string): string {
     }
 
     for (const fila of filas) while (fila.length < nColumnas) fila.push("");
+    numeroTabla++;
+    resultado.push(...tablaATextoEditable(filas, indiceSeparador, numeroTabla));
+  }
 
-    const anchos: number[] = [];
-    for (let col = 0; col < nColumnas; col++) {
-      let max = 3;
-      filas.forEach((fila, idx) => {
-        if (idx !== indiceSeparador) max = Math.max(max, fila[col].length);
-      });
-      anchos.push(max);
+  return resultado.join("\n");
+}
+
+/** Parsea UN bloque "===== TABLA N ... =====" .. "===== FIN TABLA N ====="
+ * (ambas lineas incluidas) de vuelta a filas de tabla Markdown ("| a | b |").
+ * Devuelve null si el bloque quedo con un formato irreconocible (por si el
+ * admin borro alguna etiqueta o marca por error), para que quien lo llama
+ * decida como degradar sin perder informacion. */
+function textoEditableATablaMarkdown(lineasBloque: string[]): string[] | null {
+  if (lineasBloque.length < 3) return null;
+
+  const filasBody: string[][] = [];
+  let etiquetas: string[] = [];
+  let filaActual: Map<string, string> | null = null;
+  let ordenEtiquetas: string[] = [];
+
+  const cerrarFila = () => {
+    if (!filaActual) return;
+    if (!etiquetas.length) etiquetas = ordenEtiquetas.slice();
+    const fila = filaActual;
+    filasBody.push(etiquetas.map((e) => fila.get(e) ?? ""));
+    filaActual = null;
+  };
+
+  for (let i = 1; i < lineasBloque.length - 1; i++) {
+    const linea = lineasBloque[i];
+
+    if (/^--\s*Fila\s+\d+\s*--\s*$/.test(linea.trim())) {
+      cerrarFila();
+      filaActual = new Map();
+      ordenEtiquetas = [];
+      continue;
     }
 
-    const formatearCelda = (texto: string, ancho: number) => texto.padEnd(ancho);
+    const match = linea.match(/^(.+?):\s?(.*)$/);
+    if (match && filaActual) {
+      const [, etiqueta, valor] = match;
+      filaActual.set(etiqueta, valor);
+      ordenEtiquetas.push(etiqueta);
+    }
+  }
+  cerrarFila();
 
-    filas.forEach((fila, idx) => {
-      if (idx === indiceSeparador) {
-        resultado.push("| " + anchos.map((a) => "-".repeat(a)).join(" | ") + " |");
-      } else {
-        resultado.push("| " + fila.map((c, col) => formatearCelda(c, anchos[col])).join(" | ") + " |");
-      }
-    });
+  if (!etiquetas.length || !filasBody.length) return null;
+
+  const escaparCelda = (v: string) => v.replace(/\|/g, "\\|");
+  const filaMarkdown = (celdas: string[]) => "| " + celdas.map(escaparCelda).join(" | ") + " |";
+
+  return [
+    filaMarkdown(etiquetas),
+    "| " + etiquetas.map(() => "---").join(" | ") + " |",
+    ...filasBody.map(filaMarkdown),
+  ];
+}
+
+/** Recorre el texto corregido que un admin reenvio y reconstruye cualquier
+ * bloque "===== TABLA N ... =====" en tabla Markdown de nuevo, para que lo
+ * que se guarda en Supabase (y usa /consulta) siga siendo Markdown limpio de
+ * una fila por linea, sin importar el formato editable que vio el admin. Si
+ * un bloque no se puede interpretar, se deja tal cual (no se pierde texto),
+ * aunque queden visibles las marcas "=====". */
+function reconstruirTablasDesdeTextoEditable(texto: string): string {
+  const lineas = texto.split("\n");
+  const resultado: string[] = [];
+  let i = 0;
+
+  while (i < lineas.length) {
+    const inicioMatch = lineas[i].trim().match(/^=====\s*TABLA\s+(\d+)\b.*=====\s*$/);
+    if (!inicioMatch) {
+      resultado.push(lineas[i]);
+      i++;
+      continue;
+    }
+
+    const numero = inicioMatch[1];
+    const finRegex = new RegExp(`^=====\\s*FIN TABLA\\s+${numero}\\s*=====\\s*$`);
+    const inicioBloque = i;
+    let j = i + 1;
+    while (j < lineas.length && !finRegex.test(lineas[j].trim())) j++;
+
+    if (j >= lineas.length) {
+      resultado.push(lineas[i]);
+      i++;
+      continue;
+    }
+
+    const bloque = lineas.slice(inicioBloque, j + 1);
+    const filasMarkdown = textoEditableATablaMarkdown(bloque);
+    resultado.push(...(filasMarkdown ?? bloque));
+    i = j + 1;
   }
 
   return resultado.join("\n");
@@ -663,8 +761,9 @@ function repararEspaciadoTablasMarkdown(texto: string): string {
 /** Arma un <table> HTML real (no texto con pipes) a partir de las filas ya
  * partidas de un bloque Markdown. En un navegador la alineacion de columnas
  * la hace el motor de layout, no espacios contados a mano, asi que no
- * depende de que el visor evite el salto de linea (el problema que si tiene
- * repararEspaciadoTablasMarkdown en un visor de texto plano con wrap). */
+ * depende de que el visor evite el salto de linea (a diferencia de un
+ * archivo de texto plano, donde ningun acolchado con espacios se sostiene
+ * si el editor envuelve lineas largas). */
 function bloqueTablaAHtml(filas: string[][], indiceSeparador: number): string {
   const filasEncabezado = filas.slice(0, indiceSeparador);
   const filasCuerpo = filas.slice(indiceSeparador + 1);
@@ -792,6 +891,8 @@ function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): str
     `# NORMA: ${documentKey}`,
     "# Instrucciones: corrige el texto de cada pagina comparando con el PDF adjunto.",
     "# No modifiques ni borres las lineas que empiezan con \"### PAGINA\".",
+    "# Las tablas se muestran como \"Etiqueta: valor\" por fila (no como columnas con |).",
+    "# Edita solo lo que va despues de los \":\" -- no cambies las etiquetas ni las lineas \"=====\".",
     "# Cuando termines, reenvia este mismo archivo (como documento, no como texto) a este chat.",
     "",
   ].join("\n");
@@ -804,7 +905,7 @@ function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): str
       p.posible_formula ? "posible formula/notacion tecnica" : null,
     ].filter(Boolean).join(", ");
 
-    const texto = repararEspaciadoTablasMarkdown(p.text_normalized ?? p.text_raw ?? "");
+    const texto = convertirTablasATextoEditable(p.text_normalized ?? p.text_raw ?? "");
     return `### PAGINA ${p.page_number} (${motivo})\n${texto}\n`;
   });
 
@@ -952,7 +1053,7 @@ async function aplicarRevisionManualNorma(
     if (!match) continue;
 
     const pageNumber = parseInt(match[1], 10);
-    const textoCorregido = match[2].trim().normalize("NFC");
+    const textoCorregido = reconstruirTablasDesdeTextoEditable(match[2].trim().normalize("NFC"));
 
     if (!textoCorregido) continue;
 

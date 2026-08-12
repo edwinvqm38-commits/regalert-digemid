@@ -660,6 +660,71 @@ function repararEspaciadoTablasMarkdown(texto: string): string {
   return resultado.join("\n");
 }
 
+/** Arma un <table> HTML real (no texto con pipes) a partir de las filas ya
+ * partidas de un bloque Markdown. En un navegador la alineacion de columnas
+ * la hace el motor de layout, no espacios contados a mano, asi que no
+ * depende de que el visor evite el salto de linea (el problema que si tiene
+ * repararEspaciadoTablasMarkdown en un visor de texto plano con wrap). */
+function bloqueTablaAHtml(filas: string[][], indiceSeparador: number): string {
+  const filasEncabezado = filas.slice(0, indiceSeparador);
+  const filasCuerpo = filas.slice(indiceSeparador + 1);
+
+  const filaHtml = (celdas: string[], etiqueta: "th" | "td") =>
+    "<tr>" + celdas.map((c) => `<${etiqueta}>${escapeHtml(c)}</${etiqueta}>`).join("") + "</tr>";
+
+  return (
+    `<table class="tabla-extraida">` +
+    `<thead>${filasEncabezado.map((f) => filaHtml(f, "th")).join("")}</thead>` +
+    `<tbody>${filasCuerpo.map((f) => filaHtml(f, "td")).join("")}</tbody>` +
+    `</table>`
+  );
+}
+
+/** Recorre el texto de una pagina y, cada vez que encuentra un bloque
+ * Markdown "| ... |" que parece tabla real, lo reemplaza por un <table>
+ * HTML; el resto del texto queda como <pre> normal. */
+function renderTextoConTablasHtml(texto: string): string {
+  const lineas = texto.split("\n");
+  const partes: string[] = [];
+  let bufferTexto: string[] = [];
+  let i = 0;
+
+  const flushTexto = () => {
+    if (bufferTexto.length) {
+      partes.push(`<pre>${escapeHtml(bufferTexto.join("\n"))}</pre>`);
+      bufferTexto = [];
+    }
+  };
+
+  while (i < lineas.length) {
+    if (!lineas[i].trim().startsWith("|")) {
+      bufferTexto.push(lineas[i]);
+      i++;
+      continue;
+    }
+
+    const inicioBloque = i;
+    while (i < lineas.length && lineas[i].trim().startsWith("|")) i++;
+    const bloque = lineas.slice(inicioBloque, i);
+
+    const filas = bloque.map(partirFilaMarkdown);
+    const nColumnas = Math.max(...filas.map((f) => f.length));
+    const indiceSeparador = filas.findIndex((f) => esFilaSeparadoraMarkdown(f));
+
+    if (bloque.length < 2 || nColumnas < 2 || indiceSeparador === -1) {
+      bufferTexto.push(...bloque);
+      continue;
+    }
+
+    flushTexto();
+    for (const fila of filas) while (fila.length < nColumnas) fila.push("");
+    partes.push(bloqueTablaAHtml(filas, indiceSeparador));
+  }
+
+  flushTexto();
+  return partes.join("\n");
+}
+
 function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   const filas = paginas
     .map((p) => {
@@ -669,14 +734,14 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
         p.posible_formula ? "posible fórmula/notación técnica" : null,
       ].filter(Boolean).join(" · ");
 
-      const muestra = escapeHtml(repararEspaciadoTablasMarkdown(p.text_normalized ?? p.text_raw ?? "").slice(0, 500));
+      const muestra = renderTextoConTablasHtml(p.text_normalized ?? p.text_raw ?? "");
 
       return `
         <tr>
           <td>${p.page_number}</td>
           <td>${p.quality_score}</td>
           <td>${motivo}</td>
-          <td><pre>${muestra}</pre></td>
+          <td>${muestra}</td>
         </tr>`;
     })
     .join("\n");
@@ -694,6 +759,16 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   th { background: #f0f0f0; }
   pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
   .nota { background: #fff8e1; border: 1px solid #ffe082; padding: 0.75rem; border-radius: 6px; }
+  /* Tablas extraidas de una pagina (dentro de la celda "Texto extraido"):
+     scroll horizontal propio para que una tabla ancha no rompa el layout
+     de la tabla de revision que la contiene. */
+  td:has(table.tabla-extraida) { overflow-x: auto; display: block; max-width: 90vw; }
+  table.tabla-extraida { width: auto; margin: 0.5rem 0; }
+  table.tabla-extraida th, table.tabla-extraida td {
+    border: 1px solid #999; padding: 0.35rem 0.6rem; font-size: 0.8rem;
+    max-width: 420px; white-space: normal; word-break: break-word;
+  }
+  table.tabla-extraida th { background: #eef2ff; }
 </style>
 </head>
 <body>

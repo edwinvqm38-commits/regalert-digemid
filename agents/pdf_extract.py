@@ -132,6 +132,54 @@ def _pdfplumber_page_text(pdf_path: str, page_index: int) -> str:
         return ""
 
 
+def _tabla_a_markdown(tabla: list[list]) -> str:
+    """Convierte una tabla de pdfplumber (filas de celdas) a una tabla
+    Markdown real, para que /consulta reciba la correspondencia fila-columna
+    en vez de texto aplanado. Los LLM interpretan tablas Markdown de forma
+    mucho mas confiable que texto corrido con espacios."""
+    def limpiar_celda(celda) -> str:
+        texto = "" if celda is None else str(celda)
+        # Un salto de linea dentro de una celda rompería la fila Markdown.
+        texto = " ".join(texto.split())
+        return texto.replace("|", "\\|")
+
+    filas = [[limpiar_celda(c) for c in fila] for fila in tabla]
+    n_columnas = max(len(fila) for fila in filas)
+    filas = [fila + [""] * (n_columnas - len(fila)) for fila in filas]
+
+    encabezado = filas[0]
+    resto = filas[1:]
+
+    lineas = [
+        "| " + " | ".join(encabezado) + " |",
+        "| " + " | ".join(["---"] * n_columnas) + " |",
+    ]
+    lineas.extend("| " + " | ".join(fila) + " |" for fila in resto)
+
+    return "\n".join(lineas)
+
+
+def tablas_a_markdown(tablas: list[list[list]] | None) -> str:
+    """Convierte todas las tablas detectadas en una pagina a bloques Markdown
+    numerados (por si hay mas de una tabla en la misma pagina, como en los
+    cuadros de anexos de El Peruano)."""
+    if not tablas:
+        return ""
+
+    bloques = []
+    for indice, tabla in enumerate(tablas, start=1):
+        try:
+            md = _tabla_a_markdown(tabla)
+        except Exception as error:
+            logger.warning("No se pudo convertir tabla %s a Markdown: %s", indice, error)
+            continue
+        if md:
+            etiqueta = f"Tabla {indice}" if len(tablas) > 1 else "Tabla"
+            bloques.append(f"{etiqueta}:\n{md}")
+
+    return "\n\n".join(bloques)
+
+
 def _pdfplumber_tables(pdf_path: str, page_index: int) -> list:
     """Detecta tablas reales (>=2 filas y >=2 columnas) para guardarlas como
     estructura ademas del texto plano: aplanar una tabla a texto corrido
@@ -258,17 +306,29 @@ def extract_page(pdf_path: str, page: "fitz.Page", page_index: int) -> PageExtra
             best = max(candidates, key=lambda c: c[2])
 
     tablas = _pdfplumber_tables(pdf_path, page_index)
+    posible_formula_detectada = posible_formula(best[1])
+
+    # Las tablas se agregan al texto final (no al que se usa para elegir el
+    # metodo/quality_score, que evalua solo la prosa) como Markdown real, en
+    # vez de dejarlas solo en `tables` (estructura) sin usar: asi /consulta
+    # recibe la correspondencia fila-columna en el mismo texto que ya busca y
+    # cita, sin tocar el SQL ni el bot.
+    texto_final = best[1]
+    if tablas:
+        markdown_tablas = tablas_a_markdown(tablas)
+        if markdown_tablas:
+            texto_final = f"{texto_final}\n\n{markdown_tablas}".strip()
 
     return PageExtraction(
         page_number=page_index + 1,
-        text=best[1],
+        text=texto_final,
         method=best[0],
         quality=round(best[2], 3),
         ocr_used=best[3],
         ocr_confidence=round(best[4], 3) if best[4] is not None else None,
         has_tables=bool(tablas),
         tables=tablas or None,
-        posible_formula=posible_formula(best[1]),
+        posible_formula=posible_formula_detectada,
     )
 
 

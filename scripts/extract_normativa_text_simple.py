@@ -86,6 +86,7 @@ def get_pending_normas(
     supabase,
     limit: int,
     document_key: str | None = None,
+    document_keys: list[str] | None = None,
     retry_errors: bool = False,
 ) -> list[dict]:
     query = (
@@ -94,6 +95,12 @@ def get_pending_normas(
         .not_.is_("pdf_url", "null")
         .neq("pdf_url", "")
     )
+    if document_keys:
+        response = query.in_("document_key", document_keys).execute()
+        # Con document_keys explicitos reprocesamos aunque ya tengan paginas
+        # (ej. backfill de normas con tablas detectadas antes de que
+        # extract_page() empezara a convertirlas a Markdown).
+        return response.data or []
     if document_key:
         response = query.eq("document_key", document_key).limit(limit).execute()
         # Con un document_key explícito reprocesamos aunque ya tenga páginas.
@@ -569,6 +576,12 @@ def main():
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--document-key", default=None,
                         help="Reprocesar SOLO esta norma (borra sus páginas y las regenera).")
+    parser.add_argument(
+        "--document-keys",
+        default=None,
+        help="Reprocesar varias normas en una sola corrida (document_key separados por coma). "
+             "Para backfills, ej. normas con has_tables=true procesadas antes de un cambio en la extracción.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-telegram", action="store_true")
     parser.add_argument(
@@ -584,10 +597,16 @@ def main():
     estado_antes = contar_estado_normativa(supabase)
     total_universo = estado_antes["total"]
     con_texto_antes = estado_antes["con_texto"]
+    document_keys = (
+        [key.strip() for key in args.document_keys.split(",") if key.strip()]
+        if args.document_keys
+        else None
+    )
     normas = get_pending_normas(
         supabase,
         args.limit,
         args.document_key,
+        document_keys=document_keys,
         retry_errors=args.retry_errors,
     )
     logger.info(

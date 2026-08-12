@@ -61,6 +61,12 @@ PAGINA donde esta el sustento. Cada bloque del contexto indica su document_key y
 su numero de pagina.
 - No reemplazas al Director Tecnico ni a la autoridad sanitaria; tu respuesta \
 es informativa, no una decision regulatoria.
+- Si el bloque que usaste para responder trae una linea "ADVERTENCIA DE \
+CONFIABILIDAD", tu respuesta se apoya en una transcripcion no verificada por \
+un humano (posible error de OCR, tabla aplanada a texto, o formula/notacion \
+tecnica). En ese caso agrega una linea final: "⚠️ Verificar con el PDF \
+original: [motivo breve]". No uses ese aviso si el bloque no trae la \
+advertencia — no le bajes confianza a contenido ya verificado.
 - Para resaltar nombres de productos, numeros de alerta/norma y terminos clave, \
 usa negrita en formato HTML de Telegram: <b>texto</b>. No uses markdown (**texto**).
 
@@ -72,6 +78,10 @@ rapido en un celular:
 [2 a 4 lineas de detalle de apoyo, con terminos clave en <b>negrita</b>]
 
 📌 Fuente: <b>[numero de alerta o codigo de norma]</b> — [fecha], pag. [numero de pagina]
+
+[SOLO si el bloque usado trae "ADVERTENCIA DE CONFIABILIDAD": una linea final \
+"⚠️ Verificar con el PDF original: [motivo breve]". Omite esta linea por completo \
+si no aplica.]
 
 No agregues secciones adicionales ni encabezados fuera de esta estructura. El link \
 oficial del documento se muestra aparte en un boton, no lo incluyas en el texto.`;
@@ -1515,14 +1525,58 @@ function esConsultaDeConteoAlertas(pregunta: string): boolean {
   return preguntaCuantas && mencionaAlertas && ambitoTemporalAlertas(pregunta) !== null;
 }
 
+const UMBRAL_CONTEXTO_BAJA_CALIDAD = 0.5;
+const UMBRAL_CONTEXTO_MEDIA_CALIDAD = 0.85;
+
+/** Advertencias de confiabilidad para un bloque de contexto, a partir de las
+ * senales que ya calcula la extraccion (quality_score, has_tables,
+ * posible_formula, revisado_manual) pero que hasta ahora se quedaban solo en
+ * el flujo de revision manual de admin y nunca llegaban a la IA que responde
+ * /consulta. Sin esto, la IA citaba paginas OCR de baja confianza o tablas
+ * aplanadas a texto corrido con la misma seguridad que contenido verificado. */
+function advertenciasDelBloque(chunk: any): string[] {
+  if (chunk.revisado_manual) return [];
+
+  const advertencias: string[] = [];
+
+  if (chunk.quality_score != null && chunk.quality_score < UMBRAL_CONTEXTO_BAJA_CALIDAD) {
+    advertencias.push(
+      "transcripcion de BAJA confiabilidad (posible error de OCR/lectura), no verificada por un humano",
+    );
+  } else if (chunk.quality_score != null && chunk.quality_score < UMBRAL_CONTEXTO_MEDIA_CALIDAD) {
+    advertencias.push("transcripcion de confiabilidad media, no verificada por un humano");
+  }
+
+  if (chunk.has_tables) {
+    advertencias.push(
+      "esta pagina contiene una tabla; el texto de abajo esta aplanado y puede no reflejar bien la correspondencia fila-columna",
+    );
+  }
+
+  if (chunk.posible_formula) {
+    advertencias.push(
+      "esta pagina puede contener una formula o notacion tecnica que la transcripcion no reconstruye con fidelidad",
+    );
+  }
+
+  return advertencias;
+}
+
 function buildConsultaContext(chunks: any[]) {
   return chunks
     .map((chunk) => {
-      return [
+      const bloque = [
         `[Documento ${chunk.document_key} - ${chunk.title} - ${chunk.published_date} - pagina ${chunk.page_number}]`,
-        chunk.text_content,
-        `Link oficial: ${chunk.detail_url}`,
-      ].join("\n");
+      ];
+
+      const advertencias = advertenciasDelBloque(chunk);
+      if (advertencias.length) {
+        bloque.push(`ADVERTENCIA DE CONFIABILIDAD: ${advertencias.join("; ")}.`);
+      }
+
+      bloque.push(chunk.text_content);
+      bloque.push(`Link oficial: ${chunk.detail_url}`);
+      return bloque.join("\n");
     })
     .join("\n\n---\n\n");
 }

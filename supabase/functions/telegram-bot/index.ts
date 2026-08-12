@@ -584,6 +584,79 @@ async function getPaginasConTablas(documentKey: string) {
   return { norma, paginas: paginas ?? [] };
 }
 
+const MAX_ANCHO_COLUMNA_TABLA_REPARADA = 40;
+
+/** Parte una fila Markdown "| a | b |" en sus celdas, sin partir por un
+ * pipe escapado ("\|") que pueda venir dentro del texto de una celda. */
+function partirFilaMarkdown(linea: string): string[] {
+  const celdas = linea.trim().split(/(?<!\\)\|/).map((c) => c.trim());
+  if (celdas.length && celdas[0] === "") celdas.shift();
+  if (celdas.length && celdas[celdas.length - 1] === "") celdas.pop();
+  return celdas;
+}
+
+function esFilaSeparadoraMarkdown(celdas: string[]): boolean {
+  return celdas.length > 0 && celdas.every((c) => /^:?-{2,}:?$/.test(c));
+}
+
+/** Las tablas que ya estan guardadas en la base se generaron sin acolchar
+ * columnas (pipes pegados al texto, sin espacio), lo que en un visor de
+ * texto plano se ve como texto corrido y no como tabla. Esto reformatea
+ * cualquier bloque "| ... |" ya existente para que se vea como grilla,
+ * sin tocar lo que hay guardado en Supabase (solo el texto que se envia
+ * al admin para revisar). Las tablas nuevas ya salen acolchadas desde
+ * agents/pdf_extract.py. */
+function repararEspaciadoTablasMarkdown(texto: string): string {
+  const lineas = texto.split("\n");
+  const resultado: string[] = [];
+  let i = 0;
+
+  while (i < lineas.length) {
+    if (!lineas[i].trim().startsWith("|")) {
+      resultado.push(lineas[i]);
+      i++;
+      continue;
+    }
+
+    const inicioBloque = i;
+    while (i < lineas.length && lineas[i].trim().startsWith("|")) i++;
+    const bloque = lineas.slice(inicioBloque, i);
+
+    const filas = bloque.map(partirFilaMarkdown);
+    const nColumnas = Math.max(...filas.map((f) => f.length));
+    const indiceSeparador = filas.findIndex((f) => esFilaSeparadoraMarkdown(f));
+
+    if (bloque.length < 2 || nColumnas < 2 || indiceSeparador === -1) {
+      resultado.push(...bloque);
+      continue;
+    }
+
+    for (const fila of filas) while (fila.length < nColumnas) fila.push("");
+
+    const anchos: number[] = [];
+    for (let col = 0; col < nColumnas; col++) {
+      let max = 3;
+      filas.forEach((fila, idx) => {
+        if (idx !== indiceSeparador) max = Math.max(max, fila[col].length);
+      });
+      anchos.push(Math.min(max, MAX_ANCHO_COLUMNA_TABLA_REPARADA));
+    }
+
+    const formatearCelda = (texto: string, ancho: number) =>
+      texto.length <= ancho ? texto.padEnd(ancho) : texto;
+
+    filas.forEach((fila, idx) => {
+      if (idx === indiceSeparador) {
+        resultado.push("| " + anchos.map((a) => "-".repeat(a)).join(" | ") + " |");
+      } else {
+        resultado.push("| " + fila.map((c, col) => formatearCelda(c, anchos[col])).join(" | ") + " |");
+      }
+    });
+  }
+
+  return resultado.join("\n");
+}
+
 function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   const filas = paginas
     .map((p) => {
@@ -593,7 +666,7 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
         p.posible_formula ? "posible fórmula/notación técnica" : null,
       ].filter(Boolean).join(" · ");
 
-      const muestra = escapeHtml((p.text_normalized ?? p.text_raw ?? "").slice(0, 500));
+      const muestra = escapeHtml(repararEspaciadoTablasMarkdown(p.text_normalized ?? p.text_raw ?? "").slice(0, 500));
 
       return `
         <tr>
@@ -653,7 +726,8 @@ function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): str
       p.posible_formula ? "posible formula/notacion tecnica" : null,
     ].filter(Boolean).join(", ");
 
-    return `### PAGINA ${p.page_number} (${motivo})\n${p.text_normalized ?? p.text_raw ?? ""}\n`;
+    const texto = repararEspaciadoTablasMarkdown(p.text_normalized ?? p.text_raw ?? "");
+    return `### PAGINA ${p.page_number} (${motivo})\n${texto}\n`;
   });
 
   return `${encabezado}\n${bloques.join("\n")}`;

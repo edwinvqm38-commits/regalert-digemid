@@ -584,8 +584,6 @@ async function getPaginasConTablas(documentKey: string) {
   return { norma, paginas: paginas ?? [] };
 }
 
-const MAX_ANCHO_COLUMNA_TABLA_REPARADA = 40;
-
 /** Parte una fila Markdown "| a | b |" en sus celdas, sin partir por un
  * pipe escapado ("\|") que pueda venir dentro del texto de una celda. */
 function partirFilaMarkdown(linea: string): string[] {
@@ -605,7 +603,13 @@ function esFilaSeparadoraMarkdown(celdas: string[]): boolean {
  * cualquier bloque "| ... |" ya existente para que se vea como grilla,
  * sin tocar lo que hay guardado en Supabase (solo el texto que se envia
  * al admin para revisar). Las tablas nuevas ya salen acolchadas desde
- * agents/pdf_extract.py. */
+ * agents/pdf_extract.py.
+ *
+ * Sin tope de ancho: un tope hacia que las celdas que lo superan quedaran
+ * sin acolchar, y como esas celdas varian de largo fila a fila, las
+ * columnas siguientes quedaban en una posicion horizontal distinta en cada
+ * linea (la tabla se veia descuadrada). Sin tope las lineas pueden ser
+ * largas, pero cada columna alinea siempre en la misma posicion. */
 function repararEspaciadoTablasMarkdown(texto: string): string {
   const lineas = texto.split("\n");
   const resultado: string[] = [];
@@ -639,11 +643,10 @@ function repararEspaciadoTablasMarkdown(texto: string): string {
       filas.forEach((fila, idx) => {
         if (idx !== indiceSeparador) max = Math.max(max, fila[col].length);
       });
-      anchos.push(Math.min(max, MAX_ANCHO_COLUMNA_TABLA_REPARADA));
+      anchos.push(max);
     }
 
-    const formatearCelda = (texto: string, ancho: number) =>
-      texto.length <= ancho ? texto.padEnd(ancho) : texto;
+    const formatearCelda = (texto: string, ancho: number) => texto.padEnd(ancho);
 
     filas.forEach((fila, idx) => {
       if (idx === indiceSeparador) {

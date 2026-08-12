@@ -180,11 +180,38 @@ def tablas_a_markdown(tablas: list[list[list]] | None) -> str:
     return "\n\n".join(bloques)
 
 
+_MIN_CELDAS_NO_VACIAS_TABLA = 3
+_MIN_CARACTERES_TABLA = 20
+
+
+def _tabla_parece_real(tabla: list[list]) -> bool:
+    """pdfplumber a veces "detecta" como tabla un par de lineas de layout
+    (ej. una columna de margen o un salto de seccion) sin ninguna tabla real
+    ahi: el resultado es una grilla de 2x2 casi vacia con un fragmento de
+    palabra suelto. Agregar eso al texto de busqueda es puro ruido, peor que
+    no agregar nada, asi que se descarta antes de convertir a Markdown."""
+    celdas_no_vacias = 0
+    total_caracteres = 0
+
+    for fila in tabla:
+        for celda in fila:
+            texto = (str(celda) if celda is not None else "").strip()
+            if texto:
+                celdas_no_vacias += 1
+                total_caracteres += len(texto)
+
+    return (
+        celdas_no_vacias >= _MIN_CELDAS_NO_VACIAS_TABLA
+        and total_caracteres >= _MIN_CARACTERES_TABLA
+    )
+
+
 def _pdfplumber_tables(pdf_path: str, page_index: int) -> list:
-    """Detecta tablas reales (>=2 filas y >=2 columnas) para guardarlas como
-    estructura ademas del texto plano: aplanar una tabla a texto corrido
-    pierde la correspondencia fila-columna que suele importar en normas
-    (ej. escalas de sanciones, cronogramas, cuadros de requisitos)."""
+    """Detecta tablas reales (>=2 filas y >=2 columnas, con suficiente
+    contenido para no ser ruido de layout) para guardarlas como estructura
+    ademas del texto plano: aplanar una tabla a texto corrido pierde la
+    correspondencia fila-columna que suele importar en normas (ej. escalas
+    de sanciones, cronogramas, cuadros de requisitos)."""
     if not _HAS_PDFPLUMBER:
         return []
     try:
@@ -196,6 +223,7 @@ def _pdfplumber_tables(pdf_path: str, page_index: int) -> list:
             return [
                 tabla for tabla in tablas
                 if len(tabla) > 1 and tabla[0] and len(tabla[0]) > 1
+                and _tabla_parece_real(tabla)
             ]
     except Exception as error:
         logger.warning("Detección de tablas falló en página %s: %s", page_index + 1, error)

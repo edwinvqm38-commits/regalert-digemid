@@ -605,16 +605,81 @@ function etiquetaColumna(header: string, indice: number): string {
   return limpio || `Columna ${indice + 1}`;
 }
 
-/** Convierte una tabla ya partida en filas a un formato "Etiqueta: valor"
- * por fila, en vez de columnas alineadas con pipes. Ningun acolchado con
- * espacios puede verse bien en un editor de texto que envuelve lineas
- * largas (confirmado por el usuario): un campo por linea nunca se
- * desalinea, sin importar el ancho de la celda ni del editor. */
+const ANCHO_MAX_COLUMNA_VISTA_PREVIA = 28;
+
+/** Envuelve un texto a lineas de a lo sumo `ancho` caracteres, cortando por
+ * palabra completa (nunca a la mitad de una palabra). */
+function envolverTexto(texto: string, ancho: number): string[] {
+  const palabras = texto.split(/\s+/).filter(Boolean);
+  const lineas: string[] = [];
+  let actual = "";
+
+  for (const palabra of palabras) {
+    const candidato = actual ? `${actual} ${palabra}` : palabra;
+    if (candidato.length > ancho && actual) {
+      lineas.push(actual);
+      actual = palabra;
+    } else {
+      actual = candidato;
+    }
+  }
+  if (actual) lineas.push(actual);
+  return lineas.length ? lineas : [""];
+}
+
+/** Grilla de SOLO LECTURA con columnas siempre alineadas: cada celda se
+ * envuelve (word-wrap) a un ancho fijo por columna, ocupando varias lineas
+ * fisicas si hace falta, con las demas columnas de esa fila acolchadas en
+ * blanco en las lineas de continuacion. A diferencia del acolchado sin
+ * limite (PR #39), el ancho tope por columna mantiene cada linea corta, asi
+ * que no depende de que el editor evite el word-wrap propio. Es solo para
+ * que el admin UBIQUE visualmente los datos antes de editar en el bloque
+ * "===== TABLA N =====" de abajo — no se vuelve a leer al reconstruir. */
+function tablaAGrillaAlineada(filas: string[][], indiceSeparador: number): string[] {
+  const nColumnas = filas[indiceSeparador - 1].length;
+  const anchos = Array.from({ length: nColumnas }, (_, col) => {
+    const max = Math.max(3, ...filas.map((f) => (f[col] ?? "").length));
+    return Math.min(max, ANCHO_MAX_COLUMNA_VISTA_PREVIA);
+  });
+
+  const filaAGrilla = (fila: string[]): string[] => {
+    const celdasEnvueltas = fila.map((c, i) => envolverTexto(c ?? "", anchos[i]));
+    const maxLineas = Math.max(...celdasEnvueltas.map((c) => c.length));
+    const lineasFila: string[] = [];
+    for (let l = 0; l < maxLineas; l++) {
+      const partes = celdasEnvueltas.map((c, i) => (c[l] ?? "").padEnd(anchos[i]));
+      lineasFila.push("| " + partes.join(" | ") + " |");
+    }
+    return lineasFila;
+  };
+
+  const resultado: string[] = [];
+  resultado.push(...filaAGrilla(filas[indiceSeparador - 1]));
+  resultado.push("| " + anchos.map((a) => "-".repeat(a)).join(" | ") + " |");
+  for (const fila of filas.slice(indiceSeparador + 1)) {
+    resultado.push(...filaAGrilla(fila));
+  }
+  return resultado;
+}
+
+/** Convierte una tabla ya partida en filas a: (1) una vista previa de solo
+ * lectura con columnas alineadas de verdad (envueltas a ancho fijo, para
+ * que el admin ubique visualmente cada dato), seguida de (2) el formato
+ * editable "Etiqueta: valor" por fila. Ningun acolchado con espacios puede
+ * verse bien en un editor de texto que envuelve lineas largas (confirmado
+ * por el usuario), asi que la parte que de verdad se edita usa un campo por
+ * linea, que nunca se desalinea sin importar el ancho de la celda ni del
+ * editor; la grilla de arriba es solo para lectura, se regenera cada vez y
+ * se descarta al reconstruir (reconstruirTablasDesdeTextoEditable). */
 function tablaATextoEditable(filas: string[][], indiceSeparador: number, numeroTabla: number): string[] {
   const encabezados = filas[indiceSeparador - 1].map((h, i) => etiquetaColumna(h, i));
   const cuerpo = filas.slice(indiceSeparador + 1);
 
   const lineas: string[] = [
+    `----- VISTA PREVIA TABLA ${numeroTabla} (solo para ubicar los datos; NO la edites, no se guarda) -----`,
+    ...tablaAGrillaAlineada(filas, indiceSeparador),
+    `----- FIN VISTA PREVIA TABLA ${numeroTabla} -----`,
+    "",
     `===== TABLA ${numeroTabla} (edita solo el texto despues de ":" en cada linea; no cambies las etiquetas ni las lineas "=====") =====`,
   ];
 
@@ -730,6 +795,26 @@ function reconstruirTablasDesdeTextoEditable(texto: string): string {
   let i = 0;
 
   while (i < lineas.length) {
+    // La vista previa es solo de lectura: se descarta entera (editada o no)
+    // en vez de guardarla, para no duplicar la tabla dentro del texto final.
+    const inicioVistaPrevia = lineas[i].trim().match(/^-----\s*VISTA PREVIA TABLA\s+(\d+)\b.*-----\s*$/);
+    if (inicioVistaPrevia) {
+      const numeroVista = inicioVistaPrevia[1];
+      const finVistaRegex = new RegExp(`^-----\\s*FIN VISTA PREVIA TABLA\\s+${numeroVista}\\s*-----\\s*$`);
+      let k = i + 1;
+      while (k < lineas.length && !finVistaRegex.test(lineas[k].trim())) k++;
+      if (k < lineas.length) {
+        i = k + 1;
+        if (i < lineas.length && lineas[i].trim() === "") i++;
+        continue;
+      }
+      // No se encontro el cierre de la vista previa: se deja tal cual para
+      // no perder texto, aunque queden las marcas visibles.
+      resultado.push(lineas[i]);
+      i++;
+      continue;
+    }
+
     const inicioMatch = lineas[i].trim().match(/^=====\s*TABLA\s+(\d+)\b.*=====\s*$/);
     if (!inicioMatch) {
       resultado.push(lineas[i]);

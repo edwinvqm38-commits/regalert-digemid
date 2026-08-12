@@ -132,20 +132,19 @@ def _pdfplumber_page_text(pdf_path: str, page_index: int) -> str:
         return ""
 
 
-_MAX_ANCHO_COLUMNA_TABLA = 40
-
-
 def _tabla_a_markdown(tabla: list[list]) -> str:
     """Convierte una tabla de pdfplumber (filas de celdas) a una tabla
     Markdown real, para que /consulta reciba la correspondencia fila-columna
     en vez de texto aplanado. Los LLM interpretan tablas Markdown de forma
     mucho mas confiable que texto corrido con espacios.
 
-    Las columnas se acolchan (padding) a un ancho fijo por columna, con un
-    tope, para que un humano leyendo el .txt/.html de revision vea una
-    grilla real en vez de pipes pegados sin espacio. El tope evita que una
-    sola celda de descripcion larga (frecuente en normas) estire todas las
-    demas filas de esa columna a cientos de caracteres."""
+    Las columnas se acolchan (padding) al ancho real de su celda mas larga,
+    SIN tope: un tope hacia que las celdas que lo superan quedaran sin
+    acolchar, y como esas celdas varian de largo fila a fila, las columnas
+    siguientes de esa fila quedaban en una posicion horizontal distinta en
+    cada linea (la tabla se veia descuadrada en vez de como grilla). Sin
+    tope las lineas pueden ser largas, pero cada columna alinea siempre en
+    la misma posicion en todas las filas."""
     def limpiar_celda(celda) -> str:
         texto = "" if celda is None else str(celda)
         # Un salto de linea dentro de una celda rompería la fila Markdown.
@@ -157,13 +156,12 @@ def _tabla_a_markdown(tabla: list[list]) -> str:
     filas = [fila + [""] * (n_columnas - len(fila)) for fila in filas]
 
     anchos = [
-        min(max((len(fila[col]) for fila in filas), default=3), _MAX_ANCHO_COLUMNA_TABLA)
+        max(max((len(fila[col]) for fila in filas), default=3), 3)
         for col in range(n_columnas)
     ]
-    anchos = [max(ancho, 3) for ancho in anchos]
 
     def formatear_celda(texto: str, ancho: int) -> str:
-        return texto.ljust(ancho) if len(texto) <= ancho else texto
+        return texto.ljust(ancho)
 
     def formatear_fila(fila: list[str]) -> str:
         return "| " + " | ".join(formatear_celda(c, anchos[i]) for i, c in enumerate(fila)) + " |"

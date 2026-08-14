@@ -4,13 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Modo de ejecucion"
+        description: "Modo de ejecucion: dry-run (solo lista candidatas), report (llama al modelo y arma un HTML con diferencias resaltadas, sin escribir en Supabase) o apply (guarda en Supabase)"
         required: true
-        default: "dry-run"
+        default: "report"
         type: choice
         options:
           - dry-run
+          - report
           - apply
+      filtro:
+        description: "Que paginas revisar"
+        required: true
+        default: "todas-pendientes"
+        type: choice
+        options:
+          - todas-pendientes
+          - calidad-baja
+          - tablas-pendientes
       limit:
         description: "Maximo de paginas a procesar"
         required: false
@@ -86,10 +96,15 @@ jobs:
             --limit "${{ inputs.limit }}"
             --quality-below "${{ inputs.quality_below }}"
             --provider "${{ inputs.provider }}"
+            --filtro "${{ inputs.filtro }}"
           )
 
           if [[ "${{ inputs.mode }}" == "apply" ]]; then
             CMD+=(--apply)
+          fi
+
+          if [[ "${{ inputs.mode }}" == "report" ]]; then
+            CMD+=(--report-html reporte_diferencias.html)
           fi
 
           if [[ "${{ inputs.replace_text }}" == "true" ]]; then
@@ -106,3 +121,11 @@ jobs:
           printf 'Ejecutando: %q ' "${CMD[@]}"
           printf '\n'
           "${CMD[@]}"
+
+      - name: Subir reporte de diferencias
+        if: inputs.mode == 'report'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-diferencias-ocr
+          path: reporte_diferencias.html
+          retention-days: 14

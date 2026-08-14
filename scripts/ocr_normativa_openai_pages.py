@@ -1,8 +1,10 @@
 """Reprocesa paginas normativas de baja calidad con vision OCR via API.
 
 Uso recomendado:
-  1. Correr primero en dry-run para ver candidatas.
-  2. Correr con --apply para guardar la transcripcion IA en metadata.
+  1. Correr primero con --report-html para ver un reporte de diferencias
+     resaltadas (actual vs transcripcion IA) SIN escribir nada en Supabase.
+  2. Revisar el reporte; para las paginas que si conviene aplicar, correr de
+     nuevo con --apply para guardar la transcripcion IA en metadata.
   3. Agregar --replace-text solo cuando se quiere que /consulta use ese texto.
 
 La salida del modelo no se trata como verdad absoluta: siempre queda guardada
@@ -11,6 +13,7 @@ la extraccion previa en metadata cuando se reemplaza text_raw/text_normalized.
 
 import argparse
 import base64
+import difflib
 import json
 import logging
 import os
@@ -62,8 +65,26 @@ def parse_args():
     parser.add_argument("--document-key")
     parser.add_argument("--quality-below", type=float, default=0.85)
     parser.add_argument("--all-pages", action="store_true")
+    parser.add_argument(
+        "--filtro",
+        choices=["calidad-baja", "tablas-pendientes", "todas-pendientes"],
+        default="calidad-baja",
+        help=(
+            "calidad-baja: quality_score < --quality-below (comportamiento previo). "
+            "tablas-pendientes: has_tables=true y tabla_verificada=false. "
+            "todas-pendientes: union de las dos anteriores (lo que /normaestado marca como pendiente)."
+        ),
+    )
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--replace-text", action="store_true")
+    parser.add_argument(
+        "--report-html",
+        help=(
+            "Ruta de salida para un reporte HTML con diff resaltado (actual vs transcripcion IA). "
+            "Modo de SOLO LECTURA: llama al modelo de vision pero NUNCA escribe en Supabase, "
+            "sin importar --apply. Para aplicar despues de revisar el reporte, correr de nuevo con --apply."
+        ),
+    )
     parser.add_argument(
         "--provider",
         choices=["openai", "openrouter"],
@@ -91,6 +112,26 @@ def norm_text(value: str | None) -> str:
     return " ".join((value or "").split()).strip()
 
 
+PAGE_SELECT = (
+    "id, norma_id, page_number, text_raw, text_normalized, extraction_method, "
+    "quality_score, has_tables, tabla_verificada, metadata"
+)
+
+
+def aplicar_filtro_pendientes(query, args):
+    """Aplica el mismo criterio de 'pendiente' que ya usa /normaestado en el
+    bot: calidad-baja (quality_score < umbral), tablas-pendientes (tabla
+    detectada sin verificar a mano) o la union de ambas."""
+    if args.filtro == "calidad-baja":
+        return query.lt("quality_score", args.quality_below)
+    if args.filtro == "tablas-pendientes":
+        return query.eq("has_tables", True).eq("tabla_verificada", False)
+    return query.or_(
+        f"quality_score.lt.{args.quality_below},"
+        "and(has_tables.eq.true,tabla_verificada.eq.false)"
+    )
+
+
 def get_candidate_pages(supabase, args) -> list[dict]:
     if args.document_key:
         normas = (
@@ -107,12 +148,12 @@ def get_candidate_pages(supabase, args) -> list[dict]:
         norma = normas[0]
         query = (
             supabase.table(PAGE_TABLE)
-            .select("id, norma_id, page_number, text_raw, text_normalized, extraction_method, quality_score, metadata")
+            .select(PAGE_SELECT)
             .eq("norma_id", norma["id"])
             .order("page_number")
         )
         if not args.all_pages:
-            query = query.lt("quality_score", args.quality_below)
+            query = aplicar_filtro_pendientes(query, args)
         pages = query.limit(args.limit).execute().data or []
         for page in pages:
             page["norma"] = norma
@@ -120,11 +161,11 @@ def get_candidate_pages(supabase, args) -> list[dict]:
 
     query = (
         supabase.table(PAGE_TABLE)
-        .select("id, norma_id, page_number, text_raw, text_normalized, extraction_method, quality_score, metadata")
+        .select(PAGE_SELECT)
         .order("quality_score")
     )
     if not args.all_pages:
-        query = query.lt("quality_score", args.quality_below)
+        query = aplicar_filtro_pendientes(query, args)
     pages = query.limit(args.limit).execute().data or []
     norma_ids = sorted({page["norma_id"] for page in pages if page.get("norma_id")})
     if not norma_ids:
@@ -391,6 +432,121 @@ def build_replacement_text(ai_result: dict) -> str:
     return text
 
 
+def _html_escape(value: str) -> str:
+    return (
+        (value or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def diff_resaltado_html(actual: str, propuesto: str) -> tuple[str, float]:
+    """Diff a nivel de palabra entre el texto ya guardado y la transcripcion
+    IA, resaltado en HTML (rojo = solo en el actual, verde = solo en la
+    transcripcion IA). Devuelve tambien la proporcion de palabras distintas,
+    para poder ordenar el reporte por cuanto cambio cada pagina y que el
+    admin revise primero las que mas difieren."""
+    palabras_actual = (actual or "").split()
+    palabras_propuesto = (propuesto or "").split()
+
+    matcher = difflib.SequenceMatcher(a=palabras_actual, b=palabras_propuesto, autojunk=False)
+    piezas: list[str] = []
+    palabras_distintas = 0
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            piezas.append(_html_escape(" ".join(palabras_actual[i1:i2])))
+            continue
+        palabras_distintas += max(i2 - i1, j2 - j1)
+        if i1 != i2:
+            piezas.append(f'<del>{_html_escape(" ".join(palabras_actual[i1:i2]))}</del>')
+        if j1 != j2:
+            piezas.append(f'<ins>{_html_escape(" ".join(palabras_propuesto[j1:j2]))}</ins>')
+
+    total = max(len(palabras_actual), len(palabras_propuesto), 1)
+    proporcion_cambio = palabras_distintas / total
+    return " ".join(piezas), proporcion_cambio
+
+
+def construir_reporte_html(filas_reporte: list[dict]) -> str:
+    """filas_reporte: [{document_key, page_number, quality_score, diff_html,
+    proporcion_cambio, advertencias, confianza_estimada, error}]"""
+    filas_ordenadas = sorted(
+        filas_reporte, key=lambda f: f.get("proporcion_cambio") or 0, reverse=True
+    )
+
+    bloques = []
+    for fila in filas_ordenadas:
+        if fila.get("error"):
+            bloques.append(
+                f"""
+        <section class="pagina error">
+          <h2>{_html_escape(fila['document_key'])} — pág. {fila['page_number']}</h2>
+          <p class="badge badge-error">⚠️ Error al procesar: {_html_escape(fila['error'])}</p>
+        </section>"""
+            )
+            continue
+
+        pct = round((fila.get("proporcion_cambio") or 0) * 100, 1)
+        clase_badge = "badge-alto" if pct >= 15 else ("badge-medio" if pct >= 3 else "badge-bajo")
+        advertencias = fila.get("advertencias") or []
+        advertencias_html = (
+            "<ul>" + "".join(f"<li>{_html_escape(str(a))}</li>" for a in advertencias) + "</ul>"
+            if advertencias
+            else ""
+        )
+
+        bloques.append(
+            f"""
+        <section class="pagina">
+          <h2>{_html_escape(fila['document_key'])} — pág. {fila['page_number']}</h2>
+          <p>
+            <span class="badge {clase_badge}">{pct}% de palabras distintas</span>
+            <span class="badge">calidad actual: {fila.get('quality_score')}</span>
+            <span class="badge">confianza IA: {_html_escape(str(fila.get('confianza_estimada')))}</span>
+          </p>
+          {advertencias_html}
+          <div class="diff"><pre>{fila['diff_html']}</pre></div>
+        </section>"""
+        )
+
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Reporte de diferencias — OCR visión IA</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; max-width: 1100px; }}
+  h1 {{ font-size: 1.3rem; }}
+  h2 {{ font-size: 1rem; margin-bottom: 0.3rem; }}
+  .nota {{ background: #fff8e1; border: 1px solid #ffe082; padding: 0.75rem; border-radius: 6px; margin-bottom: 1.5rem; }}
+  section.pagina {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }}
+  section.error {{ border-color: #e57373; background: #fff5f5; }}
+  .badge {{ display: inline-block; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px; background: #eee; margin-right: 0.4rem; }}
+  .badge-alto {{ background: #ffcdd2; }}
+  .badge-medio {{ background: #fff3b0; }}
+  .badge-bajo {{ background: #c8e6c9; }}
+  .badge-error {{ background: #ffcdd2; }}
+  .diff pre {{ white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; line-height: 1.5; }}
+  ins {{ background: #c8f7c5; text-decoration: none; padding: 0 2px; }}
+  del {{ background: #ffd0d0; text-decoration: line-through; padding: 0 2px; }}
+</style>
+</head>
+<body>
+  <h1>📋 Reporte de diferencias — texto actual vs transcripción con visión IA</h1>
+  <div class="nota">
+    Ordenado de mayor a menor % de palabras distintas. Verde = lo que agrega/cambia la IA,
+    rojo tachado = lo que tenía el texto actual y la IA no repite. Esto NO se guardó en
+    Supabase — es solo para decidir qué páginas conviene aplicar con --apply.
+    Un % alto no siempre es un error (puede ser el OCR arreglando texto pegado);
+    revisa contra el PDF antes de aplicar.
+  </div>
+  {"".join(bloques)}
+</body>
+</html>"""
+
+
 def update_page(supabase, page: dict, ai_result: dict, args) -> None:
     now = datetime.now(timezone.utc).isoformat()
     metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
@@ -435,51 +591,103 @@ def main() -> None:
     else:
         api_key = os.getenv("OPENROUTER_API_KEY")
         api_key_name = "OPENROUTER_API_KEY"
-    if not api_key and args.apply:
+
+    llama_al_modelo = args.apply or bool(args.report_html)
+    if not api_key and llama_al_modelo:
         raise ValueError(f"Falta {api_key_name}")
+
+    if args.report_html and args.apply:
+        logger.warning(
+            "--report-html fuerza modo de solo lectura: NO se escribe en Supabase "
+            "en esta corrida aunque --apply este presente. Corre de nuevo solo con "
+            "--apply (sin --report-html) para aplicar despues de revisar el reporte."
+        )
 
     supabase = get_supabase()
     pages = get_candidate_pages(supabase, args)
-    logger.info("Paginas candidatas: %s", len(pages))
+    logger.info("Paginas candidatas (filtro=%s): %s", args.filtro, len(pages))
     if not pages:
         return
 
-    for page in pages:
-        norma = page["norma"]
-        document_key = norma.get("document_key")
-        page_number = int(page["page_number"])
-        logger.info(
-            "%s pagina %s | quality=%s | method=%s",
-            document_key,
-            page_number,
-            page.get("quality_score"),
-            page.get("extraction_method"),
-        )
+    filas_reporte: list[dict] = []
+    pdf_cache: dict[str, Path] = {}
 
-        if not args.apply:
-            continue
+    try:
+        for page in pages:
+            norma = page["norma"]
+            document_key = norma.get("document_key")
+            page_number = int(page["page_number"])
+            logger.info(
+                "%s pagina %s | quality=%s | tablas=%s/%s | method=%s",
+                document_key,
+                page_number,
+                page.get("quality_score"),
+                page.get("has_tables"),
+                page.get("tabla_verificada"),
+                page.get("extraction_method"),
+            )
 
-        pdf_bytes = download_pdf_bytes(supabase, norma)
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_file:
-            tmp_file.write(pdf_bytes)
-            tmp_path = Path(tmp_file.name)
-        try:
-            image_base64 = render_page_png_base64(tmp_path, page_number, args.dpi)
-        finally:
+            if not llama_al_modelo:
+                continue
+
+            try:
+                if document_key not in pdf_cache:
+                    pdf_bytes = download_pdf_bytes(supabase, norma)
+                    tmp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+                    tmp_file.write(pdf_bytes)
+                    tmp_file.close()
+                    pdf_cache[document_key] = Path(tmp_file.name)
+
+                image_base64 = render_page_png_base64(pdf_cache[document_key], page_number, args.dpi)
+
+                ai_result = transcribe_page_with_provider(
+                    api_key=api_key,
+                    provider=args.provider,
+                    model=args.model,
+                    detail=args.detail,
+                    document_key=document_key,
+                    title=norma.get("titulo"),
+                    page_number=page_number,
+                    image_base64=image_base64,
+                )
+            except Exception as error:  # no se pierde el lote entero por una pagina
+                logger.warning("%s pagina %s | error: %s", document_key, page_number, error)
+                if args.report_html:
+                    filas_reporte.append(
+                        {
+                            "document_key": document_key,
+                            "page_number": page_number,
+                            "error": str(error),
+                        }
+                    )
+                continue
+
+            if args.report_html:
+                actual = page.get("text_normalized") or page.get("text_raw") or ""
+                propuesto = build_replacement_text(ai_result)
+                diff_html, proporcion_cambio = diff_resaltado_html(actual, propuesto)
+                filas_reporte.append(
+                    {
+                        "document_key": document_key,
+                        "page_number": page_number,
+                        "quality_score": page.get("quality_score"),
+                        "diff_html": diff_html,
+                        "proporcion_cambio": proporcion_cambio,
+                        "advertencias": ai_result.get("advertencias"),
+                        "confianza_estimada": ai_result.get("confianza_estimada"),
+                    }
+                )
+
+            if args.apply and not args.report_html:
+                update_page(supabase, page, ai_result, args)
+                logger.info("%s pagina %s actualizada con vision IA.", document_key, page_number)
+    finally:
+        for tmp_path in pdf_cache.values():
             tmp_path.unlink(missing_ok=True)
 
-        ai_result = transcribe_page_with_provider(
-            api_key=api_key,
-            provider=args.provider,
-            model=args.model,
-            detail=args.detail,
-            document_key=document_key,
-            title=norma.get("titulo"),
-            page_number=page_number,
-            image_base64=image_base64,
-        )
-        update_page(supabase, page, ai_result, args)
-        logger.info("%s pagina %s actualizada con OpenAI OCR.", document_key, page_number)
+    if args.report_html:
+        Path(args.report_html).write_text(construir_reporte_html(filas_reporte), encoding="utf-8")
+        logger.info("Reporte escrito en %s (%s paginas)", args.report_html, len(filas_reporte))
 
 
 if __name__ == "__main__":

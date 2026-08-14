@@ -299,10 +299,12 @@ def transcribe_page_openai(
     if not output_text:
         raise ValueError("OpenAI no devolvio output_text")
 
+    # Nota: NO se trata una transcripcion vacia como error. Varias paginas
+    # candidatas (quality_score = 0) son portadas o paginas casi en blanco;
+    # ahi lo correcto es que el modelo devuelva poco o nada de texto, y
+    # tratarlo como fallo generaba falsos "error" en el reporte para
+    # paginas donde la IA en realidad acerto (no hay nada que transcribir).
     parsed = extract_json(output_text)
-    transcript = norm_text(parsed.get("transcripcion"))
-    if not transcript:
-        raise ValueError("La transcripcion IA vino vacia")
     return {
         "raw_response_id": data.get("id"),
         "transcripcion": parsed.get("transcripcion") or "",
@@ -379,10 +381,10 @@ def transcribe_page_openrouter(
     if not output_text:
         raise ValueError("OpenRouter no devolvio contenido")
 
+    # Nota: NO se trata una transcripcion vacia como error (ver comentario
+    # equivalente en transcribe_page_openai) — una pagina casi en blanco
+    # devuelve poco o nada de texto legitimamente.
     parsed = extract_json(str(output_text))
-    transcript = norm_text(parsed.get("transcripcion"))
-    if not transcript:
-        raise ValueError("La transcripcion IA vino vacia")
     return {
         "raw_response_id": data.get("id"),
         "transcripcion": parsed.get("transcripcion") or "",

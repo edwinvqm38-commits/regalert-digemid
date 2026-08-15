@@ -426,9 +426,24 @@ def transcribe_page_with_provider(
     raise ValueError(f"Proveedor no soportado: {provider}")
 
 
+def _a_texto(valor) -> str:
+    """El modelo deberia devolver string para transcripcion/tablas_markdown,
+    pero un LLM no siempre respeta el esquema pedido en el prompt (a veces
+    tablas_markdown vino como lista de strings). Se normaliza en vez de
+    asumir el tipo, para no tumbar el lote entero por una respuesta con
+    forma inesperada en una sola pagina."""
+    if valor is None:
+        return ""
+    if isinstance(valor, str):
+        return valor.strip()
+    if isinstance(valor, (list, tuple)):
+        return "\n\n".join(_a_texto(v) for v in valor if v).strip()
+    return str(valor).strip()
+
+
 def build_replacement_text(ai_result: dict) -> str:
-    text = (ai_result.get("transcripcion") or "").strip()
-    tables = (ai_result.get("tablas_markdown") or "").strip()
+    text = _a_texto(ai_result.get("transcripcion"))
+    tables = _a_texto(ai_result.get("tablas_markdown"))
     if tables:
         return f"{text}\n\n{tables}".strip()
     return text
@@ -652,6 +667,26 @@ def main() -> None:
                     page_number=page_number,
                     image_base64=image_base64,
                 )
+
+                if args.report_html:
+                    actual = page.get("text_normalized") or page.get("text_raw") or ""
+                    propuesto = build_replacement_text(ai_result)
+                    diff_html, proporcion_cambio = diff_resaltado_html(actual, propuesto)
+                    filas_reporte.append(
+                        {
+                            "document_key": document_key,
+                            "page_number": page_number,
+                            "quality_score": page.get("quality_score"),
+                            "diff_html": diff_html,
+                            "proporcion_cambio": proporcion_cambio,
+                            "advertencias": ai_result.get("advertencias"),
+                            "confianza_estimada": ai_result.get("confianza_estimada"),
+                        }
+                    )
+
+                if args.apply and not args.report_html:
+                    update_page(supabase, page, ai_result, args)
+                    logger.info("%s pagina %s actualizada con vision IA.", document_key, page_number)
             except Exception as error:  # no se pierde el lote entero por una pagina
                 logger.warning("%s pagina %s | error: %s", document_key, page_number, error)
                 if args.report_html:
@@ -663,26 +698,6 @@ def main() -> None:
                         }
                     )
                 continue
-
-            if args.report_html:
-                actual = page.get("text_normalized") or page.get("text_raw") or ""
-                propuesto = build_replacement_text(ai_result)
-                diff_html, proporcion_cambio = diff_resaltado_html(actual, propuesto)
-                filas_reporte.append(
-                    {
-                        "document_key": document_key,
-                        "page_number": page_number,
-                        "quality_score": page.get("quality_score"),
-                        "diff_html": diff_html,
-                        "proporcion_cambio": proporcion_cambio,
-                        "advertencias": ai_result.get("advertencias"),
-                        "confianza_estimada": ai_result.get("confianza_estimada"),
-                    }
-                )
-
-            if args.apply and not args.report_html:
-                update_page(supabase, page, ai_result, args)
-                logger.info("%s pagina %s actualizada con vision IA.", document_key, page_number)
     finally:
         for tmp_path in pdf_cache.values():
             tmp_path.unlink(missing_ok=True)

@@ -92,7 +92,11 @@ def parse_args():
     )
     parser.add_argument("--model")
     parser.add_argument("--detail", default=os.getenv("VISION_OCR_DETAIL", DEFAULT_DETAIL))
-    parser.add_argument("--dpi", type=int, default=300)
+    # 150 dpi es legible de sobra para texto/tablas escaneadas y reduce el
+    # area de la imagen ~4x contra 300 dpi -> menos tiempo de subida/proceso
+    # y menos tokens de imagen por pagina. Se puede subir con --dpi si una
+    # norma en particular sale con letra muy chica o mala resolucion.
+    parser.add_argument("--dpi", type=int, default=150)
     args = parser.parse_args()
     if args.limit <= 0:
         raise ValueError("--limit debe ser mayor que cero")
@@ -629,8 +633,13 @@ def main() -> None:
     filas_reporte: list[dict] = []
     pdf_cache: dict[str, Path] = {}
 
+    def escribir_reporte_parcial() -> None:
+        if not args.report_html:
+            return
+        Path(args.report_html).write_text(construir_reporte_html(filas_reporte), encoding="utf-8")
+
     try:
-        for page in pages:
+        for indice, page in enumerate(pages, start=1):
             norma = page["norma"]
             document_key = norma.get("document_key")
             page_number = int(page["page_number"])
@@ -698,12 +707,19 @@ def main() -> None:
                         }
                     )
                 continue
+            finally:
+                # Escritura periodica: si la corrida se corta (timeout del
+                # workflow, cancelacion manual, caida de red) el reporte ya
+                # tiene lo procesado hasta el momento en vez de perderse
+                # entero por no llegar nunca a la escritura final.
+                if indice % 10 == 0:
+                    escribir_reporte_parcial()
     finally:
         for tmp_path in pdf_cache.values():
             tmp_path.unlink(missing_ok=True)
 
+    escribir_reporte_parcial()
     if args.report_html:
-        Path(args.report_html).write_text(construir_reporte_html(filas_reporte), encoding="utf-8")
         logger.info("Reporte escrito en %s (%s paginas)", args.report_html, len(filas_reporte))
 
 

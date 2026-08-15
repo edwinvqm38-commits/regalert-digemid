@@ -56,6 +56,7 @@ class PageExtraction:
     has_tables: bool = False
     tables: list | None = None
     posible_formula: bool = False
+    posible_grafico: bool = False
 
 
 _TOKEN_RE = re.compile(r"\S+")
@@ -114,6 +115,36 @@ def posible_formula(text: str) -> bool:
         return False
 
     return (simbolos / len(t)) > 0.01
+
+
+# Fraccion del area de la pagina que debe cubrir una imagen embebida para
+# contar como "posible grafico": por debajo del piso es probablemente un
+# logo/sello/firma escaneada; por encima del techo es casi seguro un fondo
+# de pagina completa (el escaneo mismo), no un grafico o diagrama insertado.
+_GRAFICO_AREA_MIN = 0.04
+_GRAFICO_AREA_MAX = 0.75
+
+
+def posible_grafico(page: "fitz.Page") -> bool:
+    """Heuristica de imagenes embebidas: ni el texto plano ni el OCR
+    reconstruyen graficos de barras, circulares, diagramas, etc. — ni
+    siquiera los detectan como algo distinto de texto perdido. Esto NO es
+    deteccion real de graficos (no interpreta el contenido), solo marca la
+    pagina para que un humano la revise si le toco una imagen de tamaño
+    razonable, ni decorativa ni un escaneo de pagina completa."""
+    try:
+        area_pagina = page.rect.width * page.rect.height
+        if area_pagina <= 0:
+            return False
+        for imagen in page.get_images(full=True):
+            xref = imagen[0]
+            for rect in page.get_image_rects(xref):
+                proporcion = (rect.width * rect.height) / area_pagina
+                if _GRAFICO_AREA_MIN <= proporcion <= _GRAFICO_AREA_MAX:
+                    return True
+    except Exception as error:
+        logger.warning("Deteccion de posible grafico fallo: %s", error)
+    return False
 
 
 def _pdfplumber_page_text(pdf_path: str, page_index: int) -> str:
@@ -354,6 +385,7 @@ def extract_page(pdf_path: str, page: "fitz.Page", page_index: int) -> PageExtra
 
     tablas = _pdfplumber_tables(pdf_path, page_index)
     posible_formula_detectada = posible_formula(best[1])
+    posible_grafico_detectado = posible_grafico(page)
 
     # Las tablas se agregan al texto final (no al que se usa para elegir el
     # metodo/quality_score, que evalua solo la prosa) como Markdown real, en
@@ -376,6 +408,7 @@ def extract_page(pdf_path: str, page: "fitz.Page", page_index: int) -> PageExtra
         has_tables=bool(tablas),
         tables=tablas or None,
         posible_formula=posible_formula_detectada,
+        posible_grafico=posible_grafico_detectado,
     )
 
 

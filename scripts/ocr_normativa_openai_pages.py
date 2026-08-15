@@ -251,18 +251,45 @@ PROMPT_TRANSCRIPCION = (
 )
 
 
+_ESCAPE_INVALIDO_RE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+def _reparar_escapes_invalidos(texto: str) -> str:
+    """El modelo a veces mete un backslash suelto dentro de un string JSON
+    (ej. una cita legal con formato raro) que no es un escape JSON valido y
+    rompe el parser. Se duplica cualquier backslash que no inicie un escape
+    reconocido, para que json.loads lo lea como caracter literal."""
+    return _ESCAPE_INVALIDO_RE.sub(r"\\\\", texto)
+
+
+def _parsear_json_tolerante(candidato: str) -> dict:
+    """Intenta json.loads en capas cada vez mas permisivas, porque un LLM no
+    siempre devuelve JSON estrictamente valido pese a que el prompt lo pida:
+    saltos de linea crudos dentro de un string (control character), o un
+    backslash que no forma un escape valido, son los casos mas comunes."""
+    try:
+        return json.loads(candidato)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(candidato, strict=False)  # permite control chars crudos en strings
+    except json.JSONDecodeError:
+        pass
+    return json.loads(_reparar_escapes_invalidos(candidato), strict=False)
+
+
 def extract_json(text: str) -> dict:
     clean = (text or "").strip()
     if clean.startswith("```"):
         clean = re.sub(r"^```(?:json)?", "", clean).strip()
         clean = re.sub(r"```$", "", clean).strip()
     try:
-        return json.loads(clean)
+        return _parsear_json_tolerante(clean)
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", clean, re.DOTALL)
         if not match:
             raise
-        return json.loads(match.group(0))
+        return _parsear_json_tolerante(match.group(0))
 
 
 def transcribe_page_openai(

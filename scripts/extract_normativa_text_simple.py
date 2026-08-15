@@ -218,6 +218,7 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         "ocr_usado": False,
         "con_tablas": 0,
         "con_formula": 0,
+        "con_grafico": 0,
         "paginas_baja_calidad": [],
     }
 
@@ -231,6 +232,8 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
             stats["con_tablas"] += 1
         if page.posible_formula:
             stats["con_formula"] += 1
+        if page.posible_grafico:
+            stats["con_grafico"] = stats.get("con_grafico", 0) + 1
 
         payload = {
             "norma_id": norma_id,
@@ -243,11 +246,13 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
             "quality_score": page.quality,
             "has_tables": page.has_tables,
             "posible_formula": page.posible_formula,
+            "posible_grafico": page.posible_grafico,
             "metadata": {
                 "quality_score": page.quality,
                 "method": page.method,
                 "ocr_confidence": page.ocr_confidence,
                 "posible_formula": page.posible_formula,
+                "posible_grafico": page.posible_grafico,
                 "tables": page.tables,
             },
         }
@@ -333,7 +338,13 @@ def contar_estado_normativa(supabase) -> dict:
 def nivel_certeza_norma(promedio: float, stats: dict) -> str:
     if stats.get("baja_calidad", 0) > 0 or promedio < UMBRAL_BAJA_CALIDAD:
         return "baja"
-    if promedio < 0.85 or stats.get("ocr_usado") or stats.get("con_tablas", 0) > 0 or stats.get("con_formula", 0) > 0:
+    if (
+        promedio < 0.85
+        or stats.get("ocr_usado")
+        or stats.get("con_tablas", 0) > 0
+        or stats.get("con_formula", 0) > 0
+        or stats.get("con_grafico", 0) > 0
+    ):
         return "media"
     return "alta"
 
@@ -396,6 +407,8 @@ def construir_reporte_html(document_key: str, titulo: str | None, extracciones) 
             señales.append("posible fórmula/notación técnica — revisar manualmente")
         if page.has_tables:
             señales.append("tabla detectada")
+        if page.posible_grafico:
+            señales.append("posible gráfico/imagen — revisar manualmente (no se interpreta el contenido)")
         señales_html = " · ".join(_escapar_html(s) for s in señales) if señales else "—"
 
         tablas_html = ""
@@ -482,6 +495,7 @@ def enviar_progreso_telegram(
     sin_pdf_sin_texto: int = 0,
     normas_con_tablas: int = 0,
     normas_con_formula: int = 0,
+    normas_con_grafico: int = 0,
     processed_summaries: list[dict] | None = None,
     pdf_needs: dict | None = None,
 ) -> None:
@@ -516,6 +530,8 @@ def enviar_progreso_telegram(
         lines.append(f"📊 Con tablas detectadas: <b>{normas_con_tablas}</b> (guardadas como estructura, no solo texto plano)")
     if normas_con_formula:
         lines.append(f"🧮 Con posible fórmula/notación técnica: <b>{normas_con_formula}</b> (requieren revisión manual)")
+    if normas_con_grafico:
+        lines.append(f"🖼️ Con posible gráfico/imagen: <b>{normas_con_grafico}</b> (no se interpreta el contenido, requieren revisión manual)")
 
     summaries = processed_summaries or []
     if summaries:
@@ -628,6 +644,7 @@ def main():
     normas_baja_calidad = 0
     normas_con_tablas = 0
     normas_con_formula = 0
+    normas_con_grafico = 0
     processed_summaries: list[dict] = []
     temp_dir = Path("tmp") / "normativa_text"
 
@@ -676,6 +693,8 @@ def main():
                 normas_con_tablas += 1
             if stats["con_formula"] > 0:
                 normas_con_formula += 1
+            if stats["con_grafico"] > 0:
+                normas_con_grafico += 1
 
             processed_summaries.append({
                 "document_key": document_key,
@@ -687,15 +706,20 @@ def main():
 
             procesadas += 1
             logger.info(
-                "%s | páginas: %s | certeza: %s | calidad prom: %.2f | baja calidad: %s | con tablas: %s | posible fórmula: %s",
+                "%s | páginas: %s | certeza: %s | calidad prom: %.2f | baja calidad: %s | con tablas: %s | posible fórmula: %s | posible gráfico: %s",
                 document_key, len(extracciones), certeza, promedio,
-                stats["baja_calidad"], stats["con_tablas"], stats["con_formula"],
+                stats["baja_calidad"], stats["con_tablas"], stats["con_formula"], stats["con_grafico"],
             )
 
             # Reporte automatico para revisar fidelidad vs. el PDF: solo
             # cuando hay algo que amerita ojo humano (tablas, posible
             # formula, o baja calidad), no en cada norma procesada.
-            if not args.no_telegram and (stats["con_tablas"] > 0 or stats["con_formula"] > 0 or stats["baja_calidad"] > 0):
+            if not args.no_telegram and (
+                stats["con_tablas"] > 0
+                or stats["con_formula"] > 0
+                or stats["con_grafico"] > 0
+                or stats["baja_calidad"] > 0
+            ):
                 try:
                     html = construir_reporte_html(document_key, norma.get("titulo"), extracciones)
                     enviar_reporte_extraccion_telegram(document_key, html, local_path)
@@ -740,6 +764,7 @@ def main():
             estado_despues["sin_pdf_sin_texto"],
             normas_con_tablas,
             normas_con_formula,
+            normas_con_grafico,
             processed_summaries,
             pdf_needs,
         )

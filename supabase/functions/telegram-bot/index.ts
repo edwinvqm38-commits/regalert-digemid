@@ -1203,9 +1203,9 @@ function porcentaje(n: number, total: number): string {
 
 /** Reporte de fidelidad para UNA norma: agrega las señales de calidad ya
  * guardadas por página (quality_score, ocr_confidence, posible_formula,
- * has_tables, revisado_manual) en un veredicto legible. No mide gráficos
- * (barras, circulares, etc.): hoy no se detectan ni extraen, así que ese
- * dato queda como advertencia fija en el reporte global. */
+ * posible_grafico, has_tables, revisado_manual) en un veredicto legible.
+ * posible_grafico es una heuristica de imagen embebida (no interpreta el
+ * contenido) que solo corre en paginas procesadas de aqui en adelante. */
 async function construirReporteEstadoNorma(documentKey: string): Promise<string> {
   const { data: norma } = await supabase
     .from("digemid_normas")
@@ -1219,7 +1219,7 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
 
   const { data: paginas, error } = await supabase
     .from("digemid_norma_paginas")
-    .select("page_number, quality_score, extraction_method, posible_formula, revisado_manual, has_tables, tabla_verificada")
+    .select("page_number, quality_score, extraction_method, posible_formula, posible_grafico, revisado_manual, has_tables, tabla_verificada")
     .eq("norma_id", norma.id)
     .order("page_number");
 
@@ -1236,6 +1236,7 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
   const baja = paginas.filter((p) => (p.quality_score ?? 0) < UMBRAL_BAJA_CALIDAD_NORMA).length;
   const bajaSinRevisar = paginas.filter((p) => (p.quality_score ?? 0) < UMBRAL_BAJA_CALIDAD_NORMA && !p.revisado_manual).length;
   const formulas = paginas.filter((p) => p.posible_formula).length;
+  const graficos = paginas.filter((p) => p.posible_grafico).length;
   const revisadas = paginas.filter((p) => p.revisado_manual).length;
   const tablas = paginas.filter((p) => p.has_tables).length;
   const tablasSinVerificar = paginas.filter((p) => p.has_tables && !p.tabla_verificada).length;
@@ -1243,12 +1244,13 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
 
   let veredicto: string;
   let detalle: string;
-  if (bajaSinRevisar > 0 || formulas > 0) {
+  if (bajaSinRevisar > 0 || formulas > 0 || graficos > 0) {
     veredicto = "⚠️ Necesita revisión manual";
     detalle = [
       bajaSinRevisar > 0 ? `${bajaSinRevisar} página(s) de calidad muy baja sin revisar` : null,
       formulas > 0 ? `${formulas} página(s) con posible fórmula/notación técnica` : null,
-    ].filter(Boolean).join(" y ") + ".";
+      graficos > 0 ? `${graficos} página(s) con posible gráfico/imagen sin revisar` : null,
+    ].filter(Boolean).join(", ") + ".";
   } else if (tablasSinVerificar > 0 || ocr > 0 || media > 0) {
     veredicto = "🟡 Usar con precaución";
     detalle = [
@@ -1274,12 +1276,13 @@ async function construirReporteEstadoNorma(documentKey: string): Promise<string>
     `Con tablas: ${tablas} (${tablasSinVerificar} sin verificar)`,
     `Extraídas vía OCR: ${ocr} (${porcentaje(ocr, total)})`,
     `Con posible fórmula sin reconstruir: ${formulas}`,
+    `Con posible gráfico/imagen sin revisar: ${graficos}`,
     `Revisadas manualmente por un admin: ${revisadas} de ${total} (${porcentaje(revisadas, total)})`,
     "",
     `<b>Veredicto: ${veredicto}</b>`,
     detalle,
     "",
-    "⚠️ Los gráficos (barras, circulares, etc.) no se detectan ni extraen todavía — si esta norma depende de datos que solo están en un gráfico, no está cubierto por este reporte.",
+    "⚠️ La detección de gráficos es una heurística nueva (imagen embebida de tamaño razonable, no interpreta el contenido) y solo corre en páginas procesadas de aquí en adelante — si esta norma no se ha reprocesado, el conteo de arriba puede salir en 0 aunque sí tenga gráficos.",
   ];
 
   if (bajaSinRevisar > 0) {
@@ -1302,13 +1305,14 @@ async function construirReporteEstadoGlobal(): Promise<string> {
     return count ?? 0;
   }
 
-  const [total, alta, media, baja, bajaSinRevisar, formulas, revisadas, tablas, tablasSinVerificar, ocr] = await Promise.all([
+  const [total, alta, media, baja, bajaSinRevisar, formulas, graficos, revisadas, tablas, tablasSinVerificar, ocr] = await Promise.all([
     contar((q) => q),
     contar((q) => q.gte("quality_score", 0.85)),
     contar((q) => q.gte("quality_score", UMBRAL_BAJA_CALIDAD_NORMA).lt("quality_score", 0.85)),
     contar((q) => q.lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)),
     contar((q) => q.lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA).eq("revisado_manual", false)),
     contar((q) => q.eq("posible_formula", true)),
+    contar((q) => q.eq("posible_grafico", true)),
     contar((q) => q.eq("revisado_manual", true)),
     contar((q) => q.eq("has_tables", true)),
     contar((q) => q.eq("has_tables", true).eq("tabla_verificada", false)),
@@ -1325,15 +1329,182 @@ async function construirReporteEstadoGlobal(): Promise<string> {
     `Con tablas: ${tablas} (<b>${tablasSinVerificar}</b> sin verificar)`,
     `Extraídas vía OCR: ${ocr} (${porcentaje(ocr, total)})`,
     `Con posible fórmula sin reconstruir: ${formulas}`,
+    `Con posible gráfico/imagen sin revisar: ${graficos}`,
     `Revisadas manualmente por un admin: <b>${revisadas}</b> de ${total} (${porcentaje(revisadas, total)})`,
     `Calidad muy baja aún sin revisar: ${bajaSinRevisar}`,
     "",
-    "⚠️ Los gráficos (barras, circulares, etc.) todavía no se detectan ni extraen — solo texto y tablas. Si una norma depende de datos que solo están en un gráfico, esa información no llega a la base.",
+    "⚠️ La detección de gráficos es una heurística nueva (imagen embebida de tamaño razonable) y solo corre en páginas procesadas de aquí en adelante — las páginas ya extraídas antes quedan en 0 hasta que se reprocesen. No interpreta el contenido del gráfico, solo avisa que hay una imagen para revisar a mano.",
     "",
-    "Usa <code>/normaestado document_key</code> para el detalle de una norma puntual, <code>/normasrevisar</code> para páginas de baja calidad, o <code>/tablasrevisar</code> para tablas sin verificar.",
+    "Usa <code>/normaestado document_key</code> para el detalle de una norma puntual, <code>/reportenormas</code> para el reporte de todas las normas en un HTML, <code>/normasrevisar</code> para páginas de baja calidad, o <code>/tablasrevisar</code> para tablas sin verificar.",
   ];
 
   return lineas.join("\n");
+}
+
+type FilaResumenNorma = {
+  id: string;
+  document_key: string;
+  titulo: string | null;
+  anio: number | null;
+  pdf_url: string | null;
+  file_storage_path: string | null;
+  process_status: string | null;
+  total_paginas: number;
+  calidad_alta: number;
+  calidad_media: number;
+  calidad_baja: number;
+  calidad_baja_sin_revisar: number;
+  tablas_total: number;
+  tablas_sin_verificar: number;
+  formulas: number;
+  graficos: number;
+  revisadas_manual: number;
+  via_ocr: number;
+};
+
+type EstadoNorma = {
+  prioridad: number;
+  etiqueta: string;
+  clase: string;
+};
+
+/** Calcula un veredicto de una sola etiqueta por norma para el reporte
+ * maestro, en el mismo orden de urgencia con el que un admin deberia
+ * atenderlas: primero lo que bloquea totalmente (sin PDF, sin procesar),
+ * despues lo que necesita ojo humano (calidad baja, formulas, graficos),
+ * despues lo que solo necesita precaucion (tablas/OCR sin verificar),
+ * y al final lo ya confiable. Menor prioridad = mas urgente. */
+function calcularEstadoNorma(fila: FilaResumenNorma): EstadoNorma {
+  const sinPdf = !fila.pdf_url && !fila.file_storage_path;
+  const sinProcesar = fila.total_paginas === 0;
+  const necesitaRevision = fila.calidad_baja_sin_revisar > 0 || fila.formulas > 0 || fila.graficos > 0;
+  const usarConPrecaucion = fila.tablas_sin_verificar > 0 || fila.via_ocr > 0 || fila.calidad_media > 0;
+
+  if (sinPdf) return { prioridad: 0, etiqueta: "🔴 Falta subir PDF", clase: "mal" };
+  if (sinProcesar) return { prioridad: 1, etiqueta: "🔴 Sin procesar", clase: "mal" };
+  if ((fila.process_status ?? "").includes("error")) {
+    return { prioridad: 1, etiqueta: `🔴 Error: ${fila.process_status}`, clase: "mal" };
+  }
+  if (necesitaRevision) return { prioridad: 2, etiqueta: "⚠️ Necesita revisión manual", clase: "regular" };
+  if (usarConPrecaucion) return { prioridad: 3, etiqueta: "🟡 Usar con precaución", clase: "precaucion" };
+  return { prioridad: 4, etiqueta: "✅ Confiable", clase: "bien" };
+}
+
+/** Reporte maestro de TODAS las normas/reglamentos en un solo HTML: estado
+ * de PDF, calidad de texto, tablas, formulas y graficos por norma, para ir
+ * levantando observaciones sin tener que consultar norma por norma. */
+async function construirReporteMaestroNormas(): Promise<string> {
+  const { data, error } = await supabase
+    .from("digemid_normas_resumen")
+    .select("*")
+    .order("document_key");
+
+  if (error) throw new Error(error.message);
+  const filas = (data ?? []) as FilaResumenNorma[];
+
+  const conEstado = filas
+    .map((f) => ({ fila: f, estado: calcularEstadoNorma(f) }))
+    .sort((a, b) => a.estado.prioridad - b.estado.prioridad || a.fila.document_key.localeCompare(b.fila.document_key));
+
+  const resumen = {
+    total: filas.length,
+    sinPdf: conEstado.filter((x) => x.estado.prioridad === 0).length,
+    sinProcesarOError: conEstado.filter((x) => x.estado.prioridad === 1).length,
+    necesitaRevision: conEstado.filter((x) => x.estado.prioridad === 2).length,
+    precaucion: conEstado.filter((x) => x.estado.prioridad === 3).length,
+    confiable: conEstado.filter((x) => x.estado.prioridad === 4).length,
+    conTablasPendientes: filas.filter((f) => f.tablas_sin_verificar > 0).length,
+    conFormulas: filas.filter((f) => f.formulas > 0).length,
+    conGraficos: filas.filter((f) => f.graficos > 0).length,
+  };
+
+  const filasHtml = conEstado
+    .map(({ fila, estado }) => {
+      const pdfTexto = fila.pdf_url || fila.file_storage_path ? "✅" : "❌";
+      const calidadTexto = fila.total_paginas
+        ? `${porcentaje(fila.calidad_alta, fila.total_paginas)} alta`
+        : "—";
+      return `
+        <tr class="${estado.clase}">
+          <td>${escapeHtml(fila.document_key)}</td>
+          <td class="titulo">${escapeHtml(fila.titulo ?? "")}</td>
+          <td>${fila.anio ?? "—"}</td>
+          <td class="centro">${pdfTexto}</td>
+          <td class="centro">${fila.total_paginas}</td>
+          <td class="centro">${calidadTexto}</td>
+          <td class="centro">${fila.tablas_total ? `${fila.tablas_total - fila.tablas_sin_verificar}/${fila.tablas_total}` : "—"}</td>
+          <td class="centro">${fila.formulas || "—"}</td>
+          <td class="centro">${fila.graficos || "—"}</td>
+          <td>${estado.etiqueta}</td>
+        </tr>`;
+    })
+    .join("\n");
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Reporte maestro — normas DIGEMID</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  .tarjetas { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1rem 0 1.5rem; }
+  .tarjeta { border: 1px solid #ddd; border-radius: 8px; padding: 0.75rem 1rem; min-width: 140px; }
+  .tarjeta .num { font-size: 1.4rem; font-weight: bold; display: block; }
+  .tarjeta.mal { background: #ffebee; border-color: #ef9a9a; }
+  .tarjeta.regular { background: #fff3e0; border-color: #ffcc80; }
+  .tarjeta.precaucion { background: #fffde7; border-color: #fff59d; }
+  .tarjeta.bien { background: #e8f5e9; border-color: #a5d6a7; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th, td { border: 1px solid #ddd; padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: #f5f5f5; position: sticky; top: 0; }
+  td.centro { text-align: center; }
+  td.titulo { max-width: 320px; }
+  tr.mal { background: #fff5f5; }
+  tr.regular { background: #fffaf0; }
+  tr.precaucion { background: #fffef5; }
+  .nota { background: #fff8e1; border: 1px solid #ffe082; padding: 0.75rem; border-radius: 6px; margin-bottom: 1.5rem; }
+</style>
+</head>
+<body>
+  <h1>📋 Reporte maestro — todas las normas y reglamentos DIGEMID</h1>
+  <p>Generado ${escapeHtml(new Date().toISOString())} · ordenado de más a menos urgente.</p>
+
+  <div class="tarjetas">
+    <div class="tarjeta"><span class="num">${resumen.total}</span>normas totales</div>
+    <div class="tarjeta mal"><span class="num">${resumen.sinPdf}</span>sin PDF subido</div>
+    <div class="tarjeta mal"><span class="num">${resumen.sinProcesarOError}</span>sin procesar / con error</div>
+    <div class="tarjeta regular"><span class="num">${resumen.necesitaRevision}</span>necesitan revisión manual</div>
+    <div class="tarjeta precaucion"><span class="num">${resumen.precaucion}</span>usar con precaución</div>
+    <div class="tarjeta bien"><span class="num">${resumen.confiable}</span>confiables</div>
+    <div class="tarjeta"><span class="num">${resumen.conTablasPendientes}</span>con tablas sin verificar</div>
+    <div class="tarjeta"><span class="num">${resumen.conFormulas}</span>con posible fórmula</div>
+    <div class="tarjeta"><span class="num">${resumen.conGraficos}</span>con posible gráfico</div>
+  </div>
+
+  <div class="nota">
+    <b>Cómo actuar según la columna "Estado":</b> "Falta subir PDF" → <code>/normapdf clave</code> (ver <code>/normassinpdf</code>).
+    "Sin procesar" → espera la corrida automática o revisa <code>process_status</code>.
+    "Necesita revisión manual" → <code>/normarevisar clave</code>.
+    "Usar con precaución" (tablas sin verificar) → <code>/tablarevisar clave</code>.
+    <br><br>
+    <b>Sobre "Gráficos":</b> es una heurística de imagen embebida (tamaño razonable, ni logo ni escaneo de página completa) —
+    NO interpreta el contenido del gráfico, solo avisa que hay una imagen para que un humano la revise contra el PDF.
+    Solo corre en páginas procesadas de aquí en adelante: una norma ya procesada antes de este cambio puede tener
+    gráficos reales y aun así mostrar 0 aquí, hasta que se reprocese.
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Clave</th><th>Título</th><th>Año</th><th>PDF</th><th>Págs.</th>
+        <th>Calidad alta</th><th>Tablas (verif/total)</th><th>Fórmulas</th><th>Gráficos</th><th>Estado</th>
+      </tr>
+    </thead>
+    <tbody>${filasHtml}</tbody>
+  </table>
+</body>
+</html>`;
 }
 
 /** Guarda el PDF que un admin subio a mano para UNA norma puntual: lo valida,
@@ -1690,6 +1861,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/normaestado [document_key]</b>",
     "Reporte de fidelidad: calidad de texto, tablas, OCR, fórmulas y revisión manual. Sin argumento, resume toda la base; con document_key, el detalle de esa norma con un veredicto (confiable / usar con precaución / necesita revisión).",
+    "",
+    "<b>/reportenormas</b>",
+    "Reporte maestro en HTML con TODAS las normas: PDF subido o no, páginas procesadas, calidad, tablas/fórmulas/gráficos pendientes, ordenado de más a menos urgente. Ábrelo en un navegador, no en un editor de texto.",
   ];
 
   return [...base, ...admin].join("\n");
@@ -3755,6 +3929,26 @@ async function handleCommand(
       return await sendMessage(chatId, reporte);
     } catch (error) {
       return await sendMessage(chatId, `⚠️ Error al calcular el estado: ${escapeHtml(String(error))}`);
+    }
+  }
+
+  if (trimmed === "/reportenormas") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    try {
+      const html = await construirReporteMaestroNormas();
+      await enviarDocumentoTexto(
+        chatId,
+        html,
+        `reporte_normas_${getLimaDateParts().isoDate}.html`,
+        "text/html",
+        "📋 Reporte maestro de todas las normas — ábrelo en un navegador para verlo como tabla.",
+      );
+      return new Response("OK", { status: 200 });
+    } catch (error) {
+      return await sendMessage(chatId, `⚠️ Error al generar el reporte: ${escapeHtml(String(error))}`);
     }
   }
 

@@ -227,6 +227,30 @@ def render_page_png_base64(pdf_path: Path, page_number: int, dpi: int) -> str:
     return base64.b64encode(png_bytes).decode("ascii")
 
 
+# Compartido entre transcribe_page_openai y transcribe_page_openrouter. La
+# clave "graficos" no le pide a la IA que interprete el significado legal
+# del grafico (eso lo hace /consulta despues, con este texto como contexto);
+# le pide que registre los datos visuales -- valores, categorias, tendencia --
+# como si describiera la tabla de datos equivalente, igual que ya se hace con
+# "tablas_markdown". Sin esto, un grafico de barras/circular quedaba fuera
+# del texto guardado por completo: solo se transcribia lo que hubiera de
+# texto suelto alrededor (titulo, ejes, leyenda).
+PROMPT_TRANSCRIPCION = (
+    "Transcribe literalmente esta pagina de una norma legal peruana. "
+    "No resumas, no corrijas el contenido legal y no inventes texto. "
+    "Conserva saltos de linea importantes, numerales, articulos, fechas, "
+    "unidades, tablas y encabezados. Si una palabra no es legible escribe "
+    "[ilegible]. Si hay un grafico (de barras, circular, de lineas, "
+    "diagrama, etc.), registra en 'graficos' su titulo, tipo, y los datos "
+    "que muestra (categorias, valores, unidades, tendencia) en texto plano "
+    "legible, como si describieras la tabla de datos equivalente -- no hace "
+    "falta que interpretes su significado legal, solo que los datos queden "
+    "registrados para que se pueda responder preguntas sobre ellos despues. "
+    "Devuelve solo JSON valido con estas claves: transcripcion, "
+    "tablas_markdown, graficos, advertencias, confianza_estimada."
+)
+
+
 def extract_json(text: str) -> dict:
     clean = (text or "").strip()
     if clean.startswith("```"):
@@ -250,14 +274,7 @@ def transcribe_page_openai(
     page_number: int,
     image_base64: str,
 ) -> dict:
-    prompt = (
-        "Transcribe literalmente esta pagina de una norma legal peruana. "
-        "No resumas, no corrijas el contenido legal y no inventes texto. "
-        "Conserva saltos de linea importantes, numerales, articulos, fechas, "
-        "unidades, tablas y encabezados. Si una palabra no es legible escribe "
-        "[ilegible]. Devuelve solo JSON valido con estas claves: "
-        "transcripcion, tablas_markdown, advertencias, confianza_estimada."
-    )
+    prompt = PROMPT_TRANSCRIPCION
     payload = {
         "model": model,
         "input": [
@@ -313,6 +330,7 @@ def transcribe_page_openai(
         "raw_response_id": data.get("id"),
         "transcripcion": parsed.get("transcripcion") or "",
         "tablas_markdown": parsed.get("tablas_markdown") or "",
+        "graficos": parsed.get("graficos") or "",
         "advertencias": parsed.get("advertencias") or [],
         "confianza_estimada": parsed.get("confianza_estimada"),
     }
@@ -326,14 +344,7 @@ def transcribe_page_openrouter(
     page_number: int,
     image_base64: str,
 ) -> dict:
-    prompt = (
-        "Transcribe literalmente esta pagina de una norma legal peruana. "
-        "No resumas, no corrijas el contenido legal y no inventes texto. "
-        "Conserva saltos de linea importantes, numerales, articulos, fechas, "
-        "unidades, tablas y encabezados. Si una palabra no es legible escribe "
-        "[ilegible]. Devuelve solo JSON valido con estas claves: "
-        "transcripcion, tablas_markdown, advertencias, confianza_estimada."
-    )
+    prompt = PROMPT_TRANSCRIPCION
     payload = {
         "model": model,
         "messages": [
@@ -393,6 +404,7 @@ def transcribe_page_openrouter(
         "raw_response_id": data.get("id"),
         "transcripcion": parsed.get("transcripcion") or "",
         "tablas_markdown": parsed.get("tablas_markdown") or "",
+        "graficos": parsed.get("graficos") or "",
         "advertencias": parsed.get("advertencias") or [],
         "confianza_estimada": parsed.get("confianza_estimada"),
     }
@@ -446,11 +458,21 @@ def _a_texto(valor) -> str:
 
 
 def build_replacement_text(ai_result: dict) -> str:
-    text = _a_texto(ai_result.get("transcripcion"))
+    partes = [_a_texto(ai_result.get("transcripcion"))]
+
     tables = _a_texto(ai_result.get("tablas_markdown"))
     if tables:
-        return f"{text}\n\n{tables}".strip()
-    return text
+        partes.append(tables)
+
+    # Se guarda como texto plano (no Markdown de tabla) porque un grafico no
+    # tiene filas/columnas reales -- es la descripcion que la IA registro de
+    # sus datos, para que /consulta pueda citarla igual que citaria un
+    # parrafo normal.
+    graficos = _a_texto(ai_result.get("graficos"))
+    if graficos:
+        partes.append(f"Gráfico(s) detectado(s) en esta página:\n{graficos}")
+
+    return "\n\n".join(p for p in partes if p).strip()
 
 
 def _html_escape(value: str) -> str:

@@ -61,7 +61,11 @@ on:
 jobs:
   openai-ocr:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Un lote grande (~250 paginas) con llamadas reales a un modelo de
+    # vision puede tardar mas de 60 minutos; el reporte ahora se escribe
+    # progresivamente (cada 10 paginas) asi que un timeout ya no pierde el
+    # avance, pero igual conviene dar margen para que termine solo.
+    timeout-minutes: 180
 
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

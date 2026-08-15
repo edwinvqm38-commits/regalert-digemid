@@ -172,6 +172,72 @@ function isAdmin(chatId: string): boolean {
   return admins.includes(chatId);
 }
 
+function listaAdminChatIds(): string[] {
+  return ADMIN_CHAT_IDS
+    .split(",")
+    .map((item: string) => item.trim())
+    .filter((item: string) => item.length > 0);
+}
+
+const COMANDOS_USUARIO: { command: string; description: string }[] = [
+  { command: "start", description: "Inicia el bot y muestra la bienvenida" },
+  { command: "menu", description: "Menú principal con botones" },
+  { command: "ayuda", description: "Guía de comandos y opciones" },
+  { command: "ultimas", description: "Últimas alertas registradas" },
+  { command: "hoy", description: "Alertas publicadas hoy" },
+  { command: "semana", description: "Alertas publicadas esta semana" },
+  { command: "mes", description: "Alertas publicadas este mes" },
+  { command: "recientes", description: "Alertas registradas recientemente" },
+  { command: "buscar", description: "Buscar alertas por palabra clave" },
+  { command: "consulta", description: "Preguntar con IA citando la norma/alerta fuente" },
+  { command: "suscribirme", description: "Solicitar activar un plan pagado" },
+  { command: "pague", description: "Reportar tu código de operación Yape" },
+  { command: "registrarme", description: "Registrar el nombre de tu cuenta" },
+  { command: "miperfil", description: "Ver tu nombre y el estado de tu plan" },
+  { command: "detalle", description: "Consultar una alerta por número" },
+];
+
+const COMANDOS_ADMIN: { command: string; description: string }[] = [
+  ...COMANDOS_USUARIO,
+  { command: "activar", description: "Activar un plan pagado a un usuario" },
+  { command: "desactivar", description: "Cancelar la suscripción de un usuario" },
+  { command: "usuarios", description: "Resumen de usuarios por estado/nivel" },
+  { command: "membresias", description: "Lista completa de suscripciones" },
+  { command: "directorio", description: "Usuarios por estado con recordatorio" },
+  { command: "ingresos", description: "Ingresos del mes por plan" },
+  { command: "invitar", description: "Generar invitación para un usuario nuevo" },
+  { command: "renombrar", description: "Cambiar el nombre de un usuario" },
+  { command: "gratis", description: "Dar acceso gratis permanente a un usuario" },
+  { command: "pagosyape", description: "Sumar los pagos Yape reportados este mes" },
+  { command: "saldodeepseek", description: "Consultar el saldo de la API DeepSeek" },
+  { command: "normasrevisar", description: "Normas con páginas de baja calidad" },
+  { command: "normassinpdf", description: "Normas sin PDF confirmado" },
+  { command: "normapdf", description: "Instrucciones para subir el PDF de una norma" },
+  { command: "normarevisar", description: "Corregir páginas de baja calidad de una norma" },
+  { command: "tablasrevisar", description: "Normas con tablas sin verificar" },
+  { command: "tablarevisar", description: "Verificar las tablas de una norma" },
+  { command: "normaestado", description: "Reporte de fidelidad (global o por norma)" },
+  { command: "reportenormas", description: "Reporte maestro HTML de todas las normas" },
+  { command: "actualizarcomandos", description: "Refrescar este menú de comandos" },
+];
+
+/** Registra el menu nativo "/" de Telegram: uno reducido para cualquier
+ * usuario (scope default) y uno completo (usuario + admin) solo para los
+ * chats de ADMIN_CHAT_IDS (scope "chat"), para no mostrarle a un usuario
+ * comun comandos administrativos que no puede usar. Se llama sola al
+ * arrancar la funcion (fire-and-forget) y tambien via /actualizarcomandos
+ * por si la funcion sigue "tibia" desde antes del ultimo deploy. */
+async function actualizarComandosTelegram(): Promise<void> {
+  await telegram("setMyCommands", { commands: COMANDOS_USUARIO });
+
+  for (const adminId of listaAdminChatIds()) {
+    await telegram("setMyCommands", {
+      commands: COMANDOS_ADMIN,
+      scope: { type: "chat", chat_id: adminId },
+    });
+  }
+}
+
 const KEYBOARD_LABEL_COMMANDS: Record<string, string> = {
   "🚨 Últimas alertas": "/ultimas",
   "🔎 Buscar": "/buscar",
@@ -1864,6 +1930,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/reportenormas</b>",
     "Reporte maestro en HTML con TODAS las normas: PDF subido o no, páginas procesadas, calidad, tablas/fórmulas/gráficos pendientes, ordenado de más a menos urgente. Ábrelo en un navegador, no en un editor de texto.",
+    "",
+    "<b>/actualizarcomandos</b>",
+    "Refresca el menú \"/\" nativo de Telegram (se actualiza solo en cada deploy, pero puedes forzarlo aquí).",
   ];
 
   return [...base, ...admin].join("\n");
@@ -3952,6 +4021,22 @@ async function handleCommand(
     }
   }
 
+  if (trimmed === "/actualizarcomandos") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    try {
+      await actualizarComandosTelegram();
+      return await sendMessage(
+        chatId,
+        "✅ Menú \"/\" actualizado. Si Telegram no lo refresca solo, cierra y vuelve a abrir el chat (o reinicia la app).",
+      );
+    } catch (error) {
+      return await sendMessage(chatId, `⚠️ Error al actualizar el menú: ${escapeHtml(String(error))}`);
+    }
+  }
+
   if (trimmed.startsWith("/invitar")) {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -4716,6 +4801,12 @@ async function handleCallback(update: TelegramUpdate) {
     mainMenu(),
   );
 }
+
+// Fire-and-forget: refresca el menu "/" de Telegram en cada arranque en frio
+// de la funcion (cada deploy), sin bloquear ni poder tumbar el bot si falla.
+actualizarComandosTelegram().catch((error) =>
+  console.error("SET_MY_COMMANDS_ERROR:", error)
+);
 
 serve(async (req: Request) => {
   try {

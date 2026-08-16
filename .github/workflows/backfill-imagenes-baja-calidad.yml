@@ -1,0 +1,42 @@
+name: Backfill imagenes de paginas de baja calidad
+
+on:
+  workflow_dispatch:
+    inputs:
+      document_key:
+        description: "Document key de una norma puntual (vacio = todas las pendientes)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generar imagenes de paginas de baja calidad
+        run: |
+          if [ -n "${{ inputs.document_key }}" ]; then
+            python scripts/generar_imagenes_paginas_baja_calidad.py --document-key "${{ inputs.document_key }}"
+          else
+            python scripts/generar_imagenes_paginas_baja_calidad.py --all
+          fi

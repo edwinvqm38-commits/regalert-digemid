@@ -114,6 +114,9 @@ type TelegramUpdate = {
       mime_type?: string;
     };
     caption?: string;
+    reply_to_message?: {
+      message_id: number;
+    };
   };
   callback_query?: {
     id: string;
@@ -1134,7 +1137,7 @@ const MAX_FOTOS_PAGINA_POR_NORMA = 6;
  * pueda revisar sin tener que abrir el reporte HTML. Limitado a
  * MAX_FOTOS_PAGINA_POR_NORMA para no inundar el chat en normas con muchas
  * paginas de baja calidad; el resto igual queda en el reporte HTML. */
-async function enviarImagenesPaginasBajaCalidad(chatId: string, paginas: any[]): Promise<void> {
+async function enviarImagenesPaginasBajaCalidad(chatId: string, normaId: string, paginas: any[]): Promise<void> {
   const conImagen = paginas.filter((p) => p.page_image_storage_path);
   const aEnviar = conImagen.slice(0, MAX_FOTOS_PAGINA_POR_NORMA);
 
@@ -1142,11 +1145,21 @@ async function enviarImagenesPaginasBajaCalidad(chatId: string, paginas: any[]):
     const urlImagen = await obtenerUrlFirmadaImagenPagina(p.page_image_storage_path);
     if (!urlImagen) continue;
     try {
-      await telegram("sendPhoto", {
+      const resultado: any = await telegram("sendPhoto", {
         chat_id: chatId,
         photo: urlImagen,
-        caption: `📄 Página ${p.page_number} tal cual está en el PDF.\n🔎 ${construirMotivoLegible(p)}`.slice(0, 1024),
+        caption: `📄 Página ${p.page_number} tal cual está en el PDF.\n🔎 ${construirMotivoLegible(p)}\n\n✏️ Para corregirla, responde (reply) a esta foto escribiendo el texto correcto.`.slice(0, 1024),
       });
+
+      const messageId = resultado?.result?.message_id;
+      if (messageId) {
+        await supabase.from("digemid_bot_correcciones_pendientes").insert({
+          chat_id: chatId,
+          message_id: messageId,
+          norma_id: normaId,
+          page_number: p.page_number,
+        });
+      }
     } catch (error) {
       console.error("ENVIAR_IMAGEN_PAGINA_ERROR:", error);
     }
@@ -1195,7 +1208,7 @@ async function enviarRevisionNorma(chatId: string, documentKey: string) {
       });
     }
 
-    await enviarImagenesPaginasBajaCalidad(chatId, paginas);
+    await enviarImagenesPaginasBajaCalidad(chatId, norma.id, paginas);
 
     const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
     await enviarDocumentoTexto(
@@ -1264,6 +1277,53 @@ async function enviarRevisionTablas(chatId: string, documentKey: string) {
     console.error("TABLAREVISAR_ERROR:", error);
     return await sendMessage(chatId, `⚠️ Error al generar la revisión de tablas: ${escapeHtml(String(error))}`);
   }
+}
+
+/** Aplica la correccion de UNA pagina cuando el admin responde (reply) a la
+ * foto de esa pagina con el texto correcto, en vez de pasar por el flujo
+ * completo de plantilla .txt (mas rapido para 1-2 paginas sueltas sin
+ * tablas). Devuelve null si el mensaje no es una respuesta a una foto de
+ * pagina pendiente (para que quien llama siga con el flujo normal). */
+async function aplicarCorreccionPorReply(
+  chatId: string,
+  replyToMessageId: number,
+  textoCorregido: string,
+): Promise<{ documentKey: string; pageNumber: number } | null> {
+  const { data: pendiente } = await supabase
+    .from("digemid_bot_correcciones_pendientes")
+    .select("id, norma_id, page_number")
+    .eq("chat_id", chatId)
+    .eq("message_id", replyToMessageId)
+    .maybeSingle();
+
+  if (!pendiente) return null;
+
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("document_key")
+    .eq("id", pendiente.norma_id)
+    .maybeSingle();
+
+  const ahora = new Date().toISOString();
+  const textoNormalizado = textoCorregido.trim().normalize("NFC");
+
+  await supabase
+    .from("digemid_norma_paginas")
+    .update({
+      text_raw: textoNormalizado,
+      text_normalized: textoNormalizado,
+      quality_score: 1,
+      extraction_method: "revision_manual",
+      revisado_manual: true,
+      revisado_en: ahora,
+      updated_at: ahora,
+    })
+    .eq("norma_id", pendiente.norma_id)
+    .eq("page_number", pendiente.page_number);
+
+  await supabase.from("digemid_bot_correcciones_pendientes").delete().eq("id", pendiente.id);
+
+  return { documentKey: norma?.document_key ?? "?", pageNumber: pendiente.page_number };
 }
 
 /** Parsea la plantilla .txt devuelta por un admin y aplica la correccion. */
@@ -5056,6 +5116,19 @@ serve(async (req: Request) => {
       }
 
       return new Response("OK", { status: 200 });
+    }
+
+    const replyToMessageId = update.message?.reply_to_message?.message_id;
+    if (replyToMessageId && update.message?.text && isAdmin(chatId)) {
+      const resultado = await aplicarCorreccionPorReply(chatId, replyToMessageId, update.message.text);
+      if (resultado) {
+        await sendMessage(
+          chatId,
+          `✅ Página <b>${escapeHtml(resultado.pageNumber)}</b> de <b>${escapeHtml(resultado.documentKey)}</b> corregida.`,
+        );
+        return new Response("OK", { status: 200 });
+      }
+      // No es reply a una foto de pagina pendiente: sigue como mensaje normal.
     }
 
     const text = update.message?.text ?? "/start";

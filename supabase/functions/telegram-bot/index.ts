@@ -2077,7 +2077,10 @@ function helpText(esAdmin = false) {
     "Instrucciones para subir el PDF de una norma puntual (adjunta el PDF con ese mismo comando como caption).",
     "",
     "<b>/normarevisar document_key</b>",
-    "Te mando un reporte HTML, el PDF original y una plantilla .txt para corregir el texto. Reenvía la plantilla editada a este chat para actualizar Supabase, sin entrar a la base de datos.",
+    "Te mando un reporte HTML, el PDF original, la plantilla .txt y (si ya se generó) una foto por cada página de baja calidad. Hay 2 formas de corregir:\n" +
+      "• <b>Rápida (1-2 páginas sueltas, sin tabla):</b> responde (reply) a la foto de esa página escribiendo el texto correcto. Confirmo al toque, sin archivos.\n" +
+      "• <b>Completa (muchas páginas o con tablas):</b> edita la plantilla .txt comparando con el PDF y reenvíala como documento a este chat.\n" +
+      "Si una norma no tiene foto todavía, usa <code>/tablarevisar</code> o pídeme que corra el backfill de imágenes para esa norma.",
     "",
     "<b>/tablasrevisar</b>",
     "Lista las normas con tablas cuya correspondencia fila-columna nadie confirmó contra el PDF (texto legible, pero tabla sin verificar).",

@@ -617,7 +617,9 @@ async function getPaginasBajaCalidad(documentKey: string) {
 
   const { data: paginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("page_number, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw")
+    .select(
+      "page_number, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw, page_image_storage_path",
+    )
     .eq("norma_id", norma.id)
     .lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)
     .eq("revisado_manual", false)
@@ -975,14 +977,74 @@ function renderTextoConTablasHtml(texto: string): string {
   return partes.join("\n");
 }
 
-function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
-  const filas = paginas
-    .map((p) => {
-      const motivo = [
-        `método: ${escapeHtml(p.extraction_method ?? "?")}`,
-        p.ocr_confidence != null ? `confianza OCR: ${p.ocr_confidence}` : null,
-        p.posible_formula ? "posible fórmula/notación técnica" : null,
-      ].filter(Boolean).join(" · ");
+/** Traduce las senales crudas ya guardadas por pagina (quality_score,
+ * extraction_method, ocr_confidence, posible_formula) a una frase en
+ * lenguaje llano sobre QUE especificamente hay que revisar, en vez de solo
+ * mostrar los numeros -- que es la queja concreta que motivo este cambio:
+ * la plantilla anterior era "muy general" y no decia que corregir. */
+function construirMotivoLegible(p: any): string {
+  const texto = (p.text_normalized ?? p.text_raw ?? "").trim();
+  const calidad = p.quality_score ?? 0;
+  const metodo = p.extraction_method ?? "?";
+
+  if (calidad === 0 && texto.length < 15) {
+    return (
+      `El texto extraído tiene solo ${texto.length} carácter(es)` +
+      (texto.length ? ` ("${texto}")` : "") +
+      ". Esta página casi con certeza es una imagen o escaneo sin capa de texto real " +
+      "(sello, firma, diagrama o foto), así que el extractor no pudo leer nada útil. " +
+      "Corrígela transcribiendo a mano lo que se ve en la imagen adjunta."
+    );
+  }
+  if (metodo.startsWith("ocr") || p.ocr_used) {
+    const conf = p.ocr_confidence != null ? ` con confianza OCR ${p.ocr_confidence}` : "";
+    return (
+      `El texto se obtuvo por OCR${conf} porque no había texto seleccionable en el PDF ` +
+      "(probablemente escaneado). Compara línea por línea contra la imagen adjunta: el OCR " +
+      "suele confundir números, tildes y saltos de columna."
+    );
+  }
+  if (p.posible_formula) {
+    return (
+      "Se detectó notación técnica o matemática (símbolos como =, %, fórmulas). Revisa que " +
+      "esos símbolos y subíndices se transcribieron bien, comparando contra la imagen adjunta."
+    );
+  }
+  if (calidad < UMBRAL_BAJA_CALIDAD_NORMA) {
+    return (
+      `El texto extraído (método: ${metodo}) tiene calidad baja (${calidad.toFixed(2)}): palabras ` +
+      "pegadas, cortadas o con caracteres sueltos. Compara contra la imagen adjunta y corrige " +
+      "donde el texto no coincida con lo que se ve."
+    );
+  }
+  return `Calidad ${calidad.toFixed(2)} (método: ${metodo}). Revisar igual comparando contra la imagen adjunta.`;
+}
+
+/** URL firmada (48h, suficiente para que se revise y reenvie el archivo) de
+ * la imagen de una pagina de baja calidad, o null si esa pagina no tiene
+ * imagen generada (normas procesadas antes de que la ingesta empezara a
+ * generarlas) o si falla la firma. */
+async function obtenerUrlFirmadaImagenPagina(rutaImagen: string | null | undefined): Promise<string | null> {
+  if (!rutaImagen) return null;
+  try {
+    const { data, error } = await supabase.storage
+      .from(NORMATIVA_STORAGE_BUCKET)
+      .createSignedUrl(rutaImagen, 60 * 60 * 48);
+    if (error || !data?.signedUrl) return null;
+    return data.signedUrl;
+  } catch {
+    return null;
+  }
+}
+
+async function construirReporteHtmlRevision(norma: any, paginas: any[]): Promise<string> {
+  const filasArr = await Promise.all(
+    paginas.map(async (p) => {
+      const motivo = escapeHtml(construirMotivoLegible(p));
+      const urlImagen = await obtenerUrlFirmadaImagenPagina(p.page_image_storage_path);
+      const imagenHtml = urlImagen
+        ? `<img class="pagina-imagen" src="${urlImagen}" alt="Página ${p.page_number} del PDF" loading="lazy">`
+        : `<span class="sin-imagen">(sin imagen — norma procesada antes de generarlas)</span>`;
 
       const muestra = renderTextoConTablasHtml(p.text_normalized ?? p.text_raw ?? "");
 
@@ -991,10 +1053,12 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
           <td>${p.page_number}</td>
           <td>${p.quality_score}</td>
           <td>${motivo}</td>
+          <td>${imagenHtml}</td>
           <td>${muestra}</td>
         </tr>`;
-    })
-    .join("\n");
+    }),
+  );
+  const filas = filasArr.join("\n");
 
   return `<!doctype html>
 <html lang="es">
@@ -1009,6 +1073,8 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   th { background: #f0f0f0; }
   pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 0.85rem; }
   .nota { background: #fff8e1; border: 1px solid #ffe082; padding: 0.75rem; border-radius: 6px; }
+  .pagina-imagen { width: 220px; max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; }
+  .sin-imagen { color: #888; font-size: 0.8rem; font-style: italic; }
   /* Tablas extraidas de una pagina (dentro de la celda "Texto extraido"):
      scroll horizontal propio para que una tabla ancha no rompa el layout
      de la tabla de revision que la contiene. */
@@ -1026,11 +1092,12 @@ function construirReporteHtmlRevision(norma: any, paginas: any[]): string {
   <p>${escapeHtml(norma.titulo ?? "")}</p>
   <div class="nota">
     Corrige el texto en la plantilla .txt que te envié junto a este reporte,
-    comparando con el PDF adjunto, y reenvía ese mismo archivo .txt a este
-    chat cuando termines. No necesitas entrar a Supabase.
+    comparando con el PDF adjunto (o la imagen de cada página, si aparece
+    abajo), y reenvía ese mismo archivo .txt a este chat cuando termines.
+    No necesitas entrar a Supabase.
   </div>
   <table>
-    <thead><tr><th>Página</th><th>Calidad</th><th>Motivo</th><th>Texto extraído (muestra)</th></tr></thead>
+    <thead><tr><th>Página</th><th>Calidad</th><th>Qué revisar</th><th>Imagen de la página</th><th>Texto extraído (muestra)</th></tr></thead>
     <tbody>${filas}</tbody>
   </table>
 </body>
@@ -1049,18 +1116,49 @@ function construirPlantillaTxtRevision(documentKey: string, paginas: any[]): str
   ].join("\n");
 
   const bloques = paginas.map((p) => {
-    const motivo = [
-      `calidad actual: ${p.quality_score}`,
-      `metodo: ${p.extraction_method ?? "?"}`,
-      p.ocr_confidence != null ? `confianza ocr: ${p.ocr_confidence}` : null,
-      p.posible_formula ? "posible formula/notacion tecnica" : null,
-    ].filter(Boolean).join(", ");
-
+    // OJO: el parentesis es el formato que aplicarRevisionManualNorma() espera
+    // para volver a encontrar el numero de pagina al reconstruir la plantilla
+    // corregida -- no cambiar a otro separador sin actualizar ese regex.
+    const motivo = construirMotivoLegible(p).replace(/[()]/g, "");
     const texto = convertirTablasATextoEditable(p.text_normalized ?? p.text_raw ?? "");
-    return `### PAGINA ${p.page_number} (${motivo})\n${texto}\n`;
+    return `### PAGINA ${p.page_number} (que revisar: ${motivo})\n${texto}\n`;
   });
 
   return `${encabezado}\n${bloques.join("\n")}`;
+}
+
+const MAX_FOTOS_PAGINA_POR_NORMA = 6;
+
+/** Envia, como foto directa en el chat (no solo dentro del HTML), la imagen
+ * de cada pagina de baja calidad junto al motivo especifico -- para que se
+ * pueda revisar sin tener que abrir el reporte HTML. Limitado a
+ * MAX_FOTOS_PAGINA_POR_NORMA para no inundar el chat en normas con muchas
+ * paginas de baja calidad; el resto igual queda en el reporte HTML. */
+async function enviarImagenesPaginasBajaCalidad(chatId: string, paginas: any[]): Promise<void> {
+  const conImagen = paginas.filter((p) => p.page_image_storage_path);
+  const aEnviar = conImagen.slice(0, MAX_FOTOS_PAGINA_POR_NORMA);
+
+  for (const p of aEnviar) {
+    const urlImagen = await obtenerUrlFirmadaImagenPagina(p.page_image_storage_path);
+    if (!urlImagen) continue;
+    try {
+      await telegram("sendPhoto", {
+        chat_id: chatId,
+        photo: urlImagen,
+        caption: `📄 Página ${p.page_number} tal cual está en el PDF.\n🔎 ${construirMotivoLegible(p)}`.slice(0, 1024),
+      });
+    } catch (error) {
+      console.error("ENVIAR_IMAGEN_PAGINA_ERROR:", error);
+    }
+  }
+
+  if (conImagen.length > aEnviar.length) {
+    await sendMessage(
+      chatId,
+      `ℹ️ Hay ${conImagen.length - aEnviar.length} página(s) de baja calidad más con imagen — ` +
+        "revísalas en el reporte HTML adjunto.",
+    );
+  }
 }
 
 /** Genera y envia el reporte HTML, el PDF y la plantilla .txt de una norma
@@ -1080,7 +1178,7 @@ async function enviarRevisionNorma(chatId: string, documentKey: string) {
       return await sendMessage(chatId, `✅ "${escapeHtml(documentKey)}" no tiene páginas pendientes de revisión.`);
     }
 
-    const html = construirReporteHtmlRevision(norma, paginas);
+    const html = await construirReporteHtmlRevision(norma, paginas);
     await enviarDocumentoTexto(
       chatId,
       html,
@@ -1097,13 +1195,15 @@ async function enviarRevisionNorma(chatId: string, documentKey: string) {
       });
     }
 
+    await enviarImagenesPaginasBajaCalidad(chatId, paginas);
+
     const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
     await enviarDocumentoTexto(
       chatId,
       plantilla,
       `plantilla_${documentKey}.txt`,
       "text/plain",
-      "✏️ Corrige el texto de cada página comparando con el PDF y reenvía este mismo archivo (como documento) a este chat cuando termines.",
+      "✏️ Corrige el texto de cada página comparando con el PDF (o con la imagen que te mandé arriba, si la tiene) y reenvía este mismo archivo (como documento) a este chat cuando termines.",
     );
 
     return new Response("OK", { status: 200 });
@@ -1133,7 +1233,7 @@ async function enviarRevisionTablas(chatId: string, documentKey: string) {
       return await sendMessage(chatId, `✅ "${escapeHtml(documentKey)}" no tiene tablas pendientes de verificación.`);
     }
 
-    const html = construirReporteHtmlRevision(norma, paginas);
+    const html = await construirReporteHtmlRevision(norma, paginas);
     await enviarDocumentoTexto(
       chatId,
       html,

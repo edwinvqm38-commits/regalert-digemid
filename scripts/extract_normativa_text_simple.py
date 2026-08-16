@@ -18,6 +18,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fitz
 import requests
 from dotenv import load_dotenv
 from supabase import create_client
@@ -206,13 +207,47 @@ def normalize_text(text: str) -> str:
     return unicodedata.normalize("NFC", text or "").strip()
 
 
-def write_pages(supabase, norma_id: str, extracciones) -> dict:
+def subir_imagen_pagina_baja_calidad(
+    supabase, pdf_doc: "fitz.Document", document_key: str, page_number: int, dpi: int = 150
+) -> str | None:
+    """Renderiza UNA pagina del PDF a PNG y la sube a Storage, para que el
+    reporte de revision pueda mostrar la pagina real en vez de solo texto y
+    numeros de calidad. Se llama solo para paginas de baja calidad (son pocas
+    por norma), asi que el costo de renderizar/subir es marginal. Devuelve la
+    ruta en Storage, o None si algo falla (no debe frenar la extraccion de
+    texto por esto)."""
+    try:
+        page = pdf_doc[page_number - 1]
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+        png_bytes = pix.tobytes("png")
+        object_path = f"paginas-baja-calidad/{document_key}/pagina-{page_number}.png"
+        supabase.storage.from_(STORAGE_BUCKET).upload(
+            object_path,
+            png_bytes,
+            file_options={"content-type": "image/png", "upsert": "true"},
+        )
+        return object_path
+    except Exception:
+        logger.exception(
+            "No se pudo renderizar/subir la imagen de %s pagina %s (se continua sin imagen).",
+            document_key,
+            page_number,
+        )
+        return None
+
+
+def write_pages(supabase, norma_id: str, document_key: str, local_path: Path, extracciones) -> dict:
     """Escribe páginas y devuelve estadísticas de la norma para auditoría:
     cuántas quedaron con baja calidad, cuántas usaron OCR, cuántas traen
     tablas detectadas y cuántas se marcaron con posible fórmula/notación
     técnica (estas dos últimas requieren revisión humana antes de usarse en
     consultas legales, ya que ni el texto plano ni el OCR las reconstruyen
-    con fidelidad)."""
+    con fidelidad).
+
+    Para las páginas de baja calidad, además sube una imagen PNG de esa
+    página a Storage (digemid_norma_paginas.page_image_storage_path), para
+    que la revisión manual muestre la página real en vez de solo un
+    quality_score."""
     stats = {
         "baja_calidad": 0,
         "ocr_usado": False,
@@ -221,6 +256,22 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         "con_grafico": 0,
         "paginas_baja_calidad": [],
     }
+
+    paginas_baja_calidad = [p.page_number for p in extracciones if p.quality < UMBRAL_BAJA_CALIDAD]
+    imagenes_por_pagina: dict[int, str] = {}
+    if paginas_baja_calidad:
+        try:
+            with fitz.open(str(local_path)) as pdf_doc:
+                for page_number in paginas_baja_calidad:
+                    ruta_imagen = subir_imagen_pagina_baja_calidad(
+                        supabase, pdf_doc, document_key, page_number
+                    )
+                    if ruta_imagen:
+                        imagenes_por_pagina[page_number] = ruta_imagen
+        except Exception:
+            logger.exception(
+                "No se pudieron generar imagenes de paginas de baja calidad para %s.", document_key
+            )
 
     for page in extracciones:
         if page.quality < UMBRAL_BAJA_CALIDAD:
@@ -247,6 +298,7 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
             "has_tables": page.has_tables,
             "posible_formula": page.posible_formula,
             "posible_grafico": page.posible_grafico,
+            "page_image_storage_path": imagenes_por_pagina.get(page.page_number),
             "metadata": {
                 "quality_score": page.quality,
                 "method": page.method,
@@ -681,7 +733,7 @@ def main():
 
             extracciones = extract_pdf(str(local_path))
 
-            stats = write_pages(supabase, norma["id"], extracciones)
+            stats = write_pages(supabase, norma["id"], document_key, local_path, extracciones)
             promedio = sum(p.quality for p in extracciones) / max(1, len(extracciones))
             estado = "text_extracted" if promedio >= UMBRAL_BAJA_CALIDAD else "text_extracted_baja_calidad"
             mark_norma(supabase, norma["id"], estado, stats)

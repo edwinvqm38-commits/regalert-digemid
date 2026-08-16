@@ -1,0 +1,48 @@
+name: Enviar ejemplo de revision a Telegram (prueba de concepto)
+
+on:
+  workflow_dispatch:
+    inputs:
+      document_key:
+        description: "Document key de la norma"
+        required: true
+        default: "RM-607-2024"
+        type: string
+      page:
+        description: "Numero de pagina a mostrar"
+        required: true
+        default: "94"
+        type: string
+
+jobs:
+  enviar-ejemplo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Enviar ejemplo a Telegram
+        run: |
+          python scripts/enviar_ejemplo_revision_telegram.py \
+            --document-key "${{ inputs.document_key }}" \
+            --page "${{ inputs.page }}"

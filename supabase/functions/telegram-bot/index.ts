@@ -1269,7 +1269,19 @@ async function enviarRevisionTablas(chatId: string, documentKey: string) {
       plantilla,
       `tablas_${documentKey}.txt`,
       "text/plain",
-      "✏️ Compara el bloque \"Tabla:\" de cada página contra el PDF. Si la tabla está bien asignada (exportador/importador, montos, plazos, etc.), reenvía este mismo archivo sin cambios; si está mal, corrígela y reenvíalo.",
+      "✏️ Compara el bloque \"Tabla:\" de cada página contra el PDF. Si está MAL asignada, corrige la plantilla y reenvíala. Si está BIEN, no hace falta tocar ningún archivo: toca el botón de abajo para esa página.",
+    );
+
+    const botonesConfirmar = paginas.map((p) => [
+      {
+        text: `✅ Página ${p.page_number}: tabla correcta`,
+        callback_data: `tablaok:${documentKey}:${p.page_number}`,
+      },
+    ]);
+    await sendMessage(
+      chatId,
+      "👉 Si ya comparaste una tabla contra el PDF y está bien, confírmala aquí (sin archivos):",
+      { inline_keyboard: botonesConfirmar },
     );
 
     return new Response("OK", { status: 200 });
@@ -2086,7 +2098,7 @@ function helpText(esAdmin = false) {
     "Lista las normas con tablas cuya correspondencia fila-columna nadie confirmó contra el PDF (texto legible, pero tabla sin verificar).",
     "",
     "<b>/tablarevisar document_key</b>",
-    "Igual que /normarevisar pero para tablas: te mando el PDF y la tabla en Markdown extraída. Si está bien, reenvía el archivo sin cambios; si está mal, corrígela y reenvíala.",
+    "Te mando el PDF y la tabla extraída. Si está BIEN, toca el botón \"✅ Página N: tabla correcta\" (sin archivos). Si está MAL, corrige la plantilla .txt comparando con el PDF y reenvíala como documento.",
     "",
     "<b>/normaestado [document_key]</b>",
     "Reporte de fidelidad: calidad de texto, tablas, OCR, fórmulas y revisión manual. Sin argumento, resume toda la base; con document_key, el detalle de esa norma con un veredicto (confiable / usar con precaución / necesita revisión).",
@@ -4618,6 +4630,37 @@ async function handleCallback(update: TelegramUpdate) {
 
     const documentKey = data.slice("tablarevisar:".length);
     return await enviarRevisionTablas(chatId, documentKey);
+  }
+
+  if (data.startsWith("tablaok:")) {
+    if (!isAdmin(chatId)) {
+      return;
+    }
+
+    const [, documentKey, pageNumberStr] = data.split(":");
+    const pageNumber = parseInt(pageNumberStr, 10);
+
+    const { data: norma } = await supabase
+      .from("digemid_normas")
+      .select("id")
+      .eq("document_key", documentKey)
+      .maybeSingle();
+
+    if (!norma) {
+      return await sendMessage(chatId, `⚠️ No encontré la norma "${escapeHtml(documentKey)}".`);
+    }
+
+    const ahora = new Date().toISOString();
+    await supabase
+      .from("digemid_norma_paginas")
+      .update({ tabla_verificada: true, tabla_verificada_en: ahora, updated_at: ahora })
+      .eq("norma_id", norma.id)
+      .eq("page_number", pageNumber);
+
+    return await sendMessage(
+      chatId,
+      `✅ Tabla de la página <b>${escapeHtml(pageNumber)}</b> de <b>${escapeHtml(documentKey)}</b> confirmada como correcta.`,
+    );
   }
 
   if (data.startsWith("normapdf:")) {

@@ -2564,6 +2564,87 @@ function esConsultaDeConteoAlertas(pregunta: string): boolean {
   return preguntaCuantas && mencionaAlertas && ambitoTemporalAlertas(pregunta) !== null;
 }
 
+/** Detecta preguntas sobre anexos/formularios/fichas imprimibles (ej. "¿la
+ * NTS 097 tiene el anexo de protocolo de entrevista?"), que no deben pasar
+ * por la busqueda de texto normal: esas paginas quedan excluidas ahi a
+ * proposito porque no tienen contenido normativo que citar (ver
+ * es_formulario_anexo). En vez de citarlas como texto, se les responde con
+ * la imagen real de la pagina. */
+function esConsultaDeAnexoFormulario(pregunta: string): boolean {
+  const texto = normalizarTexto(pregunta);
+  return /\b(anexo|anexos|formulario|formularios|ficha|fichas|formato|formatos)\b/.test(texto);
+}
+
+async function buscarFormulariosAnexo(pregunta: string, limite = 3) {
+  const { data, error } = await supabase.rpc("buscar_formularios_anexo", {
+    query_texto: pregunta,
+    limite,
+  });
+
+  if (error) throw error;
+
+  return (data ?? []) as {
+    document_key: string;
+    titulo: string | null;
+    page_number: number;
+    page_image_storage_path: string | null;
+    detail_url: string | null;
+  }[];
+}
+
+/** Responde una pregunta sobre anexos/formularios mandando, por cada pagina
+ * encontrada, un texto identificandola + la imagen real de esa pagina (ya
+ * generada para revision manual), en vez de citar texto -- son formatos en
+ * blanco para llenar/imprimir, no contenido para resumir. Si no encuentra
+ * ningun formulario/anexo marcado, devuelve false para que quien llama siga
+ * con la busqueda normal de /consulta (puede que la pregunta mencione
+ * "anexo" pero en realidad busque contenido normativo real). */
+async function responderConsultaAnexoFormulario(
+  chatId: string,
+  userId: string | undefined,
+  question: string,
+): Promise<boolean> {
+  const resultados = await buscarFormulariosAnexo(question);
+
+  if (!resultados.length) return false;
+
+  await logConsulta({
+    chatId,
+    userId,
+    command: "/consulta",
+    queryText: question,
+    resultCount: resultados.length,
+    status: "ok_anexo_formulario",
+  });
+
+  for (const r of resultados) {
+    const urlImagen = await obtenerUrlFirmadaImagenPagina(r.page_image_storage_path);
+    const botones = r.detail_url ? { inline_keyboard: [[{ text: "📄 Ver PDF completo", url: r.detail_url }]] } : undefined;
+
+    if (urlImagen) {
+      await telegram("sendPhoto", {
+        chat_id: chatId,
+        photo: urlImagen,
+        caption: `📋 Anexo/formulario — <b>${escapeHtml(r.document_key)}</b>, página ${r.page_number}` +
+          (r.titulo ? `\n${escapeHtml(r.titulo)}` : "") +
+          "\n\nEs un formato en blanco para llenar/imprimir, no contiene texto normativo.",
+        parse_mode: "HTML",
+        reply_markup: botones,
+      });
+    } else {
+      await sendMessage(
+        chatId,
+        `📋 Encontré un anexo/formulario en <b>${escapeHtml(r.document_key)}</b>, página ${r.page_number}` +
+          (r.titulo ? ` (${escapeHtml(r.titulo)})` : "") +
+          ", pero todavía no tengo la imagen guardada de esa página. Ábrelo desde el PDF completo:",
+        botones,
+      );
+    }
+  }
+
+  return true;
+}
+
 const UMBRAL_CONTEXTO_BAJA_CALIDAD = 0.5;
 const UMBRAL_CONTEXTO_MEDIA_CALIDAD = 0.85;
 
@@ -4441,6 +4522,14 @@ async function handleCommand(
         chatId,
         "🤖 <b>Consulta IA</b>\n\nEscribe tu pregunta despues de /consulta y te respondo citando la alerta o norma oficial.\n\nEjemplo:\n<code>/consulta que paso con el Opdivo falsificado</code>",
       );
+    }
+
+    if (esConsultaDeAnexoFormulario(question)) {
+      const respondido = await responderConsultaAnexoFormulario(chatId, userId, question);
+      if (respondido) return;
+      // Ninguna coincidencia entre los formularios/anexos marcados: puede que
+      // la pregunta use "anexo"/"formato" para referirse a contenido real
+      // (ej. "el anexo 3 dice que..."), asi que sigue con la busqueda normal.
     }
 
     if (esConsultaDeConteoAlertas(question)) {

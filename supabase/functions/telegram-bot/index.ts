@@ -626,6 +626,7 @@ async function getPaginasBajaCalidad(documentKey: string) {
     .eq("norma_id", norma.id)
     .lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)
     .eq("revisado_manual", false)
+    .eq("es_formulario_anexo", false)
     .order("page_number");
 
   return { norma, paginas: paginas ?? [] };
@@ -1148,7 +1149,12 @@ async function enviarImagenesPaginasBajaCalidad(chatId: string, normaId: string,
       const resultado: any = await telegram("sendPhoto", {
         chat_id: chatId,
         photo: urlImagen,
-        caption: `📄 Página ${p.page_number} tal cual está en el PDF.\n🔎 ${construirMotivoLegible(p)}\n\n✏️ Para corregirla, responde (reply) a esta foto escribiendo el texto correcto.`.slice(0, 1024),
+        caption: `📄 Página ${p.page_number} tal cual está en el PDF.\n🔎 ${construirMotivoLegible(p)}\n\n✏️ Para corregirla, responde (reply) a esta foto escribiendo el texto correcto.\n📋 Si es un formulario/anexo en blanco (nada que transcribir), toca el botón de abajo.`.slice(0, 1024),
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "📋 Es un formulario/anexo en blanco", callback_data: "formularioanexo" },
+          ]],
+        },
       });
 
       const messageId = resultado?.result?.message_id;
@@ -1326,6 +1332,51 @@ async function aplicarCorreccionPorReply(
       text_normalized: textoNormalizado,
       quality_score: 1,
       extraction_method: "revision_manual",
+      revisado_manual: true,
+      revisado_en: ahora,
+      updated_at: ahora,
+    })
+    .eq("norma_id", pendiente.norma_id)
+    .eq("page_number", pendiente.page_number);
+
+  await supabase.from("digemid_bot_correcciones_pendientes").delete().eq("id", pendiente.id);
+
+  return { documentKey: norma?.document_key ?? "?", pageNumber: pendiente.page_number };
+}
+
+/** Marca la pagina de la foto en messageId como formulario/anexo imprimible
+ * en blanco (fichas, protocolos de entrevista, formatos POES, etc.): no hay
+ * texto que corregir, asi que sale de la cola de revision manual y se
+ * excluye de las busquedas de /consulta (buscar_paginas_texto), para que la
+ * IA nunca la cite como si fuera contenido normativo. Devuelve null si el
+ * mensaje no corresponde a una foto de pagina pendiente. */
+async function marcarPaginaComoFormularioAnexo(
+  chatId: string,
+  messageId: number,
+): Promise<{ documentKey: string; pageNumber: number } | null> {
+  const { data: pendiente } = await supabase
+    .from("digemid_bot_correcciones_pendientes")
+    .select("id, norma_id, page_number")
+    .eq("chat_id", chatId)
+    .eq("message_id", messageId)
+    .maybeSingle();
+
+  if (!pendiente) return null;
+
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("document_key")
+    .eq("id", pendiente.norma_id)
+    .maybeSingle();
+
+  const ahora = new Date().toISOString();
+
+  await supabase
+    .from("digemid_norma_paginas")
+    .update({
+      es_formulario_anexo: true,
+      quality_score: 1,
+      extraction_method: "formulario_anexo",
       revisado_manual: true,
       revisado_en: ahora,
       updated_at: ahora,
@@ -2089,10 +2140,11 @@ function helpText(esAdmin = false) {
     "Instrucciones para subir el PDF de una norma puntual (adjunta el PDF con ese mismo comando como caption).",
     "",
     "<b>/normarevisar document_key</b>",
-    "Te mando un reporte HTML, el PDF original, la plantilla .txt y (si ya se generó) una foto por cada página de baja calidad. Hay 2 formas de corregir:\n" +
+    "Te mando un reporte HTML, el PDF original, la plantilla .txt y (si ya se generó) una foto por cada página de baja calidad. Hay 3 formas de resolver cada página:\n" +
       "• <b>Rápida (1-2 páginas sueltas, sin tabla):</b> responde (reply) a la foto de esa página escribiendo el texto correcto. Confirmo al toque, sin archivos.\n" +
+      "• <b>Es un formulario/anexo en blanco</b> (ficha, protocolo de entrevista, formato POES, etc. — nada que transcribir): toca el botón \"📋 Es un formulario/anexo en blanco\" bajo la foto. Sale de la cola y no se cita en /consulta.\n" +
       "• <b>Completa (muchas páginas o con tablas):</b> edita la plantilla .txt comparando con el PDF y reenvíala como documento a este chat.\n" +
-      "Si una norma no tiene foto todavía, usa <code>/tablarevisar</code> o pídeme que corra el backfill de imágenes para esa norma.",
+      "Si una norma no tiene foto todavía, pídeme que corra el backfill de imágenes para esa norma.",
     "",
     "<b>/tablasrevisar</b>",
     "Lista las normas con tablas cuya correspondencia fila-columna nadie confirmó contra el PDF (texto legible, pero tabla sin verificar).",
@@ -4670,6 +4722,26 @@ async function handleCallback(update: TelegramUpdate) {
 
     const documentKey = data.slice("normapdf:".length);
     return await enviarInstruccionNormaPdf(chatId, documentKey);
+  }
+
+  if (data === "formularioanexo") {
+    if (!isAdmin(chatId)) {
+      return;
+    }
+
+    const messageId = callback.message?.message_id;
+    if (!messageId) return;
+
+    const resultado = await marcarPaginaComoFormularioAnexo(chatId, messageId);
+    if (!resultado) {
+      return await sendMessage(chatId, "⚠️ No encontré a qué página corresponde este botón.");
+    }
+
+    return await sendMessage(
+      chatId,
+      `📋 Página <b>${escapeHtml(resultado.pageNumber)}</b> de <b>${escapeHtml(resultado.documentKey)}</b> marcada como formulario/anexo en blanco. ` +
+        "Sale de la cola de revisión y no se citará en /consulta.",
+    );
   }
 
   if (data.startsWith("tts:")) {

@@ -1458,11 +1458,17 @@ async function aplicarRevisionManualNorma(
 
 const NORMATIVA_STORAGE_BUCKET = "digemid-documentos";
 
-/** Envia las instrucciones para subir a mano el PDF de UNA norma puntual.
- * El caption exigido ("/normapdf DOCUMENT_KEY") es lo que ata el PDF a esa
- * norma exacta: no depende de ningun estado de conversacion, asi que no hay
- * forma de que el PDF de una norma termine aplicado a otra por error de
- * orden o de mensajes cruzados. */
+const NORMAPDF_PENDIENTE_MINUTOS = 30;
+
+/** Envia las instrucciones para subir a mano el PDF de UNA norma puntual, y
+ * registra en digemid_bot_normapdf_pendiente que ESTE chat espera el PDF de
+ * ESTE document_key. Antes se exigia que el propio archivo trajera el
+ * caption "/normapdf DOCUMENT_KEY", pero en varios clientes de Telegram
+ * movil no es facil escribir un caption al adjuntar un documento -- por eso
+ * ahora el simple envio del PDF (sin nada mas) alcanza mientras el pendiente
+ * siga vigente (ver manejarPdfManual). El caption sigue funcionando igual
+ * para quien ya tiene la costumbre (util tambien si hay mas de un PDF
+ * pendiente a la vez, ej. desde PC). */
 async function enviarInstruccionNormaPdf(chatId: string, documentKey: string): Promise<Response> {
   const { data: norma } = await supabase
     .from("digemid_normas")
@@ -1474,14 +1480,17 @@ async function enviarInstruccionNormaPdf(chatId: string, documentKey: string): P
     return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
   }
 
+  await supabase
+    .from("digemid_bot_normapdf_pendiente")
+    .upsert({ chat_id: chatId, document_key: documentKey, created_at: new Date().toISOString() });
+
   return await sendMessage(
     chatId,
-    `📄 Para subir el PDF de <b>${escapeHtml(documentKey)}</b>` +
-      `${norma.titulo ? ` (${escapeHtml(norma.titulo)})` : ""}:\n\n` +
-      "1. Adjunta el archivo PDF en este chat.\n" +
-      "2. En el pie de foto (caption) del archivo, escribe exactamente:\n" +
-      `<code>/normapdf ${escapeHtml(documentKey)}</code>\n\n` +
-      "El caption es obligatorio: así el PDF queda atado únicamente a esta norma y no se puede mezclar con otra.",
+    `📄 Listo. Ahora mándame el PDF de <b>${escapeHtml(documentKey)}</b>` +
+      `${norma.titulo ? ` (${escapeHtml(norma.titulo)})` : ""}` +
+      ` como documento adjunto — no necesitas escribir nada más, ni como pie de foto ni aparte.\n\n` +
+      `Tienes ${NORMAPDF_PENDIENTE_MINUTOS} minutos. Si prefieres, también puedes seguir usando el pie de foto ` +
+      `<code>/normapdf ${escapeHtml(documentKey)}</code> al adjuntar el archivo, como antes.`,
   );
 }
 
@@ -2137,7 +2146,7 @@ function helpText(esAdmin = false) {
     "Lista las normas sin PDF confirmado, con botón para subirlo a mano una por una.",
     "",
     "<b>/normapdf document_key</b>",
-    "Instrucciones para subir el PDF de una norma puntual (adjunta el PDF con ese mismo comando como caption).",
+    "Marca esa norma como pendiente y te pide el PDF: mándalo dentro de los próximos 30 minutos (sin necesidad de caption). También puedes seguir usando el PDF con ese comando como pie de foto (caption), como antes.",
     "",
     "<b>/normarevisar document_key</b>",
     "Te mando un reporte HTML, el PDF original, la plantilla .txt y (si ya se generó) una foto por cada página de baja calidad. Hay 3 formas de resolver cada página:\n" +
@@ -5281,23 +5290,48 @@ serve(async (req: Request) => {
         const caption = (update.message.caption ?? "").trim();
         const matchCaption = caption.match(/^\/normapdf\s+(\S+)/i);
 
-        if (!matchCaption) {
-          await sendMessage(
+        if (matchCaption) {
+          return await manejarPdfManual(
             chatId,
-            "⚠️ Para subir el PDF de una norma, escribe <code>/normapdf DOCUMENT_KEY</code> como pie de foto " +
-              "(caption) del archivo — así el PDF queda atado únicamente a esa norma y no se mezcla con otra.\n\n" +
-              "Ejemplo de caption: <code>/normapdf RM-100-2024</code>\n\n" +
-              "Usa <code>/normassinpdf</code> para ver qué normas lo necesitan.",
+            matchCaption[1].trim(),
+            documentoRecibido.file_id,
+            documentoRecibido.file_name ?? "",
           );
-          return new Response("OK", { status: 200 });
         }
 
-        return await manejarPdfManual(
+        // Sin caption: puede ser un PDF mandado justo despues de /normapdf
+        // DOCUMENT_KEY (flujo simplificado para Telegram movil, donde no
+        // siempre es facil escribir un caption al adjuntar un documento).
+        const limiteVigencia = new Date(
+          Date.now() - NORMAPDF_PENDIENTE_MINUTOS * 60 * 1000,
+        ).toISOString();
+
+        const { data: pendiente } = await supabase
+          .from("digemid_bot_normapdf_pendiente")
+          .select("document_key, created_at")
+          .eq("chat_id", chatId)
+          .gte("created_at", limiteVigencia)
+          .maybeSingle();
+
+        if (pendiente) {
+          await supabase.from("digemid_bot_normapdf_pendiente").delete().eq("chat_id", chatId);
+          return await manejarPdfManual(
+            chatId,
+            pendiente.document_key,
+            documentoRecibido.file_id,
+            documentoRecibido.file_name ?? "",
+          );
+        }
+
+        await sendMessage(
           chatId,
-          matchCaption[1].trim(),
-          documentoRecibido.file_id,
-          documentoRecibido.file_name ?? "",
+          "⚠️ No sé a qué norma corresponde este PDF. Primero escribe " +
+            "<code>/normapdf DOCUMENT_KEY</code> y después mándame el archivo (sin nada más), " +
+            "o adjunta el PDF con <code>/normapdf DOCUMENT_KEY</code> como pie de foto (caption).\n\n" +
+            "Ejemplo: <code>/normapdf RM-100-2024</code>\n\n" +
+            "Usa <code>/normassinpdf</code> para ver qué normas lo necesitan.",
         );
+        return new Response("OK", { status: 200 });
       }
 
       try {

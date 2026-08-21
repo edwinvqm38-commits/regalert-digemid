@@ -1865,15 +1865,22 @@ async function manejarPdfManual(
       throw errorFirma ?? new Error("No se pudo generar la URL firmada del PDF.");
     }
 
-    await supabase
+    // OJO: process_status es NOT NULL en la tabla -- ponerlo en null hace que
+    // Postgres rechace el UPDATE entero (columna no acepta null), y si nadie
+    // revisa el error, el bot manda "PDF recibido" con exito falso mientras
+    // la fila queda intacta. "inventory_imported" es el status que
+    // get_pending_normas() ya trata como pendiente de extraer.
+    const { error: errorActualizacion } = await supabase
       .from("digemid_normas")
       .update({
         pdf_url: firmada.signedUrl,
         file_storage_path: rutaObjeto,
-        process_status: null,
+        process_status: "inventory_imported",
         updated_at: new Date().toISOString(),
       })
       .eq("id", norma.id);
+
+    if (errorActualizacion) throw errorActualizacion;
 
     await sendMessage(
       chatId,

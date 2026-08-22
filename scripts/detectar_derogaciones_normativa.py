@@ -60,6 +60,20 @@ relacion si el texto usa un verbo juridico que produce un efecto concreto. \
 Simples referencias o citas ("de acuerdo a la Ley X", "conforme al articulo \
 Y de...", "en el marco de...") NO son una relacion.
 
+ALERTA - PROYECTOS ANEXADOS: es MUY comun que una Resolucion Ministerial \
+real solo disponga PUBLICAR UN PROYECTO de una futura norma para recibir \
+comentarios (ej. "Articulo 1.- Disponer la publicacion del proyecto de \
+resolucion..."), y que el PDF completo incluya, a continuacion, el texto \
+completo de ese proyecto como anexo -con su propia numeracion de articulos, \
+que puede repetir "Articulo 1", "Articulo 2", etc. Esas secciones suelen \
+estar marcadas con leyendas como "PROYECTO PARA PUBLICACION" o "PROYECTO DE \
+RESOLUCION". El articulado de un PROYECTO asi anexado NO es la parte \
+dispositiva de la norma real: NO tiene efecto juridico vigente todavia. Si \
+detectas que el texto contiene un proyecto anexado de este tipo, analiza \
+UNICAMENTE la parte dispositiva de la norma real (antes del anexo) e IGNORA \
+por completo cualquier "deroga/modifica/etc." que aparezca dentro del texto \
+del proyecto anexado.
+
 Identifica el verbo juridico exacto y clasifica segun esta tabla (usa el \
 tipo_relacion entre parentesis):
 - "Modifícase el artículo...", "se modifica..." → modifica
@@ -121,6 +135,28 @@ PATRON_CLAUSULA_GENERICA = re.compile(
     r"quedan?\s+derogad[ao]s?\s+todas\s+las",
     re.IGNORECASE,
 )
+
+# Caso real (RM-419-2025/MINSA): una RM que solo dispone publicar un
+# PROYECTO de norma para comentarios trae el proyecto completo anexado en el
+# mismo PDF, con su propio "Articulo 2.- Derogar..." que la IA puede leer
+# como si fuera la parte dispositiva de la RM real. Se corta el texto antes
+# de la primera aparicion de esta leyenda -que DIGEMID/MINSA estampa en cada
+# pagina del anexo- para que ese articulado ni siquiera llegue a la IA. Es
+# la defensa principal (determinista); la regla del prompt de arriba es
+# solo respaldo por si el marcador no aparece o aparece distinto.
+PATRON_MARCADOR_PROYECTO = re.compile(r"proyecto\s+para\s+publicaci[oó]n", re.IGNORECASE)
+
+
+def recortar_antes_de_proyecto_anexado(texto: str, document_key: str) -> str:
+    coincidencia = PATRON_MARCADOR_PROYECTO.search(texto)
+    if not coincidencia:
+        return texto
+    logger.warning(
+        "%s: se detectó un proyecto anexado (marca 'PROYECTO PARA PUBLICACIÓN'); "
+        "se recorta el texto a analizar antes de esa sección.",
+        document_key,
+    )
+    return texto[: coincidencia.start()]
 
 
 def es_clausula_generica(tipo_norma, numero, anio, descripcion: str) -> bool:
@@ -318,6 +354,11 @@ def relacion_ya_registrada(
 
 def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
     texto = texto_de_norma(supabase, norma["id"])
+    if not texto:
+        supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
+        return 0
+
+    texto = recortar_antes_de_proyecto_anexado(texto, norma["document_key"])
     if not texto:
         supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
         return 0

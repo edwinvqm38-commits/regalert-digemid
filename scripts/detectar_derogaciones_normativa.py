@@ -157,9 +157,22 @@ def texto_de_norma(supabase, norma_id: str) -> str:
     return "\n\n".join(partes)[:MAX_CHARS_TEXTO]
 
 
+def normalizar_numero(numero) -> str | None:
+    """Extrae solo el primer grupo de digitos y le quita ceros a la izquierda,
+    para poder comparar "014" con "14" o descartar basura que la IA a veces
+    deja pegada (ej. "014-2011-SA" en vez de solo "014")."""
+    if not numero:
+        return None
+    coincidencia = re.search(r"\d+", str(numero))
+    if not coincidencia:
+        return None
+    return str(int(coincidencia.group()))
+
+
 def construir_document_key_candidato(tipo_norma, numero, anio) -> str | None:
-    if tipo_norma and numero and anio:
-        return f"{str(tipo_norma).upper()}-{numero}-{anio}"
+    numero_norm = normalizar_numero(numero)
+    if tipo_norma and numero_norm and anio:
+        return f"{str(tipo_norma).upper()}-{numero_norm}-{anio}"
     return None
 
 
@@ -169,24 +182,25 @@ def buscar_norma_afectada(supabase, tipo_norma, numero, anio, document_key_candi
             supabase.table("digemid_normas")
             .select("id, document_key")
             .eq("document_key", document_key_candidato)
-            .maybe_single()
+            .limit(1)
             .execute()
         )
         if response.data:
-            return response.data
+            return response.data[0]
 
-    if numero and anio:
-        query = (
-            supabase.table("digemid_normas")
-            .select("id, document_key")
-            .eq("anio", anio)
-            .ilike("numero", f"%{numero}%")
-        )
+    numero_norm = normalizar_numero(numero)
+    if numero_norm and anio:
+        # Los document_key existentes no siguen un formato de ceros a la
+        # izquierda consistente (hay "DS-14-2002" y "DS-008-2025-SA" en la
+        # misma tabla), asi que comparar con LIKE es fragil. Se trae todo lo
+        # de ese año/tipo y se compara el numero ya normalizado en Python.
+        query = supabase.table("digemid_normas").select("id, document_key, numero").eq("anio", anio)
         if tipo_norma:
             query = query.ilike("tipo_norma", f"%{tipo_norma}%")
-        response = query.limit(1).execute()
-        if response.data:
-            return response.data[0]
+        response = query.execute()
+        for fila in response.data or []:
+            if normalizar_numero(fila.get("numero")) == numero_norm:
+                return fila
 
     return None
 

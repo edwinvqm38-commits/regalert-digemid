@@ -45,12 +45,36 @@ explicaciones) con esta forma exacta:
 ]}
 
 Reglas estrictas:
-- Solo incluye relaciones donde el documento actual afecta a OTRA norma (nunca \
-te refieras a si mismo).
-- Si el documento no deroga, modifica ni deja sin efecto ninguna otra norma, \
-devuelve {"relaciones": []}.
+- Solo incluye relaciones donde el documento actual afecta a OTRA norma \
+CONCRETA e IDENTIFICABLE (nunca te refieras a si mismo).
+- IGNORA por completo las clausulas genericas de cierre que casi todo \
+documento legal peruano trae, del tipo "deróguese las disposiciones que se \
+opongan al presente Decreto/Resolución/Ley" o "quedan derogadas todas las \
+normas que se opongan a la presente norma". Esas NO identifican una norma \
+especifica, son texto de cierre estandar: NO son una relacion valida.
+- Solo reporta una relacion si el texto identifica la norma afectada por \
+numero (ej. "Decreto Supremo N° 013-2005-SA"), o por un nombre propio claro \
+(ej. "la Ley de Productos Farmacéuticos"). Si la mencion es generica y no \
+identifica cual norma puntual queda afectada, no la incluyas.
+- Si el documento no deroga, modifica ni deja sin efecto ninguna otra norma \
+CONCRETA, devuelve {"relaciones": []}.
 - No inventes numeros, tipos ni anios que no esten explicitos en el texto.
 """
+
+# Filtro de respaldo por si la IA igual reporta la clausula generica de
+# cierre (redundante con la regla del prompt, pero barato y determinista):
+# sin tipo_norma/numero/anio Y con una de estas frases tipicas, se descarta.
+PATRON_CLAUSULA_GENERICA = re.compile(
+    r"disposiciones?\s+que\s+se\s+opongan|normas?\s+que\s+se\s+opongan|"
+    r"quedan?\s+derogad[ao]s?\s+todas\s+las",
+    re.IGNORECASE,
+)
+
+
+def es_clausula_generica(tipo_norma, numero, anio, descripcion: str) -> bool:
+    if tipo_norma or numero or anio:
+        return False
+    return bool(PATRON_CLAUSULA_GENERICA.search(descripcion))
 
 
 def load_env():
@@ -246,12 +270,16 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         if not descripcion:
             continue
 
-        if relacion_ya_registrada(supabase, norma["id"], descripcion):
-            continue
-
         tipo_norma = relacion.get("tipo_norma") or None
         numero = relacion.get("numero") or None
         anio = relacion.get("anio")
+
+        if es_clausula_generica(tipo_norma, numero, anio, descripcion):
+            logger.info("Ignorando cláusula genérica de %s: %s", norma["document_key"], descripcion[:80])
+            continue
+
+        if relacion_ya_registrada(supabase, norma["id"], descripcion):
+            continue
         candidato = construir_document_key_candidato(tipo_norma, numero, anio)
         afectada = buscar_norma_afectada(supabase, tipo_norma, numero, anio, candidato)
         fragmento = (relacion.get("fragmento") or "")[:500]

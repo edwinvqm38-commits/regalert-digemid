@@ -114,6 +114,13 @@ jobs:
           if [[ "$MODE" != "apply" ]]; then
             CMD+=(--dry-run)
           fi
+          # Las corridas programadas no deben llenar Telegram de reportes de
+          # progreso/calidad cada hora; solo se envian en un disparo manual
+          # si se pide explicitamente (usar /normasrevisar y /normaestado en
+          # el bot para revisar el estado cuando se quiera).
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            CMD+=(--no-telegram)
+          fi
           if [[ -n "${{ inputs.document_keys }}" ]]; then
             CMD+=(--document-keys "${{ inputs.document_keys }}")
           elif [[ -n "${{ inputs.document_key }}" ]]; then

@@ -1601,7 +1601,7 @@ async function manejarPdfManual(
   try {
     const bytes = await descargarArchivoTelegram(fileId);
 
-    const esPdfValido = bytes.length > 10 * 1024 &&
+    const esPdfValido = bytes.length >= 100 &&
       bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46; // %PDF
 
     if (!esPdfValido) {

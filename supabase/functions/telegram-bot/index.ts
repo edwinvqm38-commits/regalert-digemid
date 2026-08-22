@@ -4133,7 +4133,7 @@ async function handleCommand(
 
     const { data: relaciones, error } = await supabase
       .from("digemid_norma_relaciones")
-      .select("id, norma_origen_document_key, tipo_relacion, descripcion_afectada, fragmento_fuente")
+      .select("id, norma_origen_document_key, tipo_relacion, descripcion_afectada, fragmento_fuente, fragmento_verificado")
       .eq("estado", "pendiente")
       .order("created_at", { ascending: true })
       .limit(15);
@@ -4154,12 +4154,16 @@ async function handleCommand(
 
     for (const relacion of relaciones) {
       const verbo = verbos[relacion.tipo_relacion] ?? relacion.tipo_relacion;
+      const avisoCita = relacion.fragmento_verificado
+        ? ""
+        : "\n⚠️ <b>Esta cita NO se pudo verificar textualmente contra el documento</b> — revísala antes de confirmar.\n";
       const texto =
         `⚠️ <b>Posible derogación/modificación</b>\n\n` +
         `<b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a:\n` +
-        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>` +
+        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>\n` +
+        avisoCita +
         (relacion.fragmento_fuente
-          ? `\n\nFragmento: <i>"${escapeHtml(relacion.fragmento_fuente)}"</i>`
+          ? `\nFragmento: <i>"${escapeHtml(relacion.fragmento_fuente)}"</i>`
           : "") +
         "\n\n¿Confirmas esta relación?";
 

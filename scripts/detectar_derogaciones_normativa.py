@@ -77,6 +77,26 @@ def es_clausula_generica(tipo_norma, numero, anio, descripcion: str) -> bool:
     return bool(PATRON_CLAUSULA_GENERICA.search(descripcion))
 
 
+def normalizar_para_comparar(texto: str) -> str:
+    """Colapsa espacios/saltos de linea y pasa a minusculas, para poder
+    comparar el fragmento citado por la IA contra el texto extraido sin que
+    diferencias triviales de formato (OCR, saltos de linea) den un falso
+    negativo."""
+    return re.sub(r"\s+", " ", texto).strip().lower()
+
+
+def fragmento_aparece_en_texto(fragmento: str, texto_completo: str) -> bool:
+    """Verifica que el 'fragmento' que la IA dice haber citado textualmente
+    realmente este en el documento, en vez de confiar ciegamente en que la
+    IA no parafraseo ni inserto un dato (ej. un numero de articulo) que no
+    esta en el texto real. No es infalible (un fragmento truncado en un
+    limite raro podria no calzar), pero atrapa el caso mas peligroso: que la
+    cita sea, directamente, inventada."""
+    if not fragmento:
+        return False
+    return normalizar_para_comparar(fragmento) in normalizar_para_comparar(texto_completo)
+
+
 def load_env():
     load_dotenv()
     load_dotenv(Path.cwd().parent / ".env", override=False)
@@ -229,6 +249,7 @@ def enviar_confirmacion_telegram(
     tipo_relacion: str,
     etiqueta_afectada: str,
     fragmento: str,
+    fragmento_verificado: bool,
 ) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
@@ -242,10 +263,17 @@ def enviar_confirmacion_telegram(
         "modifica": "modificaría",
     }.get(tipo_relacion, tipo_relacion)
 
+    aviso_cita = (
+        ""
+        if fragmento_verificado
+        else "\n⚠️ <b>Esta cita NO se pudo verificar textualmente contra el documento</b> — revísala antes de confirmar.\n"
+    )
+
     texto = (
         "⚠️ <b>Posible derogación detectada por IA</b>\n\n"
         f"<b>{origen_document_key}</b> {verbo} a:\n"
-        f"<b>{etiqueta_afectada}</b>\n\n"
+        f"<b>{etiqueta_afectada}</b>\n"
+        f"{aviso_cita}\n"
         f"Fragmento: <i>\"{fragmento}\"</i>\n\n"
         "¿Confirmas esta relación?"
     )
@@ -303,6 +331,13 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         candidato = construir_document_key_candidato(tipo_norma, numero, anio)
         afectada = buscar_norma_afectada(supabase, tipo_norma, numero, anio, candidato)
         fragmento = (relacion.get("fragmento") or "")[:500]
+        verificado = fragmento_aparece_en_texto(fragmento, texto)
+        if not verificado:
+            logger.warning(
+                "Fragmento de %s no se pudo verificar textualmente contra el documento: %r",
+                norma["document_key"],
+                fragmento[:120],
+            )
 
         insercion = {
             "norma_origen_id": norma["id"],
@@ -314,6 +349,7 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
             "anio_afectada": anio,
             "descripcion_afectada": descripcion,
             "fragmento_fuente": fragmento,
+            "fragmento_verificado": verificado,
         }
 
         respuesta = supabase.table("digemid_norma_relaciones").insert(insercion).execute()
@@ -323,7 +359,9 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
 
         insertadas += 1
         etiqueta_afectada = afectada["document_key"] if afectada else descripcion
-        enviar_confirmacion_telegram(fila["id"], norma["document_key"], tipo_relacion, etiqueta_afectada, fragmento)
+        enviar_confirmacion_telegram(
+            fila["id"], norma["document_key"], tipo_relacion, etiqueta_afectada, fragmento, verificado,
+        )
 
     supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
     return insertadas

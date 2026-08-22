@@ -1270,16 +1270,55 @@ async function enviarInstruccionNormaPdf(chatId: string, documentKey: string): P
   );
 }
 
-const ESTADO_VIGENCIA_POR_RELACION: Record<string, string> = {
+// Verbos usados tanto en el mensaje de notificacion/lista de pendientes
+// (presente) como en la confirmacion (pasado, ver VERBOS_CONFIRMACION).
+const VERBOS_RELACION: Record<string, string> = {
+  deroga: "derogaría",
+  deja_sin_efecto: "dejaría sin efecto",
+  modifica: "modificaría",
+  sustituye: "sustituiría el texto de",
+  incorpora: "incorporaría contenido en",
+  exonera: "exoneraría/exceptuaría de la aplicación de",
+  suspende: "suspendería",
+  prorroga: "prorrogaría un plazo de",
+  pendiente_verificacion: "posiblemente afectaría (efecto jurídico NO determinado con certeza) a",
+};
+
+const VERBOS_CONFIRMACION: Record<string, string> = {
+  deroga: "derogó",
+  deja_sin_efecto: "dejó sin efecto",
+  modifica: "modificó",
+  sustituye: "sustituyó el texto de",
+  incorpora: "incorporó contenido en",
+  exonera: "exoneró/exceptuó de la aplicación de",
+  suspende: "suspendió",
+  prorroga: "prorrogó un plazo de",
+  pendiente_verificacion: "posiblemente afectó (sin confirmar efecto jurídico) a",
+};
+
+// Solo los tipos que representan una afectacion real del TEXTO o la
+// APLICABILIDAD de la norma cambian su estado_vigencia. "Mencion de una
+// norma no es lo mismo que modificarla": exonera/prorroga/
+// pendiente_verificacion dejan la norma citada como "vigente" (la relacion
+// igual queda registrada, para trazabilidad, pero sin alterar su estado).
+const ESTADO_VIGENCIA_POR_RELACION: Record<string, string | undefined> = {
   deroga: "derogada",
   deja_sin_efecto: "derogada",
   modifica: "modificada",
+  sustituye: "modificada",
+  incorpora: "modificada",
+  suspende: "suspendida",
+  exonera: undefined,
+  prorroga: undefined,
+  pendiente_verificacion: undefined,
 };
 
 /** Genera un document_key para una norma que no existe en la base (solo se
- * conoce por mencion de otra norma que la deroga/modifica). Si no hay
+ * conoce por mencion de otra norma que la deroga/modifica/etc). Si no hay
  * tipo+numero+anio completos (norma citada de forma ambigua) cae a un hash
- * corto del texto para no bloquear la confirmacion del admin. */
+ * corto del texto para no bloquear la confirmacion del admin. Los acentos se
+ * quitan por transliteracion (NFD) antes del slug para no dejar keys como
+ * "ART-CULO-9" a partir de "ARTÍCULO 9". */
 function construirDocumentKeyStub(
   tipoNorma: string | null,
   numero: string | null,
@@ -1289,7 +1328,8 @@ function construirDocumentKeyStub(
   if (tipoNorma && numero && anio) {
     return `${tipoNorma.toUpperCase()}-${numero}-${anio}`;
   }
-  const slug = descripcion.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).toUpperCase();
+  const sinAcentos = descripcion.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const slug = sinAcentos.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).toUpperCase();
   return `NORM-${slug || crypto.randomUUID().slice(0, 8).toUpperCase()}`;
 }
 
@@ -1338,7 +1378,11 @@ async function resolverRelacionDerogacion(
   }
 
   let normaAfectadaId: string | null = relacion.norma_afectada_id;
-  const estadoVigencia = ESTADO_VIGENCIA_POR_RELACION[relacion.tipo_relacion] ?? "derogada";
+  // undefined = este tipo de relacion (exonera/prorroga/pendiente_verificacion)
+  // no altera el estado de vigencia de la norma citada: solo queda
+  // registrada la relacion para trazabilidad. "Mencion de una norma no es
+  // lo mismo que modificarla".
+  const estadoVigencia = ESTADO_VIGENCIA_POR_RELACION[relacion.tipo_relacion];
 
   if (!normaAfectadaId) {
     const documentKeyStub = construirDocumentKeyStub(
@@ -1356,6 +1400,9 @@ async function resolverRelacionDerogacion(
 
     if (normaExistente) {
       normaAfectadaId = normaExistente.id;
+      if (estadoVigencia) {
+        await supabase.from("digemid_normas").update({ estado_vigencia: estadoVigencia }).eq("id", normaAfectadaId);
+      }
     } else {
       const { data: normaCreada, error: errorCreacion } = await supabase
         .from("digemid_normas")
@@ -1367,7 +1414,7 @@ async function resolverRelacionDerogacion(
           titulo: relacion.descripcion_afectada,
           has_file: false,
           process_status: "stub_derogada",
-          estado_vigencia: estadoVigencia,
+          estado_vigencia: estadoVigencia ?? "vigente",
         })
         .select("id")
         .single();
@@ -1383,7 +1430,7 @@ async function resolverRelacionDerogacion(
 
       normaAfectadaId = normaCreada.id;
     }
-  } else {
+  } else if (estadoVigencia) {
     await supabase.from("digemid_normas").update({ estado_vigencia: estadoVigencia }).eq("id", normaAfectadaId);
   }
 
@@ -1398,7 +1445,7 @@ async function resolverRelacionDerogacion(
     .eq("id", relacionId);
 
   if (messageId) {
-    const verbo = relacion.tipo_relacion === "modifica" ? "modificó" : "derogó";
+    const verbo = VERBOS_CONFIRMACION[relacion.tipo_relacion] ?? "afectó";
     await editMessage(
       chatId,
       messageId,
@@ -4133,7 +4180,9 @@ async function handleCommand(
 
     const { data: relaciones, error } = await supabase
       .from("digemid_norma_relaciones")
-      .select("id, norma_origen_document_key, tipo_relacion, descripcion_afectada, fragmento_fuente, fragmento_verificado")
+      .select(
+        "id, norma_origen_document_key, tipo_relacion, descripcion_afectada, articulos_afectados, alcance, fragmento_fuente, fragmento_verificado",
+      )
       .eq("estado", "pendiente")
       .order("created_at", { ascending: true })
       .limit(15);
@@ -4146,22 +4195,28 @@ async function handleCommand(
       return await sendMessage(chatId, "✅ No hay relaciones de derogación/modificación pendientes de confirmar.");
     }
 
-    const verbos: Record<string, string> = {
-      deroga: "derogaría",
-      deja_sin_efecto: "dejaría sin efecto",
-      modifica: "modificaría",
-    };
-
     for (const relacion of relaciones) {
-      const verbo = verbos[relacion.tipo_relacion] ?? relacion.tipo_relacion;
+      const verbo = VERBOS_RELACION[relacion.tipo_relacion] ?? relacion.tipo_relacion;
       const avisoCita = relacion.fragmento_verificado
         ? ""
         : "\n⚠️ <b>Esta cita NO se pudo verificar textualmente contra el documento</b> — revísala antes de confirmar.\n";
+      const avisoPendiente = relacion.tipo_relacion === "pendiente_verificacion"
+        ? "\n⚠️ <b>La IA no pudo determinar el efecto jurídico exacto con certeza</b> — requiere revisión legal, " +
+          "no asumas que deroga o modifica.\n"
+        : "";
+      let detalleAlcance = "";
+      if (relacion.articulos_afectados) {
+        detalleAlcance += `\nArtículos/numerales afectados: ${escapeHtml(relacion.articulos_afectados)}`;
+      }
+      if (relacion.alcance) {
+        detalleAlcance += `\nAlcance: ${escapeHtml(relacion.alcance)}`;
+      }
       const texto =
-        `⚠️ <b>Posible derogación/modificación</b>\n\n` +
-        `<b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a:\n` +
-        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>\n` +
+        `⚠️ <b>Posible relación normativa</b>\n\n` +
+        `<b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo}:\n` +
+        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>${detalleAlcance}\n` +
         avisoCita +
+        avisoPendiente +
         (relacion.fragmento_fuente
           ? `\nFragmento: <i>"${escapeHtml(relacion.fragmento_fuente)}"</i>`
           : "") +

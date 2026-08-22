@@ -1,8 +1,19 @@
-"""Analiza con IA el texto ya extraido de cada norma para detectar si deroga,
-deja sin efecto o modifica a OTRA norma, y deja la relacion "pendiente" para
-que un admin la confirme desde Telegram (botones inline). No se aplica sola:
-un error de la IA aqui significa citar mal una norma legal, asi que la
-confirmacion humana es obligatoria antes de marcar algo como derogado.
+"""Analiza con IA el texto ya extraido de cada norma para detectar su efecto
+juridico exacto sobre OTRA norma (deroga, modifica, sustituye, incorpora,
+exonera de aplicacion, suspende, prorroga, o efecto no determinable con
+certeza), y deja la relacion "pendiente" para que un admin la confirme desde
+Telegram (botones inline). No se aplica sola: un error de la IA aqui
+significa citar mal una norma legal, asi que la confirmacion humana es
+obligatoria antes de marcar algo como derogado/modificado.
+
+Regla central: MENCION DE UNA NORMA NO ES LO MISMO QUE MODIFICARLA. Antes de
+esto, el detector solo distinguia deroga/modifica/deja_sin_efecto y forzaba
+ahi cualquier relacion (ej. una "exoneracion de aplicacion de los articulos
+10 y 11 de la Ley 29459" se clasifico como "modifica" cuando en realidad no
+toca el texto de esos articulos, solo exceptua un supuesto especifico de su
+aplicacion). El prompt de abajo exige identificar el verbo juridico exacto y
+cae a "pendiente_verificacion" en vez de inventar deroga/modifica cuando el
+texto no lo deja claro.
 """
 
 import argparse
@@ -25,22 +36,58 @@ logger = logging.getLogger(__name__)
 
 DEEPSEEK_MODEL = "deepseek-chat"
 MAX_CHARS_TEXTO = 15000
-TIPOS_RELACION_VALIDOS = {"deroga", "modifica", "deja_sin_efecto"}
+TIPOS_RELACION_VALIDOS = {
+    "deroga",
+    "deja_sin_efecto",
+    "modifica",
+    "sustituye",
+    "incorpora",
+    "exonera",
+    "suspende",
+    "prorroga",
+    "pendiente_verificacion",
+}
 
-SYSTEM_PROMPT = """Eres un asistente legal que analiza el texto de una norma \
-peruana (ley, decreto, resolucion, etc.) para detectar si ESTE documento \
-deroga, deja sin efecto o modifica a OTRA norma distinta.
+SYSTEM_PROMPT = """Eres un abogado especializado en tecnica legislativa \
+peruana. Analizas el texto de una norma (ley, decreto, resolucion, etc.) \
+para detectar el efecto juridico EXACTO que tiene sobre OTRA norma distinta.
+
+REGLA CENTRAL: que un documento MENCIONE o CITE a otra norma no significa \
+que la modifique, derogue ni afecte de ninguna forma. Solo existe una \
+relacion si el texto usa un verbo juridico que produce un efecto concreto. \
+Simples referencias o citas ("de acuerdo a la Ley X", "conforme al articulo \
+Y de...", "en el marco de...") NO son una relacion.
+
+Identifica el verbo juridico exacto y clasifica segun esta tabla (usa el \
+tipo_relacion entre parentesis):
+- "Modifícase el artículo...", "se modifica..." → modifica
+- "Deróguese...", "queda derogado..." → deroga
+- "Déjese sin efecto...", "queda sin efecto..." → deja_sin_efecto
+- "Sustitúyase el artículo... por el siguiente texto..." → sustituye
+- "Incorpórase el artículo/inciso..." → incorpora
+- "Exceptúase...", "se exonera de la aplicación de...", "no será de \
+aplicación..." → exonera
+- "Suspéndase..." → suspende
+- "Prorrógase el plazo..." → prorroga
+
+Si el texto SI identifica una norma concreta afectada pero el efecto \
+juridico no es alguno de los anteriores, o es ambiguo, o requeriria \
+interpretacion juridica para decidir (ej. una posible derogacion tacita por \
+incompatibilidad, sin que el texto lo diga expresamente), usa \
+tipo_relacion "pendiente_verificacion" en vez de adivinar deroga/modifica.
 
 Devuelve EXCLUSIVAMENTE un JSON (sin texto adicional, sin markdown, sin \
 explicaciones) con esta forma exacta:
 {"relaciones": [
   {
-    "tipo_relacion": "deroga" | "modifica" | "deja_sin_efecto",
+    "tipo_relacion": "deroga" | "deja_sin_efecto" | "modifica" | "sustituye" | "incorpora" | "exonera" | "suspende" | "prorroga" | "pendiente_verificacion",
     "tipo_norma": "RM" | "DS" | "LEY" | "RD" (abreviatura corta, o null si no se distingue),
     "numero": "920" (solo el numero, sin barras ni anio, o null),
     "anio": 2004 (numero entero de 4 digitos, o null si no se menciona),
     "descripcion": "texto tal cual aparece en el documento identificando la norma afectada",
-    "fragmento": "la frase u oracion exacta del documento donde se menciona la derogacion/modificacion (maximo 300 caracteres)"
+    "articulos_afectados": "10 y 11" (articulos/numerales/anexos afectados tal como los nombra el texto, o null si no aplica/no se especifica),
+    "alcance": "total" | "parcial" | null (si el texto permite saberlo; parcial si solo toca articulos/incisos puntuales),
+    "fragmento": "la frase u oracion exacta del documento que sustenta esta clasificacion (maximo 300 caracteres, cita textual, NO parafraseada)"
   }
 ]}
 
@@ -56,9 +103,12 @@ especifica, son texto de cierre estandar: NO son una relacion valida.
 numero (ej. "Decreto Supremo N° 013-2005-SA"), o por un nombre propio claro \
 (ej. "la Ley de Productos Farmacéuticos"). Si la mencion es generica y no \
 identifica cual norma puntual queda afectada, no la incluyas.
-- Si el documento no deroga, modifica ni deja sin efecto ninguna otra norma \
-CONCRETA, devuelve {"relaciones": []}.
-- No inventes numeros, tipos ni anios que no esten explicitos en el texto.
+- Si el documento no tiene ningun efecto juridico sobre otra norma CONCRETA, \
+devuelve {"relaciones": []}.
+- El "fragmento" debe ser una cita textual exacta del documento, nunca un \
+resumen ni una paráfrasis tuya.
+- No inventes numeros, tipos, anios ni articulos que no esten explicitos en \
+el texto.
 """
 
 # Filtro de respaldo por si la IA igual reporta la clausula generica de
@@ -243,6 +293,19 @@ def relacion_ya_registrada(supabase, norma_origen_id: str, descripcion: str) -> 
     return bool(response.data)
 
 
+VERBOS_RELACION = {
+    "deroga": "derogaría",
+    "deja_sin_efecto": "dejaría sin efecto",
+    "modifica": "modificaría",
+    "sustituye": "sustituiría el texto de",
+    "incorpora": "incorporaría contenido en",
+    "exonera": "exoneraría/exceptuaría de la aplicación de",
+    "suspende": "suspendería",
+    "prorroga": "prorrogaría un plazo de",
+    "pendiente_verificacion": "posiblemente afectaría (efecto jurídico NO determinado con certeza) a",
+}
+
+
 def enviar_confirmacion_telegram(
     relacion_id: str,
     origen_document_key: str,
@@ -250,6 +313,8 @@ def enviar_confirmacion_telegram(
     etiqueta_afectada: str,
     fragmento: str,
     fragmento_verificado: bool,
+    articulos_afectados: str | None = None,
+    alcance: str | None = None,
 ) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
@@ -257,23 +322,30 @@ def enviar_confirmacion_telegram(
         logger.info("Sin TELEGRAM_BOT_TOKEN o chat_id: no se notifica la relación %s.", relacion_id)
         return
 
-    verbo = {
-        "deroga": "derogaría",
-        "deja_sin_efecto": "dejaría sin efecto",
-        "modifica": "modificaría",
-    }.get(tipo_relacion, tipo_relacion)
+    verbo = VERBOS_RELACION.get(tipo_relacion, tipo_relacion)
 
     aviso_cita = (
         ""
         if fragmento_verificado
         else "\n⚠️ <b>Esta cita NO se pudo verificar textualmente contra el documento</b> — revísala antes de confirmar.\n"
     )
+    aviso_pendiente = (
+        "\n⚠️ <b>La IA no pudo determinar el efecto jurídico exacto con certeza</b> — requiere revisión legal, "
+        "no asumas que deroga o modifica.\n"
+        if tipo_relacion == "pendiente_verificacion"
+        else ""
+    )
+    detalle_alcance = ""
+    if articulos_afectados:
+        detalle_alcance += f"\nArtículos/numerales afectados: {articulos_afectados}"
+    if alcance:
+        detalle_alcance += f"\nAlcance: {alcance}"
 
     texto = (
-        "⚠️ <b>Posible derogación detectada por IA</b>\n\n"
-        f"<b>{origen_document_key}</b> {verbo} a:\n"
-        f"<b>{etiqueta_afectada}</b>\n"
-        f"{aviso_cita}\n"
+        "⚠️ <b>Posible relación normativa detectada por IA</b>\n\n"
+        f"<b>{origen_document_key}</b> {verbo}:\n"
+        f"<b>{etiqueta_afectada}</b>{detalle_alcance}\n"
+        f"{aviso_cita}{aviso_pendiente}\n"
         f"Fragmento: <i>\"{fragmento}\"</i>\n\n"
         "¿Confirmas esta relación?"
     )
@@ -339,6 +411,11 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
                 fragmento[:120],
             )
 
+        articulos_afectados = (relacion.get("articulos_afectados") or None)
+        alcance = relacion.get("alcance")
+        if alcance not in ("total", "parcial"):
+            alcance = None
+
         insercion = {
             "norma_origen_id": norma["id"],
             "norma_origen_document_key": norma["document_key"],
@@ -348,6 +425,8 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
             "numero_afectada": numero,
             "anio_afectada": anio,
             "descripcion_afectada": descripcion,
+            "articulos_afectados": articulos_afectados,
+            "alcance": alcance,
             "fragmento_fuente": fragmento,
             "fragmento_verificado": verificado,
         }
@@ -361,6 +440,7 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         etiqueta_afectada = afectada["document_key"] if afectada else descripcion
         enviar_confirmacion_telegram(
             fila["id"], norma["document_key"], tipo_relacion, etiqueta_afectada, fragmento, verificado,
+            articulos_afectados, alcance,
         )
 
     supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()

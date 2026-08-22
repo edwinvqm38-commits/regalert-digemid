@@ -1269,6 +1269,144 @@ async function enviarInstruccionNormaPdf(chatId: string, documentKey: string): P
   );
 }
 
+const ESTADO_VIGENCIA_POR_RELACION: Record<string, string> = {
+  deroga: "derogada",
+  deja_sin_efecto: "derogada",
+  modifica: "modificada",
+};
+
+/** Genera un document_key para una norma que no existe en la base (solo se
+ * conoce por mencion de otra norma que la deroga/modifica). Si no hay
+ * tipo+numero+anio completos (norma citada de forma ambigua) cae a un hash
+ * corto del texto para no bloquear la confirmacion del admin. */
+function construirDocumentKeyStub(
+  tipoNorma: string | null,
+  numero: string | null,
+  anio: number | null,
+  descripcion: string,
+): string {
+  if (tipoNorma && numero && anio) {
+    return `${tipoNorma.toUpperCase()}-${numero}-${anio}`;
+  }
+  const slug = descripcion.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).toUpperCase();
+  return `NORM-${slug || crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+}
+
+/** Resuelve (confirma o rechaza) una relacion de derogacion/modificacion
+ * propuesta por la IA (scripts/detectar_derogaciones_normativa.py). Nunca se
+ * aplica sola: siempre pasa por este flujo manual via botones porque un
+ * error de la IA aqui significa marcar mal una norma legal. Si la norma
+ * afectada no existe todavia en la base, se crea un registro minimo (stub,
+ * sin PDF) solo para dejar constancia de que quedo derogada/modificada. */
+async function resolverRelacionDerogacion(
+  chatId: string,
+  messageId: number | undefined,
+  relacionId: string,
+  accion: "confirmar" | "rechazar",
+): Promise<void> {
+  const { data: relacion } = await supabase
+    .from("digemid_norma_relaciones")
+    .select("*")
+    .eq("id", relacionId)
+    .maybeSingle();
+
+  if (!relacion) {
+    await sendMessage(chatId, "⚠️ No encontré esa relación (puede que ya no exista).");
+    return;
+  }
+
+  if (relacion.estado !== "pendiente") {
+    await sendMessage(chatId, `Esta relación ya estaba marcada como "${escapeHtml(relacion.estado)}".`);
+    return;
+  }
+
+  if (accion === "rechazar") {
+    await supabase
+      .from("digemid_norma_relaciones")
+      .update({ estado: "rechazada", resuelto_por: chatId, resuelto_en: new Date().toISOString() })
+      .eq("id", relacionId);
+
+    if (messageId) {
+      await editMessage(
+        chatId,
+        messageId,
+        `❌ Rechazado: <b>${escapeHtml(relacion.norma_origen_document_key)}</b> → ${escapeHtml(relacion.descripcion_afectada)}`,
+      );
+    }
+    return;
+  }
+
+  let normaAfectadaId: string | null = relacion.norma_afectada_id;
+  const estadoVigencia = ESTADO_VIGENCIA_POR_RELACION[relacion.tipo_relacion] ?? "derogada";
+
+  if (!normaAfectadaId) {
+    const documentKeyStub = construirDocumentKeyStub(
+      relacion.tipo_norma_afectada,
+      relacion.numero_afectada,
+      relacion.anio_afectada,
+      relacion.descripcion_afectada,
+    );
+
+    const { data: normaExistente } = await supabase
+      .from("digemid_normas")
+      .select("id")
+      .eq("document_key", documentKeyStub)
+      .maybeSingle();
+
+    if (normaExistente) {
+      normaAfectadaId = normaExistente.id;
+    } else {
+      const { data: normaCreada, error: errorCreacion } = await supabase
+        .from("digemid_normas")
+        .insert({
+          document_key: documentKeyStub,
+          tipo_norma: relacion.tipo_norma_afectada,
+          numero: relacion.numero_afectada,
+          anio: relacion.anio_afectada,
+          titulo: relacion.descripcion_afectada,
+          has_file: false,
+          process_status: "stub_derogada",
+          estado_vigencia: estadoVigencia,
+        })
+        .select("id")
+        .single();
+
+      if (errorCreacion || !normaCreada) {
+        await sendMessage(
+          chatId,
+          `⚠️ No pude crear el registro de "${escapeHtml(relacion.descripcion_afectada)}": ` +
+            escapeHtml(errorCreacion?.message ?? "error desconocido"),
+        );
+        return;
+      }
+
+      normaAfectadaId = normaCreada.id;
+    }
+  } else {
+    await supabase.from("digemid_normas").update({ estado_vigencia: estadoVigencia }).eq("id", normaAfectadaId);
+  }
+
+  await supabase
+    .from("digemid_norma_relaciones")
+    .update({
+      estado: "confirmada",
+      norma_afectada_id: normaAfectadaId,
+      resuelto_por: chatId,
+      resuelto_en: new Date().toISOString(),
+    })
+    .eq("id", relacionId);
+
+  if (messageId) {
+    const verbo = relacion.tipo_relacion === "modifica" ? "modificó" : "derogó";
+    await editMessage(
+      chatId,
+      messageId,
+      `✅ Confirmado: <b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a ` +
+        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>.`,
+    );
+  }
+}
+
 function porcentaje(n: number, total: number): string {
   if (!total) return "0%";
   return `${((n / total) * 100).toFixed(1)}%`;
@@ -2354,9 +2492,20 @@ const UMBRAL_CONTEXTO_MEDIA_CALIDAD = 0.85;
  * /consulta. Sin esto, la IA citaba paginas OCR de baja confianza o tablas
  * aplanadas a texto corrido con la misma seguridad que contenido verificado. */
 function advertenciasDelBloque(chunk: any): string[] {
-  if (chunk.revisado_manual) return [];
-
+  // La vigencia es independiente de si la transcripcion fue revisada: una
+  // norma derogada sigue derogada aunque su OCR ya este verificado, asi que
+  // esta advertencia va ANTES del corte por revisado_manual de abajo.
   const advertencias: string[] = [];
+
+  if (chunk.estado_vigencia && chunk.estado_vigencia !== "vigente") {
+    const etiqueta = chunk.estado_vigencia === "modificada" ? "MODIFICADA" : "DEROGADA / SIN EFECTO";
+    advertencias.push(
+      `⚠️ IMPORTANTE: esta norma fue marcada como ${etiqueta} por otra norma posterior. ` +
+        "No la presentes como norma vigente: dilo explícitamente en tu respuesta.",
+    );
+  }
+
+  if (chunk.revisado_manual) return advertencias;
 
   if (chunk.quality_score != null && chunk.quality_score < UMBRAL_CONTEXTO_BAJA_CALIDAD) {
     advertencias.push(
@@ -4471,6 +4620,17 @@ async function handleCallback(update: TelegramUpdate) {
 
     const documentKey = data.slice("normapdf:".length);
     return await enviarInstruccionNormaPdf(chatId, documentKey);
+  }
+
+  if (data.startsWith("derog:confirmar:") || data.startsWith("derog:rechazar:")) {
+    if (!isAdmin(chatId)) {
+      return;
+    }
+
+    const accion = data.startsWith("derog:confirmar:") ? "confirmar" : "rechazar";
+    const relacionId = data.slice(`derog:${accion}:`.length);
+    await resolverRelacionDerogacion(chatId, callback.message?.message_id, relacionId, accion);
+    return;
   }
 
   if (data.startsWith("tts:")) {

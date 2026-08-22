@@ -1,0 +1,70 @@
+name: DIGEMID - Detectar Derogaciones (IA)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Máximo de normas a analizar"
+        required: false
+        default: "20"
+        type: string
+      document_key:
+        description: "Reanalizar SOLO esta norma (opcional)"
+        required: false
+        default: ""
+        type: string
+
+  # Corre 30 min despues de la extraccion de texto (que va a la hora en punto)
+  # para que ya haya texto nuevo disponible para analizar.
+  schedule:
+    - cron: "30 * * * *"
+
+concurrency:
+  group: digemid-normativa-derogaciones
+  cancel-in-progress: false
+
+jobs:
+  detectar-derogaciones:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Detectar derogaciones con IA
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            LIMIT="20"
+          else
+            LIMIT="${{ inputs.limit }}"
+          fi
+
+          CMD=(python scripts/detectar_derogaciones_normativa.py --limit "$LIMIT")
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--document-key "${{ inputs.document_key }}")
+          fi
+
+          printf 'Ejecutando: %q ' "${CMD[@]}"; printf '\n'
+          "${CMD[@]}"

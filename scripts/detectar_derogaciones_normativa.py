@@ -192,12 +192,18 @@ def buscar_norma_afectada(supabase, tipo_norma, numero, anio, document_key_candi
     if numero_norm and anio:
         # Los document_key existentes no siguen un formato de ceros a la
         # izquierda consistente (hay "DS-14-2002" y "DS-008-2025-SA" en la
-        # misma tabla), asi que comparar con LIKE es fragil. Se trae todo lo
-        # de ese año/tipo y se compara el numero ya normalizado en Python.
-        query = supabase.table("digemid_normas").select("id, document_key, numero").eq("anio", anio)
-        if tipo_norma:
-            query = query.ilike("tipo_norma", f"%{tipo_norma}%")
-        response = query.execute()
+        # misma tabla), asi que comparar con LIKE es fragil. Ademas
+        # digemid_normas.tipo_norma guarda el nombre completo ("Decreto
+        # Supremo"), no la abreviatura que devuelve la IA ("DS"), asi que
+        # filtrar por tipo aqui solo descartaria filas validas: se trae todo
+        # lo de ese año y se compara el numero ya normalizado en Python
+        # (año+numero ya es suficientemente selectivo).
+        response = (
+            supabase.table("digemid_normas")
+            .select("id, document_key, numero")
+            .eq("anio", anio)
+            .execute()
+        )
         for fila in response.data or []:
             if normalizar_numero(fila.get("numero")) == numero_norm:
                 return fila

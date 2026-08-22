@@ -281,16 +281,37 @@ def buscar_norma_afectada(supabase, tipo_norma, numero, anio, document_key_candi
     return None
 
 
-def relacion_ya_registrada(supabase, norma_origen_id: str, descripcion: str) -> bool:
+def relacion_ya_registrada(
+    supabase,
+    norma_origen_id: str,
+    tipo_relacion: str,
+    descripcion: str,
+    numero: str | None,
+    anio: int | None,
+) -> bool:
+    """Evita registrar dos veces la misma relacion. Cuando la IA identifica
+    numero+anio de la norma afectada, compara por eso (mas robusto: la misma
+    relacion real puede salir redactada con variaciones minimas de texto
+    entre corridas, ej. "artículo 9 de la Ley 29698..." vs "Ley 29698
+    incorporado en..."). Si no hay numero+anio, cae a comparar el texto
+    exacto de la descripcion."""
     response = (
         supabase.table("digemid_norma_relaciones")
-        .select("id")
+        .select("id, numero_afectada, anio_afectada, descripcion_afectada")
         .eq("norma_origen_id", norma_origen_id)
-        .eq("descripcion_afectada", descripcion)
-        .limit(1)
+        .eq("tipo_relacion", tipo_relacion)
         .execute()
     )
-    return bool(response.data)
+
+    numero_norm = normalizar_numero(numero)
+    for fila in response.data or []:
+        if numero_norm and anio and fila.get("anio_afectada") == anio:
+            if normalizar_numero(fila.get("numero_afectada")) == numero_norm:
+                return True
+        elif fila.get("descripcion_afectada") == descripcion:
+            return True
+
+    return False
 
 
 VERBOS_RELACION = {
@@ -398,7 +419,7 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
             logger.info("Ignorando cláusula genérica de %s: %s", norma["document_key"], descripcion[:80])
             continue
 
-        if relacion_ya_registrada(supabase, norma["id"], descripcion):
+        if relacion_ya_registrada(supabase, norma["id"], tipo_relacion, descripcion, numero, anio):
             continue
         candidato = construir_document_key_candidato(tipo_norma, numero, anio)
         afectada = buscar_norma_afectada(supabase, tipo_norma, numero, anio, candidato)

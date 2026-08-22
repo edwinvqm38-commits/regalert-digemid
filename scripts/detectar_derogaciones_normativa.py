@@ -1,10 +1,12 @@
 """Analiza con IA el texto ya extraido de cada norma para detectar su efecto
 juridico exacto sobre OTRA norma (deroga, modifica, sustituye, incorpora,
 exonera de aplicacion, suspende, prorroga, o efecto no determinable con
-certeza), y deja la relacion "pendiente" para que un admin la confirme desde
-Telegram (botones inline). No se aplica sola: un error de la IA aqui
-significa citar mal una norma legal, asi que la confirmacion humana es
-obligatoria antes de marcar algo como derogado/modificado.
+certeza), y deja la relacion "pendiente" en digemid_norma_relaciones. No
+manda nada a Telegram en el momento (para no llenar el chat cada hora): el
+admin las revisa y confirma/rechaza cuando quiere con /derogacionespendientes
+desde el bot. No se aplica sola: un error de la IA aqui significa citar mal
+una norma legal, asi que la confirmacion humana es obligatoria antes de
+marcar algo como derogado/modificado.
 
 Regla central: MENCION DE UNA NORMA NO ES LO MISMO QUE MODIFICARLA. Antes de
 esto, el detector solo distinguia deroga/modifica/deja_sin_efecto y forzaba
@@ -314,85 +316,6 @@ def relacion_ya_registrada(
     return False
 
 
-VERBOS_RELACION = {
-    "deroga": "derogaría",
-    "deja_sin_efecto": "dejaría sin efecto",
-    "modifica": "modificaría",
-    "sustituye": "sustituiría el texto de",
-    "incorpora": "incorporaría contenido en",
-    "exonera": "exoneraría/exceptuaría de la aplicación de",
-    "suspende": "suspendería",
-    "prorroga": "prorrogaría un plazo de",
-    "pendiente_verificacion": "posiblemente afectaría (efecto jurídico NO determinado con certeza) a",
-}
-
-
-def enviar_confirmacion_telegram(
-    relacion_id: str,
-    origen_document_key: str,
-    tipo_relacion: str,
-    etiqueta_afectada: str,
-    fragmento: str,
-    fragmento_verificado: bool,
-    articulos_afectados: str | None = None,
-    alcance: str | None = None,
-) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        logger.info("Sin TELEGRAM_BOT_TOKEN o chat_id: no se notifica la relación %s.", relacion_id)
-        return
-
-    verbo = VERBOS_RELACION.get(tipo_relacion, tipo_relacion)
-
-    aviso_cita = (
-        ""
-        if fragmento_verificado
-        else "\n⚠️ <b>Esta cita NO se pudo verificar textualmente contra el documento</b> — revísala antes de confirmar.\n"
-    )
-    aviso_pendiente = (
-        "\n⚠️ <b>La IA no pudo determinar el efecto jurídico exacto con certeza</b> — requiere revisión legal, "
-        "no asumas que deroga o modifica.\n"
-        if tipo_relacion == "pendiente_verificacion"
-        else ""
-    )
-    detalle_alcance = ""
-    if articulos_afectados:
-        detalle_alcance += f"\nArtículos/numerales afectados: {articulos_afectados}"
-    if alcance:
-        detalle_alcance += f"\nAlcance: {alcance}"
-
-    texto = (
-        "⚠️ <b>Posible relación normativa detectada por IA</b>\n\n"
-        f"<b>{origen_document_key}</b> {verbo}:\n"
-        f"<b>{etiqueta_afectada}</b>{detalle_alcance}\n"
-        f"{aviso_cita}{aviso_pendiente}\n"
-        f"Fragmento: <i>\"{fragmento}\"</i>\n\n"
-        "¿Confirmas esta relación?"
-    )
-    reply_markup = {
-        "inline_keyboard": [[
-            {"text": "✅ Confirmar", "callback_data": f"derog:confirmar:{relacion_id}"},
-            {"text": "❌ Rechazar", "callback_data": f"derog:rechazar:{relacion_id}"},
-        ]]
-    }
-
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": texto,
-                "parse_mode": "HTML",
-                "reply_markup": reply_markup,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-    except Exception as error:
-        logger.warning("No se pudo notificar la relación %s por Telegram: %s", relacion_id, error)
-
-
 def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
     texto = texto_de_norma(supabase, norma["id"])
     if not texto:
@@ -457,12 +380,11 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         if not fila:
             continue
 
+        # No se notifica por Telegram en el momento: queda "pendiente" en la
+        # base y el admin la revisa cuando quiere con /derogacionespendientes,
+        # para no llenar el chat de mensajes cada vez que corre este script
+        # (cada hora, en lotes de hasta 20 normas).
         insertadas += 1
-        etiqueta_afectada = afectada["document_key"] if afectada else descripcion
-        enviar_confirmacion_telegram(
-            fila["id"], norma["document_key"], tipo_relacion, etiqueta_afectada, fragmento, verificado,
-            articulos_afectados, alcance,
-        )
 
     supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
     return insertadas

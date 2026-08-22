@@ -212,6 +212,7 @@ const COMANDOS_ADMIN: { command: string; description: string }[] = [
   { command: "saldodeepseek", description: "Consultar el saldo de la API DeepSeek" },
   { command: "normasrevisar", description: "Normas con páginas de baja calidad" },
   { command: "normassinpdf", description: "Normas sin PDF confirmado" },
+  { command: "derogacionespendientes", description: "Revisar derogaciones/modificaciones detectadas por IA" },
   { command: "normapdf", description: "Instrucciones para subir el PDF de una norma" },
   { command: "normarevisar", description: "Corregir páginas de baja calidad de una norma" },
   { command: "tablasrevisar", description: "Normas con tablas sin verificar" },
@@ -2057,6 +2058,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/normassinpdf</b>",
     "Lista las normas sin PDF confirmado, con botón para subirlo a mano una por una.",
+    "",
+    "<b>/derogacionespendientes</b>",
+    "Vuelve a mandar las relaciones de derogación/modificación detectadas por IA que aún no confirmaste o rechazaste.",
     "",
     "<b>/normapdf document_key</b>",
     "Instrucciones para subir el PDF de una norma puntual (adjunta el PDF con ese mismo comando como caption).",
@@ -4120,6 +4124,54 @@ async function handleCommand(
     ]);
 
     return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
+  }
+
+  if (trimmed === "/derogacionespendientes") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const { data: relaciones, error } = await supabase
+      .from("digemid_norma_relaciones")
+      .select("id, norma_origen_document_key, tipo_relacion, descripcion_afectada, fragmento_fuente")
+      .eq("estado", "pendiente")
+      .order("created_at", { ascending: true })
+      .limit(15);
+
+    if (error) {
+      return await sendMessage(chatId, `⚠️ Error al consultar: ${escapeHtml(error.message)}`);
+    }
+
+    if (!relaciones || !relaciones.length) {
+      return await sendMessage(chatId, "✅ No hay relaciones de derogación/modificación pendientes de confirmar.");
+    }
+
+    const verbos: Record<string, string> = {
+      deroga: "derogaría",
+      deja_sin_efecto: "dejaría sin efecto",
+      modifica: "modificaría",
+    };
+
+    for (const relacion of relaciones) {
+      const verbo = verbos[relacion.tipo_relacion] ?? relacion.tipo_relacion;
+      const texto =
+        `⚠️ <b>Posible derogación/modificación</b>\n\n` +
+        `<b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a:\n` +
+        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>` +
+        (relacion.fragmento_fuente
+          ? `\n\nFragmento: <i>"${escapeHtml(relacion.fragmento_fuente)}"</i>`
+          : "") +
+        "\n\n¿Confirmas esta relación?";
+
+      await sendMessage(chatId, texto, {
+        inline_keyboard: [[
+          { text: "✅ Confirmar", callback_data: `derog:confirmar:${relacion.id}` },
+          { text: "❌ Rechazar", callback_data: `derog:rechazar:${relacion.id}` },
+        ]],
+      });
+    }
+
+    return new Response("OK", { status: 200 });
   }
 
   if (trimmed.startsWith("/normapdf")) {

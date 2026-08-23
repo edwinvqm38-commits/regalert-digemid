@@ -159,6 +159,79 @@ def recortar_antes_de_proyecto_anexado(texto: str, document_key: str) -> str:
     return texto[: coincidencia.start()]
 
 
+# Caso real (RM-727-2025/MINSA): la RM dispone publicar un proyecto de
+# Decreto Supremo para comentarios, y el proyecto completo (con su propio
+# articulado "Modificar los articulos 3, 6, 10...") queda pegado despues,
+# sin la leyenda "PROYECTO PARA PUBLICACION" (ese marcador no es universal).
+# Una Resolucion (RM/RD/RS/RVM/RJ) SIEMPRE cierra su parte dispositiva con
+# "SE RESUELVE:", nunca con "DECRETA:" -eso es propio de un Decreto-, asi
+# que un "DECRETA:" dentro del texto de una Resolucion es una señal muy
+# confiable de que ahi empieza un Decreto anexado (real o proyecto).
+TIPOS_RESOLUCION = {"RM", "RD", "RS", "RVM", "RJ"}
+PATRON_DECRETA = re.compile(r"\bDECRETA\s*:", re.IGNORECASE)
+
+
+def recortar_decreto_anexado(texto: str, tipo_norma: str | None, document_key: str) -> str:
+    if (tipo_norma or "").strip().upper() not in TIPOS_RESOLUCION:
+        return texto
+    coincidencia = PATRON_DECRETA.search(texto)
+    if not coincidencia:
+        return texto
+    logger.warning(
+        "%s: es una Resolución pero su texto contiene 'DECRETA:' (propio de un Decreto); "
+        "se recorta, probablemente hay un Decreto anexado (real o proyecto).",
+        document_key,
+    )
+    return texto[: coincidencia.start()]
+
+
+# Caso real (RM-883-2024/MINSA): el PDF es un escaneo de El Peruano y su
+# primera pagina trae, antes de que empiece la norma real, la cola de OTRA
+# resolucion distinta publicada justo antes en la misma edicion del diario.
+# La norma real siempre trae su propio encabezado oficial
+# ("RESOLUCION MINISTERIAL\nNo 883-2024/MINSA"), asi que si ese encabezado
+# con el numero/año propios aparece en medio del texto (no al inicio), todo
+# lo de antes es de otro documento y se descarta.
+def recortar_antes_del_encabezado_propio(
+    texto: str, tipo_norma: str | None, numero: str | None, anio: int | None, document_key: str,
+) -> str:
+    numero_norm = normalizar_numero(numero)
+    if not numero_norm or not anio or not tipo_norma:
+        return texto
+
+    palabra_tipo = {
+        "RM": "RESOLUCI[OÓ]N MINISTERIAL",
+        "RD": "RESOLUCI[OÓ]N DIRECTORAL",
+        "RS": "RESOLUCI[OÓ]N SUPREMA",
+        "RVM": "RESOLUCI[OÓ]N VICEMINISTERIAL",
+        "DS": "DECRETO SUPREMO",
+        "DL": "DECRETO LEGISLATIVO",
+        "DU": "DECRETO DE URGENCIA",
+    }.get((tipo_norma or "").strip().upper())
+    if not palabra_tipo:
+        return texto
+
+    patron = re.compile(
+        rf"{palabra_tipo}\s*\n?\s*N[°ºo.]*\s*0*{numero_norm}[-/]{anio}",
+        re.IGNORECASE,
+    )
+    coincidencia = patron.search(texto)
+    # Solo recorta si el encabezado aparece bien adentro del texto (no al
+    # inicio, que es lo normal): un match cerca de la posicion 0 es la norma
+    # empezando correctamente, no contaminacion de otro documento.
+    if not coincidencia or coincidencia.start() < 50:
+        return texto
+
+    logger.warning(
+        "%s: se encontró el encabezado propio de la norma en medio del texto "
+        "(posición %d); se descarta todo lo anterior (probablemente es el final "
+        "de otra norma distinta en el mismo PDF de El Peruano).",
+        document_key,
+        coincidencia.start(),
+    )
+    return texto[coincidencia.start():]
+
+
 def es_clausula_generica(tipo_norma, numero, anio, descripcion: str) -> bool:
     if tipo_norma or numero or anio:
         return False
@@ -231,7 +304,7 @@ def call_deepseek(api_key: str, texto: str) -> dict:
 def normas_pendientes(supabase, limit: int, document_key: str | None) -> list[dict]:
     query = (
         supabase.table("digemid_normas")
-        .select("id, document_key, titulo")
+        .select("id, document_key, titulo, tipo_norma, numero, anio")
         .in_("process_status", ["text_extracted", "text_extracted_baja_calidad"])
         .eq("derogacion_analizada", False)
     )
@@ -358,7 +431,11 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
         return 0
 
+    texto = recortar_antes_del_encabezado_propio(
+        texto, norma.get("tipo_norma"), norma.get("numero"), norma.get("anio"), norma["document_key"],
+    )
     texto = recortar_antes_de_proyecto_anexado(texto, norma["document_key"])
+    texto = recortar_decreto_anexado(texto, norma.get("tipo_norma"), norma["document_key"])
     if not texto:
         supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
         return 0

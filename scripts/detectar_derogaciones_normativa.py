@@ -139,6 +139,16 @@ identifica cual norma puntual queda afectada, no la incluyas.
 devuelve {"relaciones": []}.
 - El "fragmento" debe ser una cita textual exacta del documento, nunca un \
 resumen ni una paráfrasis tuya.
+- El "fragmento" y el tipo_relacion DEBEN basarse en la PARTE DISPOSITIVA \
+del documento (los articulos que vienen despues de "SE RESUELVE:" o \
+"DECRETA:"), nunca en los "CONSIDERANDO" / "Que, ..." previos. Los \
+considerandos solo narran el contexto o antecedentes (ej. "Que, mediante \
+Resolucion X se aprobo Y...") y pueden mencionar de pasada una norma que \
+MAS ADELANTE, en la parte dispositiva, se deroga o modifica -pero el \
+considerando en si NO es la relacion, y describir su contenido con tus \
+propias palabras no es una cita valida. Busca siempre el articulo real \
+("Articulo N°.- Modificar/Derogar/...") que sustenta cada relacion y cita \
+ESE texto, no el considerando que lo antecede.
 - No inventes numeros, tipos, anios ni articulos que no esten explicitos en \
 el texto.
 """

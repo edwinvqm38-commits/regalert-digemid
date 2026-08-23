@@ -74,6 +74,22 @@ UNICAMENTE la parte dispositiva de la norma real (antes del anexo) e IGNORA \
 por completo cualquier "deroga/modifica/etc." que aparezca dentro del texto \
 del proyecto anexado.
 
+ALERTA - LINAJE DE APROBACION/MODIFICACION NO ES EL OBJETO MODIFICADO: es \
+MUY comun que un articulo diga algo como "Modificar el numeral 2 del Anexo \
+02 de la Directiva N° 165-MINSA/DIGEMID-V.01, aprobada por Resolucion \
+Ministerial N° 737-2010/MINSA, modificada por Resolucion Ministerial N° \
+615-2024/MINSA". En una frase asi, el OBJETO que se esta modificando AHORA \
+es la Directiva N° 165 (el sustantivo principal, justo despues de \
+"Modificar el/la..."). Las resoluciones citadas despues con "aprobada por" \
+o "modificada por" SOLO describen el linaje/historial de esa Directiva \
+(quien la creo, quien la modifico antes) -NO son el destino de esta \
+modificacion, aunque sean lo ultimo mencionado en la oracion-. Nunca \
+reportes esas resoluciones de linaje como si fueran el objeto afectado: la \
+relacion correcta ahi es "modifica" hacia la Directiva N° 165, no hacia la \
+Resolucion N° 615-2024. Presta atencion a CUAL es el sustantivo que sigue \
+inmediatamente al verbo ("Modificar EL/LA ..."), no al ultimo numero de \
+norma que aparezca en la oracion.
+
 Identifica el verbo juridico exacto y clasifica segun esta tabla (usa el \
 tipo_relacion entre parentesis):
 - "Modifícase el artículo...", "se modifica..." → modifica
@@ -236,6 +252,26 @@ def es_clausula_generica(tipo_norma, numero, anio, descripcion: str) -> bool:
     if tipo_norma or numero or anio:
         return False
     return bool(PATRON_CLAUSULA_GENERICA.search(descripcion))
+
+
+# Caso real (RM-899-2025/MINSA): "Modificar el numeral 2 del Anexo 02 de la
+# Directiva N° 165..., aprobada por Resolución Ministerial N° 737-2010/MINSA,
+# modificada por Resolución Ministerial N° 615-2024/MINSA" -> el objeto que
+# se modifica es la Directiva N° 165, no la RM 615-2024. La IA reporto la RM
+# 615-2024 (el ultimo numero mencionado en la oracion) como si fuera el
+# objeto, cuando solo describe el linaje de modificacion previa de la
+# Directiva. Respaldo deterministico: si en el fragmento citado el
+# numero/año que la IA reporto aparece justo despues de "aprobado/a por" o
+# "modificado/a por", es una cita de linaje, no el objeto de la relacion.
+def es_cita_de_linaje(fragmento: str, numero, anio) -> bool:
+    numero_norm = normalizar_numero(numero)
+    if not numero_norm or not anio or not fragmento:
+        return False
+    patron = re.compile(
+        rf"(?:aprobad[oa]|modificad[oa])\s+por\s+\w[\w\s]{{0,30}}?N[°ºo.]*\s*0*{numero_norm}[-/]{anio}",
+        re.IGNORECASE,
+    )
+    return bool(patron.search(fragmento))
 
 
 def normalizar_para_comparar(texto: str) -> str:
@@ -455,16 +491,23 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         tipo_norma = relacion.get("tipo_norma") or None
         numero = relacion.get("numero") or None
         anio = relacion.get("anio")
+        fragmento = (relacion.get("fragmento") or "")[:500]
 
         if es_clausula_generica(tipo_norma, numero, anio, descripcion):
             logger.info("Ignorando cláusula genérica de %s: %s", norma["document_key"], descripcion[:80])
+            continue
+
+        if es_cita_de_linaje(fragmento, numero, anio):
+            logger.info(
+                "Ignorando cita de linaje (aprobado/modificado por) de %s: %s",
+                norma["document_key"], descripcion[:80],
+            )
             continue
 
         if relacion_ya_registrada(supabase, norma["id"], tipo_relacion, descripcion, numero, anio):
             continue
         candidato = construir_document_key_candidato(tipo_norma, numero, anio)
         afectada = buscar_norma_afectada(supabase, tipo_norma, numero, anio, candidato)
-        fragmento = (relacion.get("fragmento") or "")[:500]
         verificado = fragmento_aparece_en_texto(fragmento, texto)
         if not verificado:
             logger.warning(

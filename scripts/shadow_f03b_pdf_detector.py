@@ -256,7 +256,10 @@ def analizar_norma(agent: NormativePdfDetectorAgent, row: dict) -> dict:
             c["clasificacion_individual"] == PDF_IDENTIDAD_CONTRADICTORIA
             for c in fila["candidatos"]
         )
-        fila["bucket_resumen"] = PDF_IDENTIDAD_CONTRADICTORIA if hubo_contradiccion else "NO_ENCONTRADO"
+        # El bucket de RESUMEN usa la etiqueta "CONTRADICTORIO" (no la
+        # constante PDF_IDENTIDAD_CONTRADICTORIA, que es la clasificacion
+        # POR CANDIDATO): son dos vocabularios distintos y hay que traducir.
+        fila["bucket_resumen"] = "CONTRADICTORIO" if hubo_contradiccion else "NO_ENCONTRADO"
     else:
         fila["bucket_resumen"] = f"OTRO:{decision.estado}"
 
@@ -324,6 +327,12 @@ def main() -> int:
     for row in filas_db:
         logger.info("Analizando (shadow): %s | %s", row.get("document_key"), row.get("title"))
         resultados.append(analizar_norma(agent, row))
+
+    if args.document_key and len(resultados) == 1:
+        print("\n" + "=" * 74)
+        print(f"FICHA COMPLETA — {args.document_key} — SOLO LECTURA")
+        print("=" * 74)
+        print(json.dumps(resultados[0], ensure_ascii=False, indent=2))
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)

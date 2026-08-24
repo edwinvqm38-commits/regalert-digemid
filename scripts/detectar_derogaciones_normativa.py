@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import re
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -38,6 +40,27 @@ logger = logging.getLogger(__name__)
 
 DEEPSEEK_MODEL = "deepseek-chat"
 MAX_CHARS_TEXTO = 15000
+
+# Version del analizador. Si se cambia el prompt, la segmentacion o las reglas
+# deterministas, SUBIR este numero: las normas analizadas con una version
+# anterior vuelven a entrar en la cola automaticamente (antes quedaban
+# congeladas para siempre con el resultado viejo).
+ANALYZER_VERSION = 2
+
+MAX_TOKENS_RESPUESTA = 4096
+TIMEOUT_DEEPSEEK = 120
+INTENTOS_DEEPSEEK = 3
+MIN_CHARS_ANALIZABLE = 200
+
+# Estados explicitos de la llamada al modelo. SOLO ESTADO_OK permite marcar una
+# norma como analizada; cualquier otro la deja pendiente para el proximo intento.
+ESTADO_OK = "OK"
+ESTADO_ERROR_API = "ERROR_API"
+ESTADO_ERROR_JSON = "ERROR_JSON"
+ESTADO_TIMEOUT = "TIMEOUT"
+ESTADO_TEXTO_INSUFICIENTE = "TEXTO_INSUFICIENTE"
+ESTADO_RESPUESTA_INCOMPLETA = "RESPUESTA_INCOMPLETA"
+ESTADOS_REINTENTABLES = {ESTADO_ERROR_API, ESTADO_TIMEOUT, ESTADO_RESPUESTA_INCOMPLETA}
 TIPOS_RELACION_VALIDOS = {
     "deroga",
     "deja_sin_efecto",
@@ -274,11 +297,19 @@ def es_clausula_generica(tipo_norma, numero, anio, descripcion: str) -> bool:
 # numero/año que la IA reporto aparece justo despues de "aprobado/a por" o
 # "modificado/a por", es una cita de linaje, no el objeto de la relacion.
 def es_cita_de_linaje(fragmento: str, numero, anio) -> bool:
+    """SOLO "modificado/a por" denota linaje (una enmienda previa del objeto).
+
+    "aprobado/a por" NO es linaje: en la formula estandar peruana "Modificar el
+    articulo N del Reglamento ..., aprobado por Decreto Supremo X", el objeto
+    modificado ES ese Decreto -el reglamento vive dentro del instrumento que lo
+    aprobo-. Incluir "aprobado por" aqui descartaba relaciones reales y ya
+    confirmadas (DS-15-2025 y DS-008-2025 -> DS-014-2011-SA). Ver H-02.
+    """
     numero_norm = normalizar_numero(numero)
     if not numero_norm or not anio or not fragmento:
         return False
     patron = re.compile(
-        rf"(?:aprobad[oa]|modificad[oa])\s+por\s+\w[\w\s]{{0,30}}?N[°ºo.]*\s*0*{numero_norm}[-/]{anio}",
+        rf"modificad[oa]s?\s+por\s+\w[\w\s]{{0,30}}?N[°ºo.]*\s*0*{numero_norm}[-/]{anio}",
         re.IGNORECASE,
     )
     return bool(patron.search(fragmento))
@@ -317,48 +348,131 @@ def get_supabase():
     return create_client(url, key)
 
 
-def call_deepseek(api_key: str, texto: str) -> dict:
-    response = requests.post(
-        "https://api.deepseek.com/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": DEEPSEEK_MODEL,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": texto},
-            ],
-            "max_tokens": 1024,
-            "temperature": 0,
-        },
-        timeout=90,
-    )
-    response.raise_for_status()
-    contenido = response.json()["choices"][0]["message"]["content"].strip()
+def _una_llamada_deepseek(api_key: str, texto: str) -> tuple[str, dict]:
+    """Una sola llamada. Devuelve (estado, data) sin lanzar excepciones."""
+    try:
+        response = requests.post(
+            "https://api.deepseek.com/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": DEEPSEEK_MODEL,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": texto},
+                ],
+                # 1024 truncaba el JSON justo en las normas con MAS relaciones
+                # (las mas ricas juridicamente), y esa truncadura terminaba
+                # clasificada como "sin relaciones". Ver ESTADO_RESPUESTA_INCOMPLETA.
+                "max_tokens": MAX_TOKENS_RESPUESTA,
+                "temperature": 0,
+            },
+            timeout=TIMEOUT_DEEPSEEK,
+        )
+    except requests.exceptions.Timeout:
+        return ESTADO_TIMEOUT, {}
+    except requests.exceptions.RequestException as error:
+        logger.warning("Error de red hablando con DeepSeek: %s", error)
+        return ESTADO_ERROR_API, {}
+
+    if response.status_code >= 400:
+        logger.warning("DeepSeek respondio HTTP %s", response.status_code)
+        return ESTADO_ERROR_API, {}
+
+    try:
+        cuerpo = response.json()
+        eleccion = cuerpo["choices"][0]
+        contenido = eleccion["message"]["content"].strip()
+    except (ValueError, KeyError, IndexError) as error:
+        logger.warning("Respuesta de DeepSeek con forma inesperada: %s", error)
+        return ESTADO_ERROR_API, {}
+
+    # finish_reason="length" = el modelo se quedo sin tokens: la respuesta esta
+    # cortada aunque por casualidad parsee. Nunca es un "no hay relaciones".
+    if eleccion.get("finish_reason") == "length":
+        logger.warning("DeepSeek corto la respuesta por limite de tokens.")
+        return ESTADO_RESPUESTA_INCOMPLETA, {}
+
     contenido = re.sub(r"^```(?:json)?|```$", "", contenido, flags=re.MULTILINE).strip()
 
     try:
         data = json.loads(contenido)
     except json.JSONDecodeError:
         logger.warning("Respuesta de DeepSeek no es JSON válido: %s", contenido[:300])
-        return {"relaciones": []}
+        return ESTADO_ERROR_JSON, {}
 
     if not isinstance(data.get("relaciones"), list):
-        return {"relaciones": []}
-    return data
+        logger.warning("El JSON de DeepSeek no trae la lista 'relaciones'.")
+        return ESTADO_ERROR_JSON, {}
+
+    return ESTADO_OK, data
 
 
-def normas_pendientes(supabase, limit: int, document_key: str | None) -> list[dict]:
+def call_deepseek(api_key: str, texto: str) -> tuple[str, dict]:
+    """Consulta a DeepSeek devolviendo un ESTADO EXPLICITO.
+
+    Antes, cualquier fallo de parseo devolvia {"relaciones": []}, que es
+    indistinguible de "el modelo analizo y no encontro nada" -y el llamador
+    marcaba la norma como analizada para siempre-. Un error del modelo NO es
+    una respuesta valida: solo ESTADO_OK autoriza a dar la norma por analizada.
+    """
+    if len((texto or "").strip()) < MIN_CHARS_ANALIZABLE:
+        return ESTADO_TEXTO_INSUFICIENTE, {}
+
+    estado, data = ESTADO_ERROR_API, {}
+    for intento in range(1, INTENTOS_DEEPSEEK + 1):
+        estado, data = _una_llamada_deepseek(api_key, texto)
+        if estado == ESTADO_OK or estado not in ESTADOS_REINTENTABLES:
+            break
+        if intento < INTENTOS_DEEPSEEK:
+            logger.info(
+                "Reintentando DeepSeek (intento %d de %d, estado previo %s)...",
+                intento + 1, INTENTOS_DEEPSEEK, estado,
+            )
+            time.sleep(2 * intento)
+
+    return estado, data
+
+
+def normas_pendientes(
+    supabase, limit: int, document_key: str | None, force: bool = False
+) -> list[dict]:
+    """Cola de analisis.
+
+    Una norma entra si (a) nunca se analizo, o (b) se analizo con una version
+    ANTERIOR del analizador. Sin esto, cada mejora del motor dejaba fuera para
+    siempre a las normas ya procesadas -que son justo las que arrastran los
+    errores de la version vieja-. Con --force se reanaliza aunque este al dia.
+    """
+    columnas = (
+        "id, document_key, titulo, tipo_norma, numero, anio, "
+        "derogacion_analizada, relaciones_analyzer_version"
+    )
     query = (
         supabase.table("digemid_normas")
-        .select("id, document_key, titulo, tipo_norma, numero, anio")
+        .select(columnas)
         .in_("process_status", ["text_extracted", "text_extracted_baja_calidad"])
-        .eq("derogacion_analizada", False)
     )
     if document_key:
         query = query.eq("document_key", document_key)
 
-    response = query.limit(limit).execute()
-    return response.data or []
+    if force:
+        return (query.limit(limit).execute().data or [])
+
+    # PostgREST no expresa comodamente "version < N OR version IS NULL" junto al
+    # resto de filtros, asi que se pide un margen y se filtra en Python.
+    candidatas = query.limit(max(limit * 5, limit)).execute().data or []
+    pendientes = [
+        n for n in candidatas
+        if not n.get("derogacion_analizada")
+        or (n.get("relaciones_analyzer_version") or 0) < ANALYZER_VERSION
+    ]
+    return pendientes[:limit]
+
+
+# Marcadores de inicio de la parte dispositiva. Todo el efecto juridico de una
+# norma peruana vive despues de uno de estos; lo anterior son vistos y
+# considerandos (contexto, no efecto).
+PATRON_INICIO_DISPOSITIVA = re.compile(r"\b(SE\s+RESUELVE|DECRETA|SE\s+DECRETA|RESUELVE)\s*:", re.IGNORECASE)
 
 
 def texto_de_norma(supabase, norma_id: str) -> str:
@@ -370,18 +484,64 @@ def texto_de_norma(supabase, norma_id: str) -> str:
         .execute()
     )
 
-    partes = []
-    total = 0
-    for fila in response.data or []:
-        texto = (fila.get("text_normalized") or fila.get("text_raw") or "").strip()
-        if not texto:
-            continue
-        partes.append(texto)
-        total += len(texto)
-        if total >= MAX_CHARS_TEXTO:
-            break
+    partes = [
+        (fila.get("text_normalized") or fila.get("text_raw") or "").strip()
+        for fila in response.data or []
+    ]
+    return "\n\n".join(p for p in partes if p)
 
-    return "\n\n".join(partes)[:MAX_CHARS_TEXTO]
+
+def seleccionar_texto_relevante(texto: str, document_key: str = "") -> str:
+    """Recorta a la ventana del modelo SIN perder la parte dispositiva.
+
+    El truncado anterior (`texto[:15000]`) cortaba por el principio, y en
+    tecnica legislativa peruana las disposiciones complementarias DEROGATORIAS
+    y MODIFICATORIAS van AL FINAL. Con normas de 44k chars de media, eso
+    amputaba la evidencia juridica del 57,5% del corpus: RM-894-2024 tenia su
+    "Articulo 3.- Derogar la RM 339-2023" en el offset ~17.900 y el detector
+    nunca lo vio, asi que cito un considerando. Ver H-01.
+
+    Estrategia: se prioriza la parte dispositiva y SIEMPRE se conserva el final
+    del documento. Si no cabe entera, se toman su inicio y su cola.
+    """
+    if len(texto) <= MAX_CHARS_TEXTO:
+        return texto
+
+    inicio = PATRON_INICIO_DISPOSITIVA.search(texto)
+    if inicio:
+        # Un poco de encabezado da contexto de que norma es; el resto del
+        # presupuesto se gasta en la parte dispositiva, no en considerandos.
+        encabezado = texto[: min(inicio.start(), 1500)]
+        dispositiva = texto[inicio.start():]
+        presupuesto = MAX_CHARS_TEXTO - len(encabezado) - 100
+
+        if len(dispositiva) <= presupuesto:
+            cuerpo = dispositiva
+        else:
+            # Cabeza (articulos iniciales) + cola (disposiciones finales).
+            mitad = presupuesto // 2
+            cuerpo = (
+                dispositiva[:mitad]
+                + "\n\n[... fragmento intermedio omitido por longitud ...]\n\n"
+                + dispositiva[-mitad:]
+            )
+        logger.info(
+            "%s: segmentacion estructural (parte dispositiva localizada; %d chars totales).",
+            document_key, len(texto),
+        )
+        return encabezado + "\n\n" + cuerpo
+
+    # Sin marcador legible (OCR pobre): cabeza + cola, nunca solo la cabeza.
+    logger.warning(
+        "%s: no se localizo 'SE RESUELVE/DECRETA'; se analizan inicio y final del documento.",
+        document_key,
+    )
+    mitad = (MAX_CHARS_TEXTO - 100) // 2
+    return (
+        texto[:mitad]
+        + "\n\n[... fragmento intermedio omitido por longitud ...]\n\n"
+        + texto[-mitad:]
+    )
 
 
 def normalizar_numero(numero) -> str | None:
@@ -471,10 +631,23 @@ def relacion_ya_registrada(
     return False
 
 
+def marcar_analizada(supabase, norma_id: str) -> None:
+    """Solo se llama cuando el analisis fue realmente concluyente (ESTADO_OK o
+    documento sin texto util). Deja constancia de CON QUE VERSION se analizo,
+    para que una mejora futura del motor vuelva a encolar la norma."""
+    supabase.table("digemid_normas").update(
+        {
+            "derogacion_analizada": True,
+            "relaciones_analyzer_version": ANALYZER_VERSION,
+            "relaciones_analizadas_en": datetime.now(timezone.utc).isoformat(),
+        }
+    ).eq("id", norma_id).execute()
+
+
 def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
     texto = texto_de_norma(supabase, norma["id"])
     if not texto:
-        supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
+        marcar_analizada(supabase, norma["id"])
         return 0
 
     texto = recortar_antes_del_encabezado_propio(
@@ -483,10 +656,25 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
     texto = recortar_antes_de_proyecto_anexado(texto, norma["document_key"])
     texto = recortar_decreto_anexado(texto, norma.get("tipo_norma"), norma["document_key"])
     if not texto:
-        supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
+        marcar_analizada(supabase, norma["id"])
         return 0
 
-    resultado = call_deepseek(deepseek_key, texto)
+    # La ventana se aplica AL FINAL, y de forma estructural: primero se limpia
+    # la contaminacion sobre el texto completo, despues se elige que parte
+    # entra al modelo sin perder las disposiciones finales.
+    texto = seleccionar_texto_relevante(texto, norma["document_key"])
+
+    estado, resultado = call_deepseek(deepseek_key, texto)
+
+    if estado != ESTADO_OK:
+        # Un fallo del modelo NO es "no hay relaciones": la norma queda
+        # pendiente para el proximo intento en vez de cerrarse en falso.
+        logger.error(
+            "%s: analisis NO concluyente (%s). Se deja pendiente, sin marcar como analizada.",
+            norma["document_key"], estado,
+        )
+        return 0
+
     insertadas = 0
 
     for relacion in resultado.get("relaciones", []):
@@ -557,7 +745,7 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         # (cada hora, en lotes de hasta 20 normas).
         insertadas += 1
 
-    supabase.table("digemid_normas").update({"derogacion_analizada": True}).eq("id", norma["id"]).execute()
+    marcar_analizada(supabase, norma["id"])
     return insertadas
 
 
@@ -565,6 +753,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=20, help="Máximo de normas a analizar en esta corrida")
     parser.add_argument("--document-key", default=None, help="Reanalizar solo esta norma")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Reanaliza aunque ya se haya analizado con la version actual",
+    )
     args = parser.parse_args()
 
     load_env()
@@ -574,8 +767,11 @@ def main():
         raise RuntimeError("Falta configurar DEEPSEEK_API_KEY")
 
     supabase = get_supabase()
-    normas = normas_pendientes(supabase, args.limit, args.document_key)
-    logger.info("Normas a analizar: %d", len(normas))
+    normas = normas_pendientes(supabase, args.limit, args.document_key, force=args.force)
+    logger.info(
+        "Normas a analizar: %d (analyzer v%d%s)",
+        len(normas), ANALYZER_VERSION, ", --force" if args.force else "",
+    )
 
     total_relaciones = 0
     for norma in normas:

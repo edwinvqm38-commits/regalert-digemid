@@ -27,9 +27,21 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import sys
+
 import requests
 from dotenv import load_dotenv
 from supabase import create_client
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from identidad_normativa import (  # noqa: E402
+    AMBIGUA,
+    clave_dedupe,
+    construir_identidad,
+    identidad_de_norma,
+    normalizar_numero,
+    resolver_identidad,
+)
 
 
 logging.basicConfig(
@@ -544,91 +556,67 @@ def seleccionar_texto_relevante(texto: str, document_key: str = "") -> str:
     )
 
 
-def normalizar_numero(numero) -> str | None:
-    """Extrae solo el primer grupo de digitos y le quita ceros a la izquierda,
-    para poder comparar "014" con "14" o descartar basura que la IA a veces
-    deja pegada (ej. "014-2011-SA" en vez de solo "014")."""
-    if not numero:
-        return None
-    coincidencia = re.search(r"\d+", str(numero))
-    if not coincidencia:
-        return None
-    return str(int(coincidencia.group()))
+def cargar_catalogo(supabase) -> list[dict]:
+    """Catalogo completo de normas, leido UNA vez por corrida.
 
-
-def construir_document_key_candidato(tipo_norma, numero, anio) -> str | None:
-    numero_norm = normalizar_numero(numero)
-    if tipo_norma and numero_norm and anio:
-        return f"{str(tipo_norma).upper()}-{numero_norm}-{anio}"
-    return None
-
-
-def buscar_norma_afectada(supabase, tipo_norma, numero, anio, document_key_candidato) -> dict | None:
-    if document_key_candidato:
-        response = (
-            supabase.table("digemid_normas")
-            .select("id, document_key")
-            .eq("document_key", document_key_candidato)
-            .limit(1)
-            .execute()
-        )
-        if response.data:
-            return response.data[0]
-
-    numero_norm = normalizar_numero(numero)
-    if numero_norm and anio:
-        # Los document_key existentes no siguen un formato de ceros a la
-        # izquierda consistente (hay "DS-14-2002" y "DS-008-2025-SA" en la
-        # misma tabla), asi que comparar con LIKE es fragil. Ademas
-        # digemid_normas.tipo_norma guarda el nombre completo ("Decreto
-        # Supremo"), no la abreviatura que devuelve la IA ("DS"), asi que
-        # filtrar por tipo aqui solo descartaria filas validas: se trae todo
-        # lo de ese año y se compara el numero ya normalizado en Python
-        # (año+numero ya es suficientemente selectivo).
-        response = (
-            supabase.table("digemid_normas")
-            .select("id, document_key, numero")
-            .eq("anio", anio)
-            .execute()
-        )
-        for fila in response.data or []:
-            if normalizar_numero(fila.get("numero")) == numero_norm:
-                return fila
-
-    return None
-
-
-def relacion_ya_registrada(
-    supabase,
-    norma_origen_id: str,
-    tipo_relacion: str,
-    descripcion: str,
-    numero: str | None,
-    anio: int | None,
-) -> bool:
-    """Evita registrar dos veces la misma relacion. Cuando la IA identifica
-    numero+anio de la norma afectada, compara por eso (mas robusto: la misma
-    relacion real puede salir redactada con variaciones minimas de texto
-    entre corridas, ej. "artículo 9 de la Ley 29698..." vs "Ley 29698
-    incorporado en..."). Si no hay numero+anio, cae a comparar el texto
-    exacto de la descripcion."""
-    response = (
-        supabase.table("digemid_norma_relaciones")
-        .select("id, numero_afectada, anio_afectada, descripcion_afectada")
-        .eq("norma_origen_id", norma_origen_id)
-        .eq("tipo_relacion", tipo_relacion)
+    La resolucion de identidad necesita ver todas las candidatas a la vez para
+    poder declarar IDENTIDAD_AMBIGUA; con consultas puntuales por numero+año
+    -lo que se hacia antes- era imposible distinguir "una candidata" de
+    "varias, elegi la primera" (hallazgo H-06).
+    """
+    return (
+        supabase.table("digemid_normas")
+        .select("id, document_key, tipo_norma, numero, anio")
         .execute()
+        .data
+        or []
     )
 
-    numero_norm = normalizar_numero(numero)
-    for fila in response.data or []:
-        if numero_norm and anio and fila.get("anio_afectada") == anio:
-            if normalizar_numero(fila.get("numero_afectada")) == numero_norm:
-                return True
-        elif fila.get("descripcion_afectada") == descripcion:
-            return True
 
-    return False
+def identidad_para_dedupe(resultado, citada):
+    """Identidad con la que se construye la clave estable: la de la norma REAL
+    cuando se pudo resolver (asi "Ley 29459" y "Ley N° 29459-2009" convergen),
+    y la de la cita cuando no. Es el mismo criterio que usa el DRY-RUN."""
+    if resultado.resuelta:
+        return identidad_de_norma(resultado.norma)
+    return citada
+
+
+def claves_ya_registradas(supabase, norma_origen_id: str, catalogo: list[dict]) -> set[str]:
+    """H-07 · Indice de deduplicacion de las relaciones YA existentes de esta
+    norma origen.
+
+    Se recomputa la clave en memoria a partir de los campos de cada fila; NO se
+    escribe nada sobre las filas historicas (muchas estan confirmadas). Asi el
+    reanalisis con --force es idempotente incluso contra relaciones creadas
+    antes de que existiera la columna clave_dedupe.
+    """
+    filas = (
+        supabase.table("digemid_norma_relaciones")
+        .select("id, tipo_relacion, tipo_norma_afectada, numero_afectada, anio_afectada, "
+                "articulos_afectados, descripcion_afectada")
+        .eq("norma_origen_id", norma_origen_id)
+        .execute()
+        .data
+        or []
+    )
+
+    claves = set()
+    for fila in filas:
+        citada = construir_identidad(
+            fila.get("tipo_norma_afectada"), fila.get("numero_afectada"), fila.get("anio_afectada")
+        )
+        identidad = identidad_para_dedupe(resolver_identidad(citada, catalogo), citada)
+        claves.add(
+            clave_dedupe(
+                norma_origen_id,
+                fila.get("tipo_relacion"),
+                identidad,
+                fila.get("articulos_afectados"),
+                fila.get("descripcion_afectada"),
+            )
+        )
+    return claves
 
 
 def marcar_analizada(supabase, norma_id: str) -> None:
@@ -644,7 +632,7 @@ def marcar_analizada(supabase, norma_id: str) -> None:
     ).eq("id", norma_id).execute()
 
 
-def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
+def procesar_norma(supabase, norma: dict, deepseek_key: str, catalogo: list[dict]) -> int:
     texto = texto_de_norma(supabase, norma["id"])
     if not texto:
         marcar_analizada(supabase, norma["id"])
@@ -676,6 +664,7 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
         return 0
 
     insertadas = 0
+    claves_previas = claves_ya_registradas(supabase, norma["id"], catalogo)
 
     for relacion in resultado.get("relaciones", []):
         tipo_relacion = relacion.get("tipo_relacion")
@@ -702,10 +691,33 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
             )
             continue
 
-        if relacion_ya_registrada(supabase, norma["id"], tipo_relacion, descripcion, numero, anio):
+        # --- IDENTIDAD NORMATIVA (H-05/H-06): quien es exactamente la norma
+        # afectada. Ante varias candidatas NO se elige ninguna: la relacion se
+        # guarda con la identidad sin resolver para que la decida un humano.
+        citada = construir_identidad(tipo_norma, numero, anio)
+        resolucion = resolver_identidad(citada, catalogo)
+        afectada = resolucion.norma if resolucion.resuelta else None
+        if resolucion.nivel == AMBIGUA:
+            logger.warning(
+                "%s: identidad AMBIGUA para %s -> candidatas: %s. No se vincula.",
+                norma["document_key"], citada,
+                ", ".join(c.get("document_key", "?") for c in resolucion.candidatas),
+            )
+
+        # --- DEDUPLICACION (H-07): clave estable, sin el fragmento.
+        clave = clave_dedupe(
+            norma["id"], tipo_relacion,
+            identidad_para_dedupe(resolucion, citada),
+            relacion.get("articulos_afectados"), descripcion,
+        )
+        if clave in claves_previas:
+            logger.info(
+                "%s: relacion ya registrada (clave %s). Se omite.",
+                norma["document_key"], clave,
+            )
             continue
-        candidato = construir_document_key_candidato(tipo_norma, numero, anio)
-        afectada = buscar_norma_afectada(supabase, tipo_norma, numero, anio, candidato)
+        claves_previas.add(clave)
+
         verificado = fragmento_aparece_en_texto(fragmento, texto)
         if not verificado:
             logger.warning(
@@ -732,6 +744,12 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str) -> int:
             "alcance": alcance,
             "fragmento_fuente": fragmento,
             "fragmento_verificado": verificado,
+            "clave_dedupe": clave,
+            "identidad_nivel": resolucion.nivel,
+            "identidad_confianza": resolucion.confianza,
+            "identidad_candidatas": ", ".join(
+                c.get("document_key", "?") for c in resolucion.candidatas
+            ) or None,
         }
 
         respuesta = supabase.table("digemid_norma_relaciones").insert(insercion).execute()
@@ -767,6 +785,7 @@ def main():
         raise RuntimeError("Falta configurar DEEPSEEK_API_KEY")
 
     supabase = get_supabase()
+    catalogo = cargar_catalogo(supabase)
     normas = normas_pendientes(supabase, args.limit, args.document_key, force=args.force)
     logger.info(
         "Normas a analizar: %d (analyzer v%d%s)",
@@ -776,7 +795,7 @@ def main():
     total_relaciones = 0
     for norma in normas:
         try:
-            total_relaciones += procesar_norma(supabase, norma, deepseek_key)
+            total_relaciones += procesar_norma(supabase, norma, deepseek_key, catalogo)
         except Exception as error:
             logger.error("Error analizando %s: %s", norma.get("document_key"), error)
 

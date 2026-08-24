@@ -58,6 +58,9 @@ def cargar_detector():
 
 D = cargar_detector()
 
+sys.path.insert(0, str(RAIZ / "scripts"))
+from identidad_normativa import AMBIGUA, NIVEL_TIPO_NUMERO  # noqa: E402
+
 
 class RespuestaFalsa:
     """Doble de `requests.Response` para simular respuestas de DeepSeek."""
@@ -265,8 +268,26 @@ class TestIdentidadYNumeros(unittest.TestCase):
         self.assertEqual(D.normalizar_numero("014"), "14")
         self.assertEqual(D.normalizar_numero("14"), "14")
 
-    def test_document_key_candidato_usa_numero_normalizado(self):
-        self.assertEqual(D.construir_document_key_candidato("DS", "014", 2011), "DS-14-2011")
+    def test_identidad_citada_usa_numero_normalizado(self):
+        """Sustituye a la construccion de document_key: la identidad ya no se
+        deduce de una cadena armada a mano, sino de la capa canonica."""
+        ident = D.construir_identidad("DS", "014", 2011)
+        self.assertEqual((ident.tipo, ident.numero, ident.anio), ("DS", "14", 2011))
+
+    def test_identidad_para_dedupe_prefiere_la_norma_real(self):
+        citada = D.construir_identidad("LEY", "29459")
+        resuelta = D.resolver_identidad(
+            citada,
+            [{"id": "n", "document_key": "LEY-29459", "tipo_norma": "Ley",
+              "numero": "29459", "anio": 2009}],
+        )
+        self.assertTrue(resuelta.resuelta)
+        self.assertEqual(D.identidad_para_dedupe(resuelta, citada).anio, 2009)
+
+    def test_identidad_para_dedupe_cae_a_la_cita_si_no_resuelve(self):
+        citada = D.construir_identidad("RM", "99999", 2030)
+        sin_resolver = D.resolver_identidad(citada, [])
+        self.assertIs(D.identidad_para_dedupe(sin_resolver, citada), citada)
 
 
 class TestVersionadoAnalizador(unittest.TestCase):
@@ -292,6 +313,184 @@ class TestVersionadoAnalizador(unittest.TestCase):
             or (f.get("relaciones_analyzer_version") or 0) < D.ANALYZER_VERSION
         }
         self.assertEqual(claves, {"A", "C"})
+
+
+# ---------------------------------------------------------------------------
+# H-07 · Idempotencia real de procesar_norma (reanalisis con --force)
+# ---------------------------------------------------------------------------
+class SupabaseFalso:
+    """Doble de Supabase en memoria. Solo soporta las operaciones que usa el
+    detector; cualquier otra explota a proposito, para que el test no pase por
+    accidente sobre una consulta que no se esta emulando."""
+
+    def __init__(self, paginas, relaciones=None):
+        self.paginas = paginas
+        self.relaciones = list(relaciones or [])
+        self.updates = []
+
+    def table(self, nombre):
+        return _ConsultaFalsa(self, nombre)
+
+
+class _Respuesta:
+    def __init__(self, data):
+        self.data = data
+
+
+class _ConsultaFalsa:
+    def __init__(self, db, tabla):
+        self.db, self.tabla = db, tabla
+        self._filtros, self._insert, self._update = {}, None, None
+
+    def select(self, *_a, **_k):
+        return self
+
+    def order(self, *_a, **_k):
+        return self
+
+    def limit(self, *_a, **_k):
+        return self
+
+    def eq(self, campo, valor):
+        self._filtros[campo] = valor
+        return self
+
+    def insert(self, fila):
+        self._insert = fila
+        return self
+
+    def update(self, fila):
+        self._update = fila
+        return self
+
+    def execute(self):
+        if self._insert is not None:
+            fila = dict(self._insert)
+            fila["id"] = f"rel-{len(self.db.relaciones) + 1}"
+            # Emula el indice unico parcial de la migracion.
+            clave = fila.get("clave_dedupe")
+            if clave and any(r.get("clave_dedupe") == clave for r in self.db.relaciones):
+                raise AssertionError(f"UNIQUE violado en clave_dedupe: {clave}")
+            self.db.relaciones.append(fila)
+            return _Respuesta([fila])
+        if self._update is not None:
+            self.db.updates.append((self.tabla, self._update, dict(self._filtros)))
+            return _Respuesta([])
+        if self.tabla == "digemid_norma_paginas":
+            return _Respuesta(self.db.paginas)
+        if self.tabla == "digemid_norma_relaciones":
+            origen = self._filtros.get("norma_origen_id")
+            return _Respuesta(
+                [r for r in self.db.relaciones if r.get("norma_origen_id") == origen]
+            )
+        raise AssertionError(f"consulta no emulada sobre {self.tabla}")
+
+
+TEXTO_NORMA = (
+    "RESOLUCION MINISTERIAL N° 500-2025/MINSA\n\n"
+    "SE RESUELVE:\n\n"
+    "Articulo 1.- Derogar el articulo 10 de la Ley N° 29459.\n"
+)
+
+CATALOGO_FALSO = [
+    {"id": "ley-real", "document_key": "LEY-29459", "tipo_norma": "Ley",
+     "numero": "29459", "anio": 2009},
+]
+
+
+class TestIdempotenciaConForce(unittest.TestCase):
+    """La misma norma reanalizada N veces produce las MISMAS relaciones."""
+
+    def _respuesta_ia(self, redaccion):
+        """Dos corridas del modelo que describen LA MISMA relacion juridica con
+        redaccion distinta: es exactamente lo que producia duplicados (H-07)."""
+        return {
+            "relaciones": [
+                {
+                    "tipo_relacion": "deroga",
+                    "tipo_norma": "LEY",
+                    "numero": "29459",
+                    "anio": None,
+                    "articulos_afectados": redaccion["articulos"],
+                    "alcance": "parcial",
+                    "descripcion": redaccion["descripcion"],
+                    "fragmento": redaccion["fragmento"],
+                }
+            ]
+        }
+
+    def _correr(self, db, redaccion):
+        original = D.call_deepseek
+        D.call_deepseek = lambda *a, **k: (D.ESTADO_OK, self._respuesta_ia(redaccion))
+        try:
+            return D.procesar_norma(
+                db,
+                {"id": "origen-1", "document_key": "RM-500-2025",
+                 "tipo_norma": "RM", "numero": "500", "anio": 2025},
+                "clave-falsa",
+                CATALOGO_FALSO,
+            )
+        finally:
+            D.call_deepseek = original
+
+    def setUp(self):
+        self.db = SupabaseFalso(
+            paginas=[{"page_number": 1, "text_normalized": TEXTO_NORMA, "text_raw": None}]
+        )
+
+    def test_tres_corridas_producen_una_sola_relacion(self):
+        redacciones = [
+            {"articulos": "articulo 10", "descripcion": "Deroga el articulo 10 de la Ley 29459",
+             "fragmento": "Derogar el articulo 10 de la Ley N° 29459."},
+            {"articulos": "art. 10", "descripcion": "Derogacion del art. 10 de la Ley N° 29459",
+             "fragmento": "Articulo 1.- Derogar el articulo 10 de la Ley N° 29459."},
+            {"articulos": "10", "descripcion": "Se deroga el 10 de la Ley 29459",
+             "fragmento": "Derogar el articulo 10"},
+        ]
+        insertadas = [self._correr(self.db, r) for r in redacciones]
+        self.assertEqual(insertadas, [1, 0, 0], "el reanalisis no debe volver a insertar")
+        self.assertEqual(len(self.db.relaciones), 1)
+
+    def test_la_relacion_queda_vinculada_a_la_ley_real_sin_anio(self):
+        """Caso D: la cita dice "Ley 29459" sin año y aun asi se resuelve."""
+        self._correr(self.db, {"articulos": "articulo 10",
+                               "descripcion": "Deroga el articulo 10 de la Ley 29459",
+                               "fragmento": "Derogar el articulo 10 de la Ley N° 29459."})
+        fila = self.db.relaciones[0]
+        self.assertEqual(fila["norma_afectada_id"], "ley-real")
+        self.assertEqual(fila["identidad_nivel"], NIVEL_TIPO_NUMERO)
+        self.assertIsNone(fila["identidad_candidatas"])
+
+    def test_identidad_ambigua_no_se_vincula_a_ninguna_candidata(self):
+        catalogo = CATALOGO_FALSO + [
+            {"id": "stub", "document_key": "NORM-LEY-29459-STUB", "tipo_norma": "LEY",
+             "numero": "29459", "anio": None},
+        ]
+        original = D.call_deepseek
+        D.call_deepseek = lambda *a, **k: (D.ESTADO_OK, self._respuesta_ia(
+            {"articulos": "articulo 10", "descripcion": "Deroga el art. 10 de la Ley 29459",
+             "fragmento": "Derogar el articulo 10 de la Ley N° 29459."}))
+        try:
+            D.procesar_norma(
+                self.db,
+                {"id": "origen-1", "document_key": "RM-500-2025",
+                 "tipo_norma": "RM", "numero": "500", "anio": 2025},
+                "clave-falsa",
+                catalogo,
+            )
+        finally:
+            D.call_deepseek = original
+        fila = self.db.relaciones[0]
+        self.assertIsNone(fila["norma_afectada_id"], "nunca elegir una de dos candidatas")
+        self.assertEqual(fila["identidad_nivel"], AMBIGUA)
+        self.assertIn("NORM-LEY-29459-STUB", fila["identidad_candidatas"])
+
+    def test_relaciones_distintas_del_mismo_origen_no_se_fusionan(self):
+        self._correr(self.db, {"articulos": "articulo 10", "descripcion": "deroga art 10",
+                               "fragmento": "Derogar el articulo 10"})
+        self._correr(self.db, {"articulos": "articulo 12", "descripcion": "deroga art 12",
+                               "fragmento": "Derogar el articulo 12"})
+        self.assertEqual(len(self.db.relaciones), 2)
 
 
 if __name__ == "__main__":

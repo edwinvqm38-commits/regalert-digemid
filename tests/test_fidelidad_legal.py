@@ -227,3 +227,50 @@ class TestPuertas(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestNivelesDeUso(unittest.TestCase):
+    """Buscar y citar son cosas distintas (F-02 · 11)."""
+
+    def test_buscar_se_permite_en_todos_los_niveles(self):
+        from fidelidad_legal import (NIVEL_0_SOLO_INDICE, NIVEL_1_DIGITAL_CONCORDANTE,
+                                     NIVEL_2_AUTO_VERIFICADA, NIVEL_3_VERIFICADA_HUMANO,
+                                     USO_BUSQUEDA, usos_permitidos)
+        for nivel in (NIVEL_0_SOLO_INDICE, NIVEL_1_DIGITAL_CONCORDANTE,
+                      NIVEL_2_AUTO_VERIFICADA, NIVEL_3_VERIFICADA_HUMANO):
+            self.assertIn(USO_BUSQUEDA, usos_permitidos(nivel), nivel)
+
+    def test_citar_exige_nivel_2_o_3(self):
+        from fidelidad_legal import (NIVEL_0_SOLO_INDICE, NIVEL_1_DIGITAL_CONCORDANTE,
+                                     NIVEL_2_AUTO_VERIFICADA, NIVEL_3_VERIFICADA_HUMANO,
+                                     USO_CITA_LEGAL, usos_permitidos)
+        self.assertNotIn(USO_CITA_LEGAL, usos_permitidos(NIVEL_0_SOLO_INDICE))
+        self.assertNotIn(USO_CITA_LEGAL, usos_permitidos(NIVEL_1_DIGITAL_CONCORDANTE))
+        self.assertIn(USO_CITA_LEGAL, usos_permitidos(NIVEL_2_AUTO_VERIFICADA))
+        self.assertIn(USO_CITA_LEGAL, usos_permitidos(NIVEL_3_VERIFICADA_HUMANO))
+
+    def test_una_dispositiva_de_nivel_1_no_alimenta_al_detector(self):
+        from fidelidad_legal import (NIVEL_1_DIGITAL_CONCORDANTE, USO_DETECTOR_RELACIONES,
+                                     usos_permitidos)
+        self.assertNotIn(USO_DETECTOR_RELACIONES,
+                         usos_permitidos(NIVEL_1_DIGITAL_CONCORDANTE, dispositiva=True))
+        self.assertIn(USO_DETECTOR_RELACIONES,
+                      usos_permitidos(NIVEL_1_DIGITAL_CONCORDANTE, dispositiva=False))
+
+    def test_un_documento_incompleto_baja_la_pagina_a_nivel_0(self):
+        from fidelidad_legal import (NIVEL_0_SOLO_INDICE, VERIFICADA_AUTOMATICAMENTE,
+                                     nivel_de_uso)
+        self.assertEqual(nivel_de_uso(VERIFICADA_AUTOMATICAMENTE, documento_completo=False),
+                         NIVEL_0_SOLO_INDICE)
+
+    def test_la_verificacion_humana_sobrevive_a_un_documento_incompleto(self):
+        from fidelidad_legal import NIVEL_3_VERIFICADA_HUMANO, VERIFICADA_HUMANO, nivel_de_uso
+        self.assertEqual(nivel_de_uso(VERIFICADA_HUMANO, documento_completo=False),
+                         NIVEL_3_VERIFICADA_HUMANO)
+
+    def test_los_niveles_bajos_obligan_a_advertir_en_consulta(self):
+        from fidelidad_legal import (NIVEL_0_SOLO_INDICE, NIVEL_1_DIGITAL_CONCORDANTE,
+                                     NIVEL_2_AUTO_VERIFICADA, advertencia_para_consulta)
+        self.assertIsNotNone(advertencia_para_consulta(NIVEL_0_SOLO_INDICE))
+        self.assertIsNotNone(advertencia_para_consulta(NIVEL_1_DIGITAL_CONCORDANTE))
+        self.assertIsNone(advertencia_para_consulta(NIVEL_2_AUTO_VERIFICADA))

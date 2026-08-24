@@ -395,3 +395,78 @@ def puede_alimentar_detector(estado: str, dispositiva: bool) -> bool:
     if not dispositiva:
         return True
     return estado in ESTADOS_APTOS_DETECTOR
+
+
+# ---------------------------------------------------------------------------
+# NIVELES DE USO (F-02 · 11 y 12)
+# ---------------------------------------------------------------------------
+# Un booleano "verificada / no verificada" destruiria la utilidad de la app
+# mientras se verifica el corpus. Buscar y citar son cosas distintas: un texto
+# imperfecto sirve para ENCONTRAR la pagina candidata, y eso no lo autoriza a
+# ser la evidencia final de una afirmacion juridica.
+NIVEL_0_SOLO_INDICE = "NIVEL_0_SOLO_INDICE"
+NIVEL_1_DIGITAL_CONCORDANTE = "NIVEL_1_DIGITAL_CONCORDANTE"
+NIVEL_2_AUTO_VERIFICADA = "NIVEL_2_AUTO_VERIFICADA"
+NIVEL_3_VERIFICADA_HUMANO = "NIVEL_3_VERIFICADA_HUMANO"
+
+USO_BUSQUEDA = "USO_BUSQUEDA"
+USO_CITA_LEGAL = "USO_CITA_LEGAL"
+USO_DETECTOR_RELACIONES = "USO_DETECTOR_RELACIONES"
+
+_NIVEL_POR_ESTADO = {
+    VERIFICADA_HUMANO: NIVEL_3_VERIFICADA_HUMANO,
+    VERIFICADA_AUTOMATICAMENTE: NIVEL_2_AUTO_VERIFICADA,
+    EXTRACCION_DIGITAL_ALTA_CONCORDANCIA: NIVEL_1_DIGITAL_CONCORDANTE,
+}
+
+
+def nivel_de_uso(estado: str, documento_completo: bool | None = None) -> str:
+    """Nivel alcanzado por una pagina.
+
+    La completitud del DOCUMENTO limita a la pagina: si faltan paginas del PDF,
+    ninguna pagina suelta puede sostener una afirmacion juridica, por buena que
+    sea su transcripcion.
+    """
+    if estado in (DOCUMENTO_INCOMPLETO, PDF_NO_DISPONIBLE):
+        return NIVEL_0_SOLO_INDICE
+    nivel = _NIVEL_POR_ESTADO.get(estado, NIVEL_0_SOLO_INDICE)
+    if documento_completo is False and nivel != NIVEL_3_VERIFICADA_HUMANO:
+        # Solo una persona que miro el documento puede afirmar algo sobre un
+        # documento que sabemos incompleto.
+        return NIVEL_0_SOLO_INDICE
+    return nivel
+
+
+def usos_permitidos(nivel: str, dispositiva: bool = False) -> set[str]:
+    """Que se puede hacer con una pagina de este nivel.
+
+    * Buscar se permite SIEMPRE: encontrar la pagina candidata no afirma nada.
+    * Citar juridicamente exige nivel 2 o 3.
+    * Alimentar al detector exige nivel 2 o 3 SOLO si la pagina es dispositiva;
+      una pagina de considerandos no produce relaciones.
+    """
+    usos = {USO_BUSQUEDA}
+    if nivel in (NIVEL_2_AUTO_VERIFICADA, NIVEL_3_VERIFICADA_HUMANO):
+        usos.add(USO_CITA_LEGAL)
+        usos.add(USO_DETECTOR_RELACIONES)
+    elif not dispositiva:
+        usos.add(USO_DETECTOR_RELACIONES)
+    return usos
+
+
+def advertencia_para_consulta(nivel: str) -> str | None:
+    """Texto que /consulta debe mostrar si usa esta pagina como contexto.
+
+    None significa que no hace falta advertir. Nunca se presenta una cita como
+    segura desde un nivel insuficiente: si la pregunta es sobre un articulo,
+    un plazo o un monto, es preferible no responder.
+    """
+    if nivel == NIVEL_3_VERIFICADA_HUMANO:
+        return None
+    if nivel == NIVEL_2_AUTO_VERIFICADA:
+        return None
+    if nivel == NIVEL_1_DIGITAL_CONCORDANTE:
+        return ("⚠️ Texto extraído del PDF pero NO verificado contra el original. "
+                "Sirve para ubicar la norma; confirma los números y plazos en el PDF oficial.")
+    return ("⚠️ Transcripción de fidelidad NO verificada (posible OCR con errores). "
+            "Úsala solo para localizar el documento, no como cita legal.")

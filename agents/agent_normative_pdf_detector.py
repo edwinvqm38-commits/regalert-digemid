@@ -1,7 +1,11 @@
+import hashlib
+import io
 import logging
 import os
 import random
+import sys
 import time
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -10,7 +14,45 @@ from supabase import Client, create_client
 
 from agents.agent_utils import clean_text, utc_now_iso
 
+# F-03B: este agente escribia pdf_url/file_url tomando `candidate_links[0]`
+# tras ordenar por score. El score solo mide que tan prometedor SE VE un
+# enlace -nunca abrio el PDF ni lo comparo con la norma objetivo-, asi que un
+# candidato de score maximo podia ganar sin que su contenido fuera el
+# correcto. Ahora reutiliza la misma politica documental canonica que el
+# crawler (scripts/crawl_normativa_pdf_urls.py): abrir cada candidato, leer
+# sus encabezados, y escribir SOLO con MATCH_EXACTO o MATCH_MULTINORMA
+# probado por contenido. El score sigue existiendo, pero solo para filtrar
+# enlaces obviamente irrelevantes y para decidir cual inspeccionar primero si
+# hay que recortar por el techo de seguridad -nunca para elegir cual escribir-.
+for _extra_path in (Path(__file__).resolve().parent, Path(__file__).resolve().parents[1] / "scripts"):
+    if str(_extra_path) not in sys.path:
+        sys.path.insert(0, str(_extra_path))
+
+from identidad_documental import (  # noqa: E402
+    AMBIGUO,
+    AUDITORIA_INCOMPLETA,
+    NO_ENCONTRADA_TRAS_AUDITORIA_COMPLETA,
+    EvidenciaDocumental,
+    identidades_en_texto,
+)
+from politica_documental import REQUIERE_HUMANO, decidir  # noqa: E402
+
 logger = logging.getLogger(__name__)
+
+# Techo de seguridad frente a una pagina patologica, NO un recorte silencioso:
+# ver candidatos_de_pdf() en scripts/crawl_normativa_pdf_urls.py, mismo criterio.
+MAX_CANDIDATOS = 40
+SEGUNDOS_POR_CANDIDATO = 60.0
+
+# A que `process_status` se traduce cada estado del resolvedor cuando NO
+# autoriza a escribir. Cualquier estado no listado aqui (no deberia ocurrir)
+# cae en "pdf_ambiguous" por seguridad: nunca en "pdf_detected".
+_ESTADO_A_STATUS = {
+    AMBIGUO: "pdf_ambiguous",
+    AUDITORIA_INCOMPLETA: "pdf_audit_incomplete",
+    NO_ENCONTRADA_TRAS_AUDITORIA_COMPLETA: "pdf_not_found",
+    REQUIERE_HUMANO: "pdf_ambiguous",
+}
 
 PDF_ANCHOR_HINTS = (
     "descargar",
@@ -36,6 +78,30 @@ def extract_file_name(file_url: str | None) -> str | None:
     path = urlparse(file_url).path
     file_name = path.rsplit("/", 1)[-1]
     return file_name or None
+
+
+def identidad_objetivo_de_documento(title, document_key=None):
+    """Identidad objetivo a partir de lo que YA se registro de la norma.
+
+    `digemid_documentos` no tiene columnas propias `tipo_norma`/`numero`/
+    `anio` -a diferencia de `digemid_normas`-, solo `document_key` y `title`.
+    Y `document_key` con frecuencia es un hash sin estructura
+    ("NORM-RESOLUCION-MINISTERIAL-2025-3EEE0B42"), asi que no sirve como
+    identidad. El `title` si trae la forma de un encabezado normativo
+    ("Resolucion Ministerial N 793-2025/MINSA"), asi que se reutiliza el
+    mismo parser que lee encabezados dentro de un PDF.
+
+    Devuelve `None` cuando no se puede construir una identidad usable: sin
+    identidad objetivo no hay nada que comprobar, y sin comprobacion no se
+    escribe (F-03B).
+    """
+    for fuente in (title, document_key):
+        if not fuente:
+            continue
+        for aparicion in identidades_en_texto(str(fuente)):
+            if aparicion.identidad.numero:
+                return aparicion.identidad
+    return None
 
 
 class NormativePdfDetectorAgent:
@@ -162,28 +228,17 @@ class NormativePdfDetectorAgent:
             self.ignored_link_connection_errors += 1
             return False
 
-    def detect_pdf_url(self, detail_url: str) -> dict:
-        if self.is_pdf_response(detail_url):
-            return {
-                "status": "pdf_detected",
-                "pdf_url": detail_url,
-                "mime_type": "application/pdf",
-                "message": "PDF normativo detectado desde detail_url",
-            }
+    def _enlaces_candidatos(self, detail_url: str, html: str) -> list[tuple[str, str]]:
+        """Todos los enlaces plausibles a PDF de la pagina, con su texto de
+        enlace.
 
-        response = self.fetch_detail_response(detail_url)
-        content_type = response.headers.get("Content-Type", "").lower()
-
-        if "application/pdf" in content_type:
-            return {
-                "status": "pdf_detected",
-                "pdf_url": detail_url,
-                "mime_type": "application/pdf",
-                "message": "PDF normativo detectado desde detail_url",
-            }
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        candidate_links: list[tuple[int, str]] = []
+        El score SOLO filtra basura evidente (score<=0) y ordena cual se
+        inspecciona primero si hay que recortar por el techo de seguridad.
+        NUNCA decide cual es el PDF correcto: eso lo hace
+        politica_documental.decidir() tras abrir cada uno y leer su contenido.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        vistos: dict[str, tuple[int, str]] = {}
 
         for anchor in soup.find_all("a", href=True):
             href = clean_text(anchor.get("href", ""))
@@ -196,23 +251,100 @@ class NormativePdfDetectorAgent:
             if score <= 0:
                 continue
 
-            if is_pdf_url(absolute_url) or any(
+            es_pdf_directo = is_pdf_url(absolute_url) or any(
                 hint in absolute_url.lower() for hint in PDF_PATH_HINTS
-            ):
-                candidate_links.append((score, absolute_url))
-                continue
+            )
+            if not es_pdf_directo:
+                try:
+                    if not self.maybe_validate_pdf_link(absolute_url, anchor_text):
+                        continue
+                except requests.RequestException:
+                    self.ignored_link_connection_errors += 1
+                    continue
+                except Exception:
+                    self.ignored_link_connection_errors += 1
+                    continue
 
-            try:
-                if self.maybe_validate_pdf_link(absolute_url, anchor_text):
-                    candidate_links.append((score, absolute_url))
-            except requests.RequestException:
-                self.ignored_link_connection_errors += 1
-                continue
-            except Exception:
-                self.ignored_link_connection_errors += 1
-                continue
+            previo = vistos.get(absolute_url)
+            if previo is None or score > previo[0]:
+                vistos[absolute_url] = (score, anchor_text)
 
-        if not candidate_links:
+        ordenados = sorted(vistos.items(), key=lambda item: item[1][0], reverse=True)
+        return [(url, texto) for url, (_score, texto) in ordenados]
+
+    def _evidencia_de_candidato(self, url: str, anchor_text: str, identidad_objetivo) -> EvidenciaDocumental:
+        """Descarga el PDF y lee sus encabezados.
+
+        Mismo criterio que el crawler (scripts/crawl_normativa_pdf_urls.py):
+        el CONTENIDO manda; el nombre del archivo y el texto del enlace solo
+        acompañan.
+        """
+        ev = EvidenciaDocumental(
+            identidad_objetivo=identidad_objetivo,
+            filename=url.rsplit("/", 1)[-1],
+            anchor_text=anchor_text,
+            url=url,
+        )
+        try:
+            import fitz
+
+            respuesta = self.session.get(url, timeout=90, allow_redirects=True)
+            respuesta.raise_for_status()
+            ev.pdf_sha256 = hashlib.sha256(respuesta.content).hexdigest()
+
+            with fitz.open(stream=io.BytesIO(respuesta.content), filetype="pdf") as doc:
+                ev.total_paginas = doc.page_count
+                textos, leidas = [], 0
+                arranque = time.monotonic()
+                # TODAS las paginas: el encabezado puede estar en cualquiera.
+                for indice in range(doc.page_count):
+                    if time.monotonic() - arranque > SEGUNDOS_POR_CANDIDATO:
+                        ev.motivo_incompletitud = (
+                            f"se agoto el presupuesto de {SEGUNDOS_POR_CANDIDATO:.0f}s "
+                            f"tras {leidas} de {doc.page_count} paginas"
+                        )
+                        break
+                    texto = doc[indice].get_text("text") or ""
+                    textos.append(texto)
+                    ev.apariciones.extend(identidades_en_texto(texto, indice + 1))
+                    leidas += 1
+                ev.paginas_analizadas = leidas
+                ev.texto_completo = "\n".join(textos)
+        except Exception as error:
+            logger.warning("No se pudo leer el candidato %s: %s", url, error)
+            ev.pdf_disponible = False
+        return ev
+
+    def detect_pdf_url(self, detail_url: str, identidad_objetivo) -> dict:
+        """Detecta y VERIFICA el pdf_url de una norma.
+
+        Sustituye a `candidate_links[0]`: escribe solo cuando
+        politica_documental.decidir() prueba, abriendo cada candidato y
+        leyendo su contenido, que ese documento es la norma objetivo.
+        """
+        if identidad_objetivo is None:
+            return {
+                "status": "pdf_identity_unknown",
+                "pdf_url": None,
+                "mime_type": None,
+                "message": (
+                    "no se pudo construir una identidad objetivo verificable a "
+                    "partir del titulo/document_key: sin identidad no hay nada "
+                    "que comprobar, y sin comprobacion no se escribe"
+                ),
+            }
+
+        if self.is_pdf_response(detail_url):
+            candidatos_urls = [(detail_url, "")]
+        else:
+            response = self.fetch_detail_response(detail_url)
+            content_type = response.headers.get("Content-Type", "").lower()
+            if "application/pdf" in content_type:
+                candidatos_urls = [(detail_url, "")]
+            else:
+                candidatos_urls = self._enlaces_candidatos(detail_url, response.text)
+
+        if not candidatos_urls:
             return {
                 "status": "pdf_not_found",
                 "pdf_url": None,
@@ -220,52 +352,39 @@ class NormativePdfDetectorAgent:
                 "message": "No se detecto enlace PDF en detail_url",
             }
 
-        # ---------------------------------------------------------------
-        # F-03B: el score ordena, pero NO decide.
-        #
-        # `candidate_links[0]` tras ordenar por score sigue siendo una eleccion
-        # por posicion: el score puntua lo *prometedor* que parece un enlace,
-        # no a que norma pertenece el documento. Cuando dos candidatos empatan
-        # o son incompatibles entre si, desempatar automaticamente es inventar
-        # una respuesta.
-        #
-        # Regla: si el mejor score esta empatado con otro candidato distinto,
-        # no se escribe nada y el documento queda para revision humana.
-        # ---------------------------------------------------------------
-        candidate_links.sort(key=lambda item: item[0], reverse=True)
-        mejor_score = candidate_links[0][0]
-        empatados = {url for score, url in candidate_links if score == mejor_score}
-        if len(empatados) > 1:
-            return {
-                "status": "pdf_ambiguous",
-                "pdf_url": None,
-                "mime_type": None,
-                "message": (
-                    f"{len(empatados)} candidatos empatados en score {mejor_score}: "
-                    "no hay evidencia para elegir entre ellos. Requiere revision humana"
-                ),
-                "candidatos": sorted(empatados),
-            }
+        omitidos = max(0, len(candidatos_urls) - MAX_CANDIDATOS)
+        candidatos_urls = candidatos_urls[:MAX_CANDIDATOS]
 
-        best_url = candidate_links[0][1]
+        evidencias = [
+            self._evidencia_de_candidato(url, anchor_text, identidad_objetivo)
+            for url, anchor_text in candidatos_urls
+        ]
 
-        if not (
-            is_pdf_url(best_url)
-            or any(hint in best_url.lower() for hint in PDF_PATH_HINTS)
-            or self.maybe_validate_pdf_link(best_url, "pdf")
-        ):
+        decision = decidir(
+            evidencias, identidad_objetivo,
+            candidatos_omitidos=omitidos,
+            motivo_omision=(f"detail_url listaba mas de {MAX_CANDIDATOS} PDF" if omitidos else ""),
+        )
+
+        candidatos_evaluados = [
+            c.get("url") for c in (decision.evidencia or {}).get("candidatos", [])
+        ]
+
+        if decision.escribir:
             return {
-                "status": "pdf_not_found",
-                "pdf_url": None,
-                "mime_type": None,
-                "message": "No se confirmo PDF oficial desde enlaces detectados",
+                "status": "pdf_detected",
+                "pdf_url": decision.url,
+                "mime_type": "application/pdf",
+                "message": decision.motivo,
+                "candidatos": candidatos_evaluados,
             }
 
         return {
-            "status": "pdf_detected",
-            "pdf_url": best_url,
-            "mime_type": "application/pdf",
-            "message": "PDF normativo detectado desde detail_url",
+            "status": _ESTADO_A_STATUS.get(decision.estado, "pdf_ambiguous"),
+            "pdf_url": None,
+            "mime_type": None,
+            "message": decision.motivo,
+            "candidatos": candidatos_evaluados,
         }
 
     def update_document(self, row: dict, result: dict) -> None:
@@ -315,10 +434,18 @@ class NormativePdfDetectorAgent:
             "total_pending": len(rows),
             "pdf_detected": 0,
             "pdf_not_found": 0,
-            # F-03B: candidatos empatados sin evidencia para desempatar. NO se
-            # reintenta solo -no hay nada que reintentar-: queda para un humano,
-            # con los candidatos anotados en raw.pdf_detection.candidatos.
+            # F-03B: ningun candidato prueba, por contenido, ser la norma
+            # objetivo. NO se reintenta solo -no hay nada que reintentar-:
+            # queda para un humano, con los candidatos anotados en
+            # raw.pdf_detection.candidatos.
             "pdf_ambiguous": 0,
+            # La pagina listaba mas PDF de los que el techo de seguridad
+            # permite inspeccionar. "no los mire todos" NUNCA se degrada a
+            # "la norma no esta en ninguno".
+            "pdf_audit_incomplete": 0,
+            # No se pudo construir una identidad objetivo verificable a partir
+            # del titulo/document_key: sin identidad no hay nada que probar.
+            "pdf_identity_unknown": 0,
             "pdf_detection_error": 0,
             "ignored_link_connection_errors": 0,
         }
@@ -328,12 +455,15 @@ class NormativePdfDetectorAgent:
         for row in rows:
             document_key = row.get("document_key")
             detail_url = row.get("detail_url")
+            identidad_objetivo = identidad_objetivo_de_documento(
+                row.get("title"), document_key
+            )
 
             try:
                 logger.info("Detectando PDF normativo: %s | %s", document_key, detail_url)
-                result = self.detect_pdf_url(detail_url)
+                result = self.detect_pdf_url(detail_url, identidad_objetivo)
                 self.update_document(row, result)
-                summary[result["status"]] += 1
+                summary[result["status"]] = summary.get(result["status"], 0) + 1
             except Exception as error:
                 now = utc_now_iso()
                 raw = dict(row.get("raw") or {})
@@ -372,11 +502,15 @@ class NormativePdfDetectorAgent:
         summary["ignored_link_connection_errors"] = self.ignored_link_connection_errors
 
         logger.info(
-            "Resumen deteccion PDF | total_pending=%s | pdf_detected=%s | pdf_not_found=%s | pdf_ambiguous=%s | pdf_detection_error=%s | ignored_link_connection_errors=%s",
+            "Resumen deteccion PDF | total_pending=%s | pdf_detected=%s | pdf_not_found=%s | "
+            "pdf_ambiguous=%s | pdf_audit_incomplete=%s | pdf_identity_unknown=%s | "
+            "pdf_detection_error=%s | ignored_link_connection_errors=%s",
             summary["total_pending"],
             summary["pdf_detected"],
             summary["pdf_not_found"],
             summary["pdf_ambiguous"],
+            summary["pdf_audit_incomplete"],
+            summary["pdf_identity_unknown"],
             summary["pdf_detection_error"],
             summary["ignored_link_connection_errors"],
         )

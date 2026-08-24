@@ -1,5 +1,11 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
+import {
+  type FilaNorma,
+  normalizarNumero,
+  textoIdentidad,
+} from "./identidad_normativa.ts";
+import { decidirVinculoNorma } from "./decision_stub.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -1296,49 +1302,35 @@ const VERBOS_CONFIRMACION: Record<string, string> = {
   pendiente_verificacion: "posiblemente afectó (sin confirmar efecto jurídico) a",
 };
 
-// Solo los tipos que representan una afectacion real del TEXTO o la
-// APLICABILIDAD de la norma cambian su estado_vigencia. "Mencion de una
-// norma no es lo mismo que modificarla": exonera/prorroga/
-// pendiente_verificacion dejan la norma citada como "vigente" (la relacion
-// igual queda registrada, para trazabilidad, pero sin alterar su estado).
-const ESTADO_VIGENCIA_POR_RELACION: Record<string, string | undefined> = {
-  deroga: "derogada",
-  deja_sin_efecto: "derogada",
-  modifica: "modificada",
-  sustituye: "modificada",
-  incorpora: "modificada",
-  suspende: "suspendida",
-  exonera: undefined,
-  prorroga: undefined,
-  pendiente_verificacion: undefined,
-};
+/** Candidatas a ser la norma citada, para que la resolucion de identidad las
+ * vea TODAS a la vez (sin eso es imposible distinguir "una candidata" de
+ * "varias, elegi la primera"). El prefiltro por digitos puede traer de mas
+ * -"29459%" tambien casa "294590"-, nunca de menos: quien decide es el
+ * resolvedor canonico, no este LIKE. */
+async function candidatasDeNorma(numero: string | null): Promise<FilaNorma[]> {
+  const digitos = normalizarNumero(numero);
+  if (!digitos) return [];
+  const patrones = [`${digitos}%`, `0${digitos}%`, `00${digitos}%`]
+    .map((p) => `numero.like.${p}`)
+    .join(",");
 
-/** Genera un document_key para una norma que no existe en la base (solo se
- * conoce por mencion de otra norma que la deroga/modifica/etc). Si no hay
- * tipo+numero+anio completos (norma citada de forma ambigua) cae a un hash
- * corto del texto para no bloquear la confirmacion del admin. Los acentos se
- * quitan por transliteracion (NFD) antes del slug para no dejar keys como
- * "ART-CULO-9" a partir de "ARTÍCULO 9". */
-function construirDocumentKeyStub(
-  tipoNorma: string | null,
-  numero: string | null,
-  anio: number | null,
-  descripcion: string,
-): string {
-  if (tipoNorma && numero && anio) {
-    return `${tipoNorma.toUpperCase()}-${numero}-${anio}`;
-  }
-  const sinAcentos = descripcion.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const slug = sinAcentos.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).toUpperCase();
-  return `NORM-${slug || crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const { data } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, tipo_norma, numero, anio, process_status, estado_vigencia")
+    .or(patrones);
+  return (data ?? []) as FilaNorma[];
 }
 
 /** Resuelve (confirma o rechaza) una relacion de derogacion/modificacion
  * propuesta por la IA (scripts/detectar_derogaciones_normativa.py). Nunca se
  * aplica sola: siempre pasa por este flujo manual via botones porque un
- * error de la IA aqui significa marcar mal una norma legal. Si la norma
- * afectada no existe todavia en la base, se crea un registro minimo (stub,
- * sin PDF) solo para dejar constancia de que quedo derogada/modificada. */
+ * error de la IA aqui significa marcar mal una norma legal.
+ *
+ * La norma afectada se resuelve con la identidad canonica compartida con el
+ * detector. Crear un stub es el ULTIMO recurso: si la norma real ya existe se
+ * vincula a ella, y si hay ambiguedad, datos insuficientes o una cita sin
+ * evidencia verificada, la confirmacion se detiene y se le explica al admin,
+ * en vez de dar de alta una norma inventada (H-08). */
 async function resolverRelacionDerogacion(
   chatId: string,
   messageId: number | undefined,
@@ -1377,44 +1369,69 @@ async function resolverRelacionDerogacion(
     return;
   }
 
-  let normaAfectadaId: string | null = relacion.norma_afectada_id;
-  // undefined = este tipo de relacion (exonera/prorroga/pendiente_verificacion)
-  // no altera el estado de vigencia de la norma citada: solo queda
-  // registrada la relacion para trazabilidad. "Mencion de una norma no es
-  // lo mismo que modificarla".
-  const estadoVigencia = ESTADO_VIGENCIA_POR_RELACION[relacion.tipo_relacion];
+  // IDENTIDAD CANONICA (H-06/H-08). La regla juridica de que hacer con la
+  // norma afectada vive en decision_stub.ts y esta cubierta por tests; aqui
+  // solo se ejecuta lo que decidio.
+  const decision = decidirVinculoNorma(
+    relacion,
+    relacion.norma_afectada_id ? [] : await candidatasDeNorma(relacion.numero_afectada),
+  );
 
-  if (!normaAfectadaId) {
-    const documentKeyStub = construirDocumentKeyStub(
-      relacion.tipo_norma_afectada,
-      relacion.numero_afectada,
-      relacion.anio_afectada,
-      relacion.descripcion_afectada,
+  if (decision.accion === "abortar_ambigua") {
+    await sendMessage(
+      chatId,
+      `⚠️ No confirmé la relación: <b>${escapeHtml(textoIdentidad(decision.identidad))}</b> coincide con varias ` +
+        `normas de la base y elegir una sería adivinar.\n\nCandidatas: ` +
+        decision.candidatas.map((k) => `<code>${escapeHtml(k)}</code>`).join(", ") +
+        `\n\nHay que resolver primero cuál es la correcta (reconciliación de stubs) y volver a confirmar.`,
     );
+    return;
+  }
 
+  if (decision.accion === "abortar_datos_insuficientes") {
+    await sendMessage(
+      chatId,
+      `⚠️ No confirmé la relación: ${escapeHtml(decision.motivo)}. ` +
+        "No doy de alta una norma con datos insuficientes.",
+    );
+    return;
+  }
+
+  if (decision.accion === "abortar_sin_evidencia") {
+    await sendMessage(
+      chatId,
+      `⚠️ No creé el registro de <b>${escapeHtml(decision.documentKeyStub ?? "")}</b>: ` +
+        "la cita no se pudo verificar textualmente contra el documento, así que no hay evidencia suficiente " +
+        "para dar de alta una norma nueva. Revisa el PDF y, si la cita es correcta, vuelve a intentarlo.",
+    );
+    return;
+  }
+
+  let normaAfectadaId: string | null = decision.normaId;
+
+  if (decision.accion === "crear_stub" && decision.documentKeyStub) {
+    // Puede existir ya con esa clave canonica (confirmacion repetida): se
+    // reutiliza en vez de duplicar.
     const { data: normaExistente } = await supabase
       .from("digemid_normas")
       .select("id")
-      .eq("document_key", documentKeyStub)
+      .eq("document_key", decision.documentKeyStub)
       .maybeSingle();
 
     if (normaExistente) {
       normaAfectadaId = normaExistente.id;
-      if (estadoVigencia) {
-        await supabase.from("digemid_normas").update({ estado_vigencia: estadoVigencia }).eq("id", normaAfectadaId);
-      }
     } else {
       const { data: normaCreada, error: errorCreacion } = await supabase
         .from("digemid_normas")
         .insert({
-          document_key: documentKeyStub,
-          tipo_norma: relacion.tipo_norma_afectada,
-          numero: relacion.numero_afectada,
-          anio: relacion.anio_afectada,
+          document_key: decision.documentKeyStub,
+          tipo_norma: decision.identidad.tipo,
+          numero: decision.identidad.numero,
+          anio: decision.identidad.anio,
           titulo: relacion.descripcion_afectada,
           has_file: false,
           process_status: "stub_derogada",
-          estado_vigencia: estadoVigencia ?? "vigente",
+          estado_vigencia: decision.estadoVigencia ?? "vigente",
         })
         .select("id")
         .single();
@@ -1427,12 +1444,24 @@ async function resolverRelacionDerogacion(
         );
         return;
       }
-
       normaAfectadaId = normaCreada.id;
     }
-  } else if (estadoVigencia) {
-    await supabase.from("digemid_normas").update({ estado_vigencia: estadoVigencia }).eq("id", normaAfectadaId);
   }
+
+  // La vigencia solo se toca cuando la afectacion es TOTAL y el tipo de
+  // relacion realmente la altera. Derogar el articulo 9 de una ley no deroga
+  // la ley (asi nacio el stub LEY-29698-ART9 marcado "derogada").
+  if (normaAfectadaId && decision.estadoVigencia) {
+    await supabase
+      .from("digemid_normas")
+      .update({ estado_vigencia: decision.estadoVigencia })
+      .eq("id", normaAfectadaId);
+  }
+
+  const avisoParcial = decision.bloqueadoPorAlcanceParcial
+    ? `\n\nℹ️ La afectación es <b>parcial</b> (${escapeHtml(relacion.articulos_afectados ?? "alcance parcial")}), ` +
+      "así que la norma completa NO cambió de estado."
+    : "";
 
   await supabase
     .from("digemid_norma_relaciones")
@@ -1450,7 +1479,7 @@ async function resolverRelacionDerogacion(
       chatId,
       messageId,
       `✅ Confirmado: <b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a ` +
-        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>.`,
+        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>.` + avisoParcial,
     );
   }
 }

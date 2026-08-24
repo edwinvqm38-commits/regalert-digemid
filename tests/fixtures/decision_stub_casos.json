@@ -1,0 +1,128 @@
+{
+  "_comentario": [
+    "Casos de la decision del bot al CONFIRMAR una relacion (H-08).",
+    "Los catalogos replican filas reales de produccion verificadas por SELECT",
+    "el 2026-08-24. Cada caso corresponde a un requisito explicito: un stub",
+    "solo puede nacer si la norma esta identificada, no existe la real, no hay",
+    "ambiguedad y la cita tiene evidencia verificada."
+  ],
+  "casos": [
+    {
+      "nombre": "F · existe la norma real unica -> se vincula, NO se crea stub",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "exonera",
+                   "tipo_norma_afectada": "LEY", "numero_afectada": "29459", "anio_afectada": null,
+                   "articulos_afectados": "10 y 11", "alcance": "parcial", "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "ea3c9b32", "document_key": "LEY-29459", "tipo_norma": "Ley", "numero": "29459", "anio": 2009, "process_status": "drive_structured"}
+      ],
+      "esperado": {"accion": "vincular_norma_real", "normaId": "ea3c9b32", "documentKeyStub": null,
+                   "estadoVigencia": null, "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "F · el stub viejo NO vuelve ambigua una cita con norma real",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "exonera",
+                   "tipo_norma_afectada": "LEY", "numero_afectada": "29459", "anio_afectada": null,
+                   "articulos_afectados": "10 y 11", "alcance": "parcial", "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "ea3c9b32", "document_key": "LEY-29459", "tipo_norma": "Ley", "numero": "29459", "anio": 2009, "process_status": "drive_structured"},
+        {"id": "c80418ab", "document_key": "NORM-LEY-29459-LEY-DE-LOS-PRODUCTOS-FARMACEUT", "tipo_norma": "LEY", "numero": "29459", "anio": null, "process_status": "stub_derogada"}
+      ],
+      "esperado": {"accion": "vincular_norma_real", "normaId": "ea3c9b32", "documentKeyStub": null,
+                   "estadoVigencia": null, "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "G · dos normas reales candidatas -> ambigua, NO se crea stub",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "DS", "numero_afectada": "2", "anio_afectada": null,
+                   "articulos_afectados": null, "alcance": "total", "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "bd928c11", "document_key": "DS-2-2003", "tipo_norma": "DS", "numero": "2", "anio": 2003, "process_status": "text_extracted"},
+        {"id": "ea4b2b5c", "document_key": "DS-2-2009", "tipo_norma": "DS", "numero": "2", "anio": 2009, "process_status": "text_extracted"}
+      ],
+      "esperado": {"accion": "abortar_ambigua", "normaId": null, "documentKeyStub": null,
+                   "estadoVigencia": "derogada", "bloqueadoPorAlcanceParcial": false,
+                   "candidatas": ["DS-2-2003", "DS-2-2009"]}
+    },
+    {
+      "nombre": "H · sin numero -> datos insuficientes, NO se crea stub",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "DS", "numero_afectada": null, "anio_afectada": null,
+                   "articulos_afectados": null, "alcance": "total", "fragmento_verificado": true},
+      "candidatas": [],
+      "esperado": {"accion": "abortar_datos_insuficientes", "normaId": null, "documentKeyStub": null,
+                   "estadoVigencia": "derogada", "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "H · con numero pero sin tipo reconocible -> no se da de alta",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "Circular Interna", "numero_afectada": "77", "anio_afectada": 2019,
+                   "articulos_afectados": null, "alcance": "total", "fragmento_verificado": true},
+      "candidatas": [],
+      "esperado": {"accion": "abortar_datos_insuficientes", "normaId": null, "documentKeyStub": null,
+                   "estadoVigencia": "derogada", "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "cita sin evidencia verificada -> no nace una norma nueva",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "RM", "numero_afectada": "585-99-SA/DM", "anio_afectada": null,
+                   "articulos_afectados": null, "alcance": "total", "fragmento_verificado": false},
+      "candidatas": [],
+      "esperado": {"accion": "abortar_sin_evidencia", "normaId": null, "documentKeyStub": "RM-585-1999-SA-DM",
+                   "estadoVigencia": "derogada", "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "norma inexistente + cita verificada -> stub con clave canonica",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "DS", "numero_afectada": "004", "anio_afectada": 2016,
+                   "articulos_afectados": null, "alcance": null, "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "e6209462", "document_key": "DS-4-2023", "tipo_norma": "DS", "numero": "4", "anio": 2023, "process_status": "text_extracted"}
+      ],
+      "esperado": {"accion": "crear_stub", "normaId": null, "documentKeyStub": "DS-4-2016",
+                   "estadoVigencia": "derogada", "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "C · derogacion PARCIAL no marca la norma completa como derogada",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "LEY", "numero_afectada": "29698", "anio_afectada": null,
+                   "articulos_afectados": "9", "alcance": "parcial", "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "2f41afd7", "document_key": "LEY-29698", "tipo_norma": "LEY", "numero": "29698", "anio": null, "process_status": "text_extracted"},
+        {"id": "f60c9848", "document_key": "LEY-29698-ART9", "tipo_norma": "LEY", "numero": "29698", "anio": null, "process_status": "stub_derogada"}
+      ],
+      "esperado": {"accion": "vincular_norma_real", "normaId": "2f41afd7", "documentKeyStub": null,
+                   "estadoVigencia": null, "bloqueadoPorAlcanceParcial": true, "candidatas": []}
+    },
+    {
+      "nombre": "derogacion TOTAL de una norma real si cambia su vigencia",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "deroga",
+                   "tipo_norma_afectada": "RM", "numero_afectada": "097-2000-SA/DM", "anio_afectada": null,
+                   "articulos_afectados": null, "alcance": "total", "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "rm97", "document_key": "RM-97-2000", "tipo_norma": "RM", "numero": "97", "anio": 2000, "process_status": "pdf_download_error"}
+      ],
+      "esperado": {"accion": "vincular_norma_real", "normaId": "rm97", "documentKeyStub": null,
+                   "estadoVigencia": "derogada", "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "exonera nunca cambia la vigencia de la norma citada",
+      "relacion": {"norma_afectada_id": null, "tipo_relacion": "exonera",
+                   "tipo_norma_afectada": "LEY", "numero_afectada": "29459", "anio_afectada": null,
+                   "articulos_afectados": null, "alcance": "total", "fragmento_verificado": true},
+      "candidatas": [
+        {"id": "ea3c9b32", "document_key": "LEY-29459", "tipo_norma": "Ley", "numero": "29459", "anio": 2009, "process_status": "drive_structured"}
+      ],
+      "esperado": {"accion": "vincular_norma_real", "normaId": "ea3c9b32", "documentKeyStub": null,
+                   "estadoVigencia": null, "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    },
+    {
+      "nombre": "I · confirmacion repetida: ya vinculada, no se crea nada",
+      "relacion": {"norma_afectada_id": "ea3c9b32", "tipo_relacion": "exonera",
+                   "tipo_norma_afectada": "LEY", "numero_afectada": "29459", "anio_afectada": null,
+                   "articulos_afectados": "10 y 11", "alcance": "parcial", "fragmento_verificado": true},
+      "candidatas": [],
+      "esperado": {"accion": "ya_vinculada", "normaId": "ea3c9b32", "documentKeyStub": null,
+                   "estadoVigencia": null, "bloqueadoPorAlcanceParcial": false, "candidatas": []}
+    }
+  ]
+}

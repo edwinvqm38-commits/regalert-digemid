@@ -14,22 +14,22 @@ on:
         default: ""
         type: string
 
-  # PAUSADO A PROPOSITO (auditoría, hallazgo H-06 · ver
-  # docs/AUDITORIA_RELACIONES_NORMATIVAS.md).
+  # PAUSADO A PROPOSITO (auditoría · ver
+  # docs/AUDITORIA_RELACIONES_NORMATIVAS.md y
+  # docs/IDENTIDAD_NORMATIVA_H05_H06_H07.md).
   #
-  # Al subir el analizador a v2, las 292 normas del corpus quedaron en v1 y se
-  # reencolan automaticamente. Pero la resolucion de identidad de la norma
-  # afectada todavia compara solo numero+año -sin tipo ni sufijo de sector-, y
-  # con año nulo (frecuente en leyes: "Ley 29459") falla y crea un stub. Dejar
-  # correr el backfill ahora produciria cientos de relaciones apuntando a la
-  # norma equivocada o a stubs duplicados, justo el problema que ya obligo a
-  # reconciliar LEY-29459 a mano.
+  # H-05/H-06/H-07 YA ESTAN CERRADOS: la identidad de la norma afectada se
+  # resuelve con la capa canonica (scripts/identidad_normativa.py), ante varias
+  # candidatas NO se vincula, y el reanalisis es idempotente.
   #
-  # Precision antes que volumen: se reactiva al cerrar H-05/H-06 y tras un
-  # backfill controlado por lotes. Mientras tanto el analisis sigue disponible
-  # a demanda con workflow_dispatch (incluido --force).
+  # Sigue pausado por lo que falta: los stubs duplican la identidad de normas
+  # reales (H-08) y el bot todavia crea stubs sin usar esta capa. Reactivar el
+  # cron ahora repoblaria el corpus enlazando contra stubs.
   #
-  # schedule:
+  # Precision antes que volumen: se reactiva al cerrar H-08 y tras un backfill
+  # controlado por lotes. Mientras tanto el analisis sigue disponible a demanda
+  # con workflow_dispatch (incluido --force).
+  #
   #   - cron: "30 * * * *"
 
 concurrency:

@@ -427,3 +427,63 @@ vigencia cambia, la reversión es exacta.
    (`LEY-32033 → Ley 29459`, `RM-132-2015 → RM 097-2000`): su identidad se resuelve,
    pero la **evidencia** no está verificada. Identidad resuelta ≠ relación jurídica
    comprobada.
+
+---
+
+## 16. Auditoría del despliegue automático y separación en dos PR
+
+Revisado el workflow real: `.github/workflows/deploy-supabase-functions.yml`.
+
+```yaml
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "supabase/functions/**"
+      - ".github/workflows/deploy-supabase-functions.yml"
+...
+      - run: supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt
+```
+
+**A. Qué dispara el deploy.** Cualquier archivo bajo `supabase/functions/**`.
+No filtra por subcarpeta ni por extensión: hasta un `.md` nuevo ahí lo dispara.
+
+**B. Qué se despliega.** Solo `telegram-bot`, y **no** los archivos del commit:
+la CLI despliega la función **completa tal como quede en `main`** tras el merge.
+
+**C. ¿Automático?** Sí, sin aprobación manual, en cuanto el push llega a `main`.
+
+**D. Secrets.** `SUPABASE_ACCESS_TOKEN` y `SUPABASE_PROJECT_REF`. Si falta
+alguno, el job **falla en el paso de validación, antes de desplegar** (`exit 1`):
+no hay despliegue a medias. Queda `main` con código nuevo y producción con el
+anterior — divergencia silenciosa salvo que se mire Actions.
+
+**E. Qué cambiaría de inmediato al desplegar.** Solo el flujo de confirmación
+de relaciones (`resolverRelacionDerogacion`): dejar de crear stubs duplicados,
+abortar ante ambigüedad / datos insuficientes / cita sin evidencia, y no
+escribir `estado_vigencia` global cuando la afectación es parcial. **No modifica
+ningún dato existente**; cambia lo que ocurre a partir de la próxima
+confirmación manual.
+
+**F. Qué NO cambiaría.** La reconciliación de la Ley 29459 (necesita `--apply`),
+la trazabilidad (necesita su migración), el cron (sigue pausado), `/consulta`
+(no lee relaciones) y los 148 `clave_dedupe` en NULL.
+
+**G. Rollback del deploy.** `supabase functions deploy telegram-bot` desde el
+commit anterior, o `workflow_dispatch` del mismo workflow sobre un `main` ya
+revertido. Como el despliegue toma la función tal como esté en `main`, el
+rollback real es **revertir el commit en `main` y volver a desplegar**. No hay
+datos que revertir: el deploy no escribe nada.
+
+### Consecuencia: dos PR
+
+Por eso este PR **no contiene un solo archivo bajo `supabase/functions/**`** y
+su merge no puede desplegar nada. El motor TypeScript del bot, sus tests de
+paridad y el generador de la spec van en un PR aparte —
+`claude/h08-runtime-bot` — cuyo merge **es** el acto de despliegue.
+
+El generador `scripts/generar_spec_identidad_ts.py` también se movió al PR de
+runtime: escribe dentro de `supabase/functions/`, así que ejecutarlo sobre
+`main` crearía un archivo ahí y provocaría un despliegue no intencionado en el
+siguiente push.

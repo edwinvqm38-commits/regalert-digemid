@@ -118,6 +118,9 @@ jobs:
           if [[ "${{ inputs.render_encabezado }}" == "true" ]]; then
             CMD+=(--con-ocr)
           fi
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--solo "${{ inputs.document_key }}")
+          fi
           if [[ -n "${{ inputs.limite }}" && "${{ inputs.limite }}" != "0" ]]; then
             CMD+=(--limite "${{ inputs.limite }}")
           fi

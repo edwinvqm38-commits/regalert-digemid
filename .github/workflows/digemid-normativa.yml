@@ -38,4 +38,16 @@ jobs:
           pip install -r requirements.txt
 
       - name: Ejecutar pipeline normativo DIGEMID
-        run: python scripts/run_normative_pipeline.py
+        # F-03B (politica documental para NormativePdfDetectorAgent) sigue
+        # incompleto. Mientras tanto, la corrida PROGRAMADA se limita a la
+        # fase de metadata: sigue descubriendo y registrando normativa nueva
+        # a diario, pero NO ejecuta NormativePdfDetectorAgent -que hoy puede
+        # escribir pdf_url sin haber probado la identidad del documento-.
+        # workflow_dispatch manual conserva el pipeline completo para poder
+        # seguir probando el detector deliberadamente.
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python scripts/run_normative_pipeline.py --phase metadata
+          else
+            python scripts/run_normative_pipeline.py
+          fi

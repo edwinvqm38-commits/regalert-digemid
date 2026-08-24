@@ -5,6 +5,7 @@ norma equivocada. Todos deben fallar si se vuelve a elegir un documento por su
 posición en el HTML o por el nombre del archivo.
 """
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -491,6 +492,42 @@ class TestSegmentoMultinorma(unittest.TestCase):
 
         self.assertIsNone(seg.start_page)
         self.assertFalse(seg.es_utilizable)
+
+
+class TestRecomendacionDeLaMatriz(unittest.TestCase):
+    """La recomendación se calcula sobre la fila YA actualizada.
+
+    Regresión: `fila.update(..., recommended_action=recomendar(..., fila))`
+    evaluaba `recomendar` con la fila anterior, así que un multinorma con el
+    rango resuelto salía recomendando "solo las paginas None-None".
+    """
+
+    def test_el_multinorma_recomienda_el_rango_real(self):
+        import auditar_identidad_documental as auditor
+
+        fila = {"start_page": 3, "end_page": 4,
+                "pdf_page_count": 20, "stored_page_count": 20}
+        texto = auditor.recomendar(PDF_CONTIENE_NORMA_EN_MULTINORMA,
+                                   DOCUMENTO_MULTINORMA, fila)
+
+        self.assertIn("3-4", texto)
+        self.assertNotIn("None", texto)
+
+    def test_recomendar_no_se_llama_dentro_del_update(self):
+        """La prueba de arriba no reproduce el fallo real, que era de ORDEN:
+        Python evalua los argumentos de `fila.update(...)` antes de aplicarla.
+        Esto si lo reproduce."""
+        fuente = (RAIZ / "scripts" / "auditar_identidad_documental.py").read_text(
+            encoding="utf-8")
+        dentro_del_update = re.search(
+            r"fila\.update\((?:[^()]|\([^()]*\))*recommended_action\s*=\s*recomendar",
+            fuente,
+        )
+        self.assertIsNone(
+            dentro_del_update,
+            "recomendar() debe llamarse DESPUES de fila.update(), no como argumento: "
+            "si no, lee la fila vieja y reporta 'paginas None-None'",
+        )
 
 
 if __name__ == "__main__":

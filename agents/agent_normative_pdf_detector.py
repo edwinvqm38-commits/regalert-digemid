@@ -85,6 +85,49 @@ def extract_file_name(file_url: str | None) -> str | None:
     return file_name or None
 
 
+def construir_payload_actualizacion(row: dict, result: dict) -> dict:
+    """El payload EXACTO que `update_document()` escribiria en Supabase.
+
+    Funcion PURA -no toca la red ni la base-, separada de `update_document`
+    para que herramientas de solo lectura (el canary controlado) puedan
+    mostrar la mutacion prevista usando el mismo codigo que la produciria en
+    produccion, sin duplicar la logica y sin poder ejecutar el `.update()`.
+    """
+    now = utc_now_iso()
+    raw = dict(row.get("raw") or {})
+    raw["pdf_detection"] = {
+        "status": result["status"],
+        "detail_url": row.get("detail_url"),
+        "pdf_url": result.get("pdf_url"),
+        "detected_at": now,
+        "message": result.get("message"),
+        "mime_type_detectado": result.get("mime_type"),
+    }
+
+    if result.get("candidatos"):
+        raw["pdf_detection"]["candidatos"] = result["candidatos"]
+
+    payload = {
+        "has_file": result["status"] == "pdf_detected",
+        "process_status": result["status"],
+        "process_message": result["message"],
+        "updated_at": now,
+        "raw": raw,
+    }
+
+    if result["status"] == "pdf_detected":
+        payload.update(
+            {
+                "file_url": result["pdf_url"],
+                "file_name": extract_file_name(result["pdf_url"]),
+                "file_ext": "pdf",
+                "mime_type": result.get("mime_type") or "application/pdf",
+            }
+        )
+
+    return payload
+
+
 def _sin_acentos(texto: str) -> str:
     return "".join(
         c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
@@ -426,38 +469,7 @@ class NormativePdfDetectorAgent:
         }
 
     def update_document(self, row: dict, result: dict) -> None:
-        now = utc_now_iso()
-        raw = dict(row.get("raw") or {})
-        raw["pdf_detection"] = {
-            "status": result["status"],
-            "detail_url": row.get("detail_url"),
-            "pdf_url": result.get("pdf_url"),
-            "detected_at": now,
-            "message": result.get("message"),
-            "mime_type_detectado": result.get("mime_type"),
-        }
-
-        if result.get("candidatos"):
-            raw["pdf_detection"]["candidatos"] = result["candidatos"]
-
-        payload = {
-            "has_file": result["status"] == "pdf_detected",
-            "process_status": result["status"],
-            "process_message": result["message"],
-            "updated_at": now,
-            "raw": raw,
-        }
-
-        if result["status"] == "pdf_detected":
-            payload.update(
-                {
-                    "file_url": result["pdf_url"],
-                    "file_name": extract_file_name(result["pdf_url"]),
-                    "file_ext": "pdf",
-                    "mime_type": result.get("mime_type") or "application/pdf",
-                }
-            )
-
+        payload = construir_payload_actualizacion(row, result)
         (
             self.supabase
             .table(self.table_name)

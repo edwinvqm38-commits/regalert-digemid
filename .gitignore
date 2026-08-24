@@ -1,26 +1,29 @@
-
-!data/**/*.json
-!data/*.json
-# Archivos temporales del sistema
 # Entornos y caché Python
-# Local DIGEMID generated files
-# Permitir semillas versionadas del proyecto
-# Supabase local
-# Variables y secretos
-*.json
+__pycache__/
 *.py[cod]
-.claude/
+.venv/
+env/
+venv/
+
+# Variables y secretos
 .env
+*.json
+_secrets/
+
+# Archivos temporales del sistema
+tmp/
+
+# Supabase local
+supabase/.temp/tmp/
+
+.claude/
+
+# Permitir semillas versionadas del proyecto
+!data/*.json
+!data/**/*.json
+
+# Local DIGEMID generated files
 .secrets/
 .tessdata/
-.venv-audit/
-.venv/
-__pycache__/
-_secrets/
-env/
 exports/
-reportes/
 reports/
-supabase/.temp/tmp/
-tmp/
-venv/

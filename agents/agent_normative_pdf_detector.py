@@ -220,7 +220,33 @@ class NormativePdfDetectorAgent:
                 "message": "No se detecto enlace PDF en detail_url",
             }
 
+        # ---------------------------------------------------------------
+        # F-03B: el score ordena, pero NO decide.
+        #
+        # `candidate_links[0]` tras ordenar por score sigue siendo una eleccion
+        # por posicion: el score puntua lo *prometedor* que parece un enlace,
+        # no a que norma pertenece el documento. Cuando dos candidatos empatan
+        # o son incompatibles entre si, desempatar automaticamente es inventar
+        # una respuesta.
+        #
+        # Regla: si el mejor score esta empatado con otro candidato distinto,
+        # no se escribe nada y el documento queda para revision humana.
+        # ---------------------------------------------------------------
         candidate_links.sort(key=lambda item: item[0], reverse=True)
+        mejor_score = candidate_links[0][0]
+        empatados = {url for score, url in candidate_links if score == mejor_score}
+        if len(empatados) > 1:
+            return {
+                "status": "pdf_ambiguous",
+                "pdf_url": None,
+                "mime_type": None,
+                "message": (
+                    f"{len(empatados)} candidatos empatados en score {mejor_score}: "
+                    "no hay evidencia para elegir entre ellos. Requiere revision humana"
+                ),
+                "candidatos": sorted(empatados),
+            }
+
         best_url = candidate_links[0][1]
 
         if not (
@@ -254,6 +280,9 @@ class NormativePdfDetectorAgent:
             "mime_type_detectado": result.get("mime_type"),
         }
 
+        if result.get("candidatos"):
+            raw["pdf_detection"]["candidatos"] = result["candidatos"]
+
         payload = {
             "has_file": result["status"] == "pdf_detected",
             "process_status": result["status"],
@@ -286,6 +315,10 @@ class NormativePdfDetectorAgent:
             "total_pending": len(rows),
             "pdf_detected": 0,
             "pdf_not_found": 0,
+            # F-03B: candidatos empatados sin evidencia para desempatar. NO se
+            # reintenta solo -no hay nada que reintentar-: queda para un humano,
+            # con los candidatos anotados en raw.pdf_detection.candidatos.
+            "pdf_ambiguous": 0,
             "pdf_detection_error": 0,
             "ignored_link_connection_errors": 0,
         }
@@ -339,10 +372,11 @@ class NormativePdfDetectorAgent:
         summary["ignored_link_connection_errors"] = self.ignored_link_connection_errors
 
         logger.info(
-            "Resumen deteccion PDF | total_pending=%s | pdf_detected=%s | pdf_not_found=%s | pdf_detection_error=%s | ignored_link_connection_errors=%s",
+            "Resumen deteccion PDF | total_pending=%s | pdf_detected=%s | pdf_not_found=%s | pdf_ambiguous=%s | pdf_detection_error=%s | ignored_link_connection_errors=%s",
             summary["total_pending"],
             summary["pdf_detected"],
             summary["pdf_not_found"],
+            summary["pdf_ambiguous"],
             summary["pdf_detection_error"],
             summary["ignored_link_connection_errors"],
         )

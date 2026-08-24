@@ -15,6 +15,7 @@ on:
           - inventario          # SHA-256 + page_count + completitud de todo el corpus
           - piloto              # 50 paginas de alto riesgo, 3 motores
           - identidad_documental  # ¿cada norma esta asociada al PDF correcto? (F-03)
+          - shadow_f03b          # SHADOW VALIDATION: F-03B contra digemid_documentos real, sin escribir
           - revision_visual     # HTML con imagen del PDF + transcripcion editable
           - ambas               # inventario + piloto
       limite:
@@ -85,7 +86,8 @@ jobs:
                scripts/auditar_custodia_documental.py \
                scripts/piloto_verificacion_paginas.py \
                scripts/generar_revision_visual.py \
-               scripts/auditar_identidad_documental.py; then
+               scripts/auditar_identidad_documental.py \
+               scripts/shadow_f03b_pdf_detector.py; then
             echo "ERROR: se detecto una operacion de escritura en un script de auditoria."
             exit 1
           fi
@@ -122,6 +124,19 @@ jobs:
             CMD+=(--solo "${{ inputs.document_key }}")
           fi
           if [[ -n "${{ inputs.limite }}" && "${{ inputs.limite }}" != "0" ]]; then
+            CMD+=(--limite "${{ inputs.limite }}")
+          fi
+          "${CMD[@]}"
+
+      - name: SHADOW VALIDATION F-03B (solo lectura, no escribe pdf_url/file_url)
+        if: ${{ inputs.tarea == 'shadow_f03b' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/shadow_f03b_pdf_detector.py --out-dir reportes)
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--document-key "${{ inputs.document_key }}")
+          elif [[ -n "${{ inputs.limite }}" && "${{ inputs.limite }}" != "0" ]]; then
             CMD+=(--limite "${{ inputs.limite }}")
           fi
           "${CMD[@]}"

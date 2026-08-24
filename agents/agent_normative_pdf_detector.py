@@ -3,8 +3,10 @@ import io
 import logging
 import os
 import random
+import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -32,9 +34,12 @@ from identidad_documental import (  # noqa: E402
     AMBIGUO,
     AUDITORIA_INCOMPLETA,
     NO_ENCONTRADA_TRAS_AUDITORIA_COMPLETA,
+    PATRON_ENCABEZADO,
     EvidenciaDocumental,
     identidades_en_texto,
+    normalizar_tipo_norma,
 )
+from identidad_normativa import construir_identidad  # noqa: E402
 from politica_documental import REQUIERE_HUMANO, decidir  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -80,6 +85,12 @@ def extract_file_name(file_url: str | None) -> str | None:
     return file_name or None
 
 
+def _sin_acentos(texto: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texto) if unicodedata.category(c) != "Mn"
+    )
+
+
 def identidad_objetivo_de_documento(title, document_key=None):
     """Identidad objetivo a partir de lo que YA se registro de la norma.
 
@@ -89,18 +100,45 @@ def identidad_objetivo_de_documento(title, document_key=None):
     ("NORM-RESOLUCION-MINISTERIAL-2025-3EEE0B42"), asi que no sirve como
     identidad. El `title` si trae la forma de un encabezado normativo
     ("Resolucion Ministerial N 793-2025/MINSA"), asi que se reutiliza el
-    mismo parser que lee encabezados dentro de un PDF.
+    mismo patron que lee encabezados dentro de un PDF.
 
-    Devuelve `None` cuando no se puede construir una identidad usable: sin
-    identidad objetivo no hay nada que comprobar, y sin comprobacion no se
-    escribe (F-03B).
+    Solo se acepta la identidad que aparece AL INICIO del texto (`match`,
+    anclado en la posicion 0 -tras quitar acentos y espacios sobrantes-, no
+    `finditer` sobre cualquier parte). Un titulo peruano que tiene numero
+    propio SIEMPRE lo declara primero: "Resolucion Ministerial N 793-2025
+    /MINSA que modifica la Resolucion Ministerial N 419-2025/MINSA" empieza
+    declarando la 793 -la cita a la 419 viene despues, en la prosa-.
+
+    La version anterior usaba `identidades_en_texto()` y tomaba la PRIMERA
+    aparicion sin importar su posicion. Eso funcionaba por casualidad cuando
+    el propio numero encabezaba el titulo, pero un titulo que SOLO cita a
+    otra norma sin declarar el suyo -"Modifican la Resolucion Ministerial
+    N 419-2025/MINSA", o "Resolucion Ministerial que aprueba el TUPA,
+    modificado por Resolucion Ministerial N 100-2020/MINSA"- no tiene ningun
+    numero propio en el texto, y la version anterior adoptaba el numero de
+    la norma CITADA como si fuera la identidad de ESTE documento. Es
+    exactamente la confusion que F-03 existe para evitar, aplicada a la
+    fuente del titulo en vez de al contenido del PDF.
+
+    Devuelve `None` cuando no se puede construir una identidad usable -sea
+    porque el texto no dice nada, o porque solo cita a otra norma sin
+    declarar la suya-: sin identidad objetivo no hay nada que comprobar, y
+    sin comprobacion no se escribe (F-03B).
     """
     for fuente in (title, document_key):
         if not fuente:
             continue
-        for aparicion in identidades_en_texto(str(fuente)):
-            if aparicion.identidad.numero:
-                return aparicion.identidad
+        plano = _sin_acentos(str(fuente)).strip()
+        coincidencia = PATRON_ENCABEZADO.match(plano)
+        if not coincidencia:
+            continue
+        tipo = normalizar_tipo_norma(coincidencia.group("tipo"))
+        if not tipo:
+            continue
+        numero = re.sub(r"\s+", "", coincidencia.group("numero"))
+        identidad = construir_identidad(tipo, numero)
+        if identidad.numero:
+            return identidad
     return None
 
 

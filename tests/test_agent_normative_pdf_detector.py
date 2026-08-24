@@ -166,6 +166,61 @@ class TestIdentidadObjetivoDeDocumento(unittest.TestCase):
         self.assertIsNone(detector.identidad_objetivo_de_documento(None, None))
 
 
+class TestNoConfundirNormaCitadaConLaPropia(unittest.TestCase):
+    """Hallazgo de la SHADOW VALIDATION F-03B.
+
+    La primera version de `identidad_objetivo_de_documento` tomaba la
+    PRIMERA identidad que encontraba en el titulo, sin importar su posicion.
+    Cuando el titulo declara su propio numero primero eso da la respuesta
+    correcta -pura casualidad de que el numero propio venga antes-, pero un
+    titulo que SOLO cita a otra norma sin declarar la suya hacia que la
+    funcion adoptara el numero de la norma CITADA como si fuera la identidad
+    de este documento. Exactamente la confusion que F-03 existe para evitar,
+    trasladada del contenido del PDF a la fuente del titulo.
+
+    La correccion exige que la identidad aparezca ANCLADA al inicio del
+    texto (`PATRON_ENCABEZADO.match`, no `finditer` en cualquier posicion).
+    """
+
+    def test_titulo_propio_seguido_de_cita_toma_la_identidad_propia(self):
+        identidad = detector.identidad_objetivo_de_documento(
+            "Resolución Ministerial N° 793-2025/MINSA que modifica la "
+            "Resolución Ministerial N° 419-2025/MINSA"
+        )
+        self.assertIsNotNone(identidad)
+        self.assertEqual(identidad.numero, "793")
+
+    def test_decreto_supremo_propio_seguido_de_cita_toma_la_identidad_propia(self):
+        identidad = detector.identidad_objetivo_de_documento(
+            "Decreto Supremo N° 020-2024-SA que modifica el Decreto "
+            "Supremo N° 014-2011-SA"
+        )
+        self.assertIsNotNone(identidad)
+        self.assertEqual(identidad.numero, "20")
+
+    def test_titulo_que_solo_cita_sin_declarar_la_suya_no_produce_identidad(self):
+        """El titulo NUNCA dice su propio numero: solo dice que "modifica" a
+        otra norma. Aceptar el numero citado como identidad propia asociaria
+        este documento con el PDF de OTRA norma."""
+        identidad = detector.identidad_objetivo_de_documento(
+            "Resolución Ministerial que aprueba el TUPA, modificado por "
+            "Resolución Ministerial N° 100-2020/MINSA"
+        )
+        self.assertIsNone(identidad)
+
+    def test_titulo_puramente_una_cita_no_produce_identidad(self):
+        identidad = detector.identidad_objetivo_de_documento(
+            "Modifican la Resolución Ministerial N° 419-2025/MINSA"
+        )
+        self.assertIsNone(identidad)
+
+    def test_deroga_sin_declarar_la_propia_no_produce_identidad(self):
+        identidad = detector.identidad_objetivo_de_documento(
+            "Derogan diversos artículos del Decreto Supremo N° 014-2011-SA"
+        )
+        self.assertIsNone(identidad)
+
+
 class TestSinIdentidadObjetivoNoEscribe(unittest.TestCase):
     """Regresion obligatoria: sin identidad objetivo verificable → no escribe.
 

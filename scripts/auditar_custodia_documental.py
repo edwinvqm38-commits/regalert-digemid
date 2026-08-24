@@ -152,8 +152,24 @@ def main() -> int:
         w.writeheader()
         w.writerows(filas)
 
+    # El resumen debe NOMBRAR las normas que no estan completas: si solo dice
+    # "INCOMPLETO: 1" hay que abrir el CSV para saber cual, y esa es
+    # justamente la informacion que decide si una norma puede sostener una
+    # afirmacion juridica.
+    no_completas = {
+        estado: sorted(f["document_key"] for f in filas if f["completitud"] == estado)
+        for estado in ("INCOMPLETO", "DESCONOCIDO", "PDF_NO_DISPONIBLE", "PDF_CORRUPTO")
+    }
     resumen = {
         "normas_auditadas": len(filas),
+        "normas_no_completas": {k: v for k, v in no_completas.items() if v},
+        "detalle_no_completas": [
+            {"document_key": f["document_key"], "completitud": f["completitud"],
+             "pdf_page_count": f["pdf_page_count"], "stored_page_count": f["stored_page_count"],
+             "motivo": f["detalle_completitud"], "storage_path": f["storage_path"],
+             "error": f["error"]}
+            for f in filas if f["completitud"] != "COMPLETO"
+        ],
         "por_completitud": {},
         "por_procedencia": {},
         "con_sha256": sum(1 for f in filas if f["pdf_sha256"]),
@@ -174,9 +190,17 @@ def main() -> int:
     print("INVENTARIO DE CADENA DE CUSTODIA — SOLO LECTURA")
     print("=" * 72)
     for k, v in resumen.items():
-        if k == "criticos":
+        if k in ("criticos", "detalle_no_completas"):
             continue
         print(f"  {k:28} {v}")
+
+    if resumen["detalle_no_completas"]:
+        print("\n⚠️  NORMAS QUE NO ESTAN COMPLETAS (no pueden sostener una afirmacion juridica):")
+        for d in resumen["detalle_no_completas"]:
+            print(f"    [{d['completitud']}] {d['document_key']}: "
+                  f"PDF {d['pdf_page_count']} pag. / {d['stored_page_count']} guardadas"
+                  f"{'  · ' + d['error'][:80] if d['error'] else ''}")
+            print(f"        {d['motivo']}")
     if compartidos:
         print("\n⚠️  DOCUMENTOS COMPARTIDOS ENTRE NORMAS DISTINTAS:")
         for c in compartidos:

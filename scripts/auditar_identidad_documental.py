@@ -243,8 +243,12 @@ def analizar_norma(supabase, norma: dict, stored_pages: int, con_ocr: bool) -> d
         content_match=ev.content_match,
         visual_match=ev.visual_match,
         classification=clasificacion, confidence=confianza, reason=motivo,
-        recommended_action=recomendar(clasificacion, tipo_doc, fila),
     )
+    # La recomendacion se calcula DESPUES del update: los argumentos de una
+    # llamada se evaluan antes de aplicarla, asi que hacerlo dentro dejaba a
+    # `recomendar` leyendo la fila vieja y diciendo "paginas None-None" en los
+    # multinorma cuyo rango si se habia resuelto.
+    fila["recommended_action"] = recomendar(clasificacion, tipo_doc, fila)
     return fila
 
 

@@ -14,6 +14,7 @@ on:
         options:
           - inventario          # SHA-256 + page_count + completitud de todo el corpus
           - piloto              # 50 paginas de alto riesgo, 3 motores
+          - identidad_documental  # ¿cada norma esta asociada al PDF correcto? (F-03)
           - revision_visual     # HTML con imagen del PDF + transcripcion editable
           - ambas               # inventario + piloto
       limite:
@@ -74,7 +75,8 @@ jobs:
           if grep -nEH "$PATRON|$PATRON_STORAGE" \
                scripts/auditar_custodia_documental.py \
                scripts/piloto_verificacion_paginas.py \
-               scripts/generar_revision_visual.py; then
+               scripts/generar_revision_visual.py \
+               scripts/auditar_identidad_documental.py; then
             echo "ERROR: se detecto una operacion de escritura en un script de auditoria."
             exit 1
           fi
@@ -95,6 +97,17 @@ jobs:
                --limite "${{ inputs.limite }}" --out-dir reportes)
           if [[ -n "${{ inputs.document_key }}" ]]; then
             CMD+=(--document-key "${{ inputs.document_key }}")
+          fi
+          "${CMD[@]}"
+
+      - name: Auditoria de identidad documental (F-03)
+        if: ${{ inputs.tarea == 'identidad_documental' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/auditar_identidad_documental.py --out-dir reportes --con-ocr)
+          if [[ -n "${{ inputs.limite }}" && "${{ inputs.limite }}" != "0" ]]; then
+            CMD+=(--limite "${{ inputs.limite }}")
           fi
           "${CMD[@]}"
 

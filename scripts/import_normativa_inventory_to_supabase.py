@@ -291,8 +291,17 @@ def build_insert_payload(item: dict, available_columns: set[str] | None):
     source_url = clean_text(item.get("source_url")) or None
     pdf_url = clean_text(item.get("pdf_url")) or None
     pdf_urls = item.get("pdf_urls") if isinstance(item.get("pdf_urls"), list) else []
+    # F-03B: se elimina el respaldo `pdf_url = pdf_urls[0]`. Tomar el primer
+    # candidato es elegir por posicion en el HTML, y esa eleccion entraba a la
+    # base con el mismo aspecto que un dato verificado. Los candidatos se
+    # conservan en `raw` para que la resolucion por identidad los use despues;
+    # `pdf_url` queda NULL hasta que alguien pruebe cual es.
     if not pdf_url and pdf_urls:
-        pdf_url = clean_text(pdf_urls[0]) or None
+        logger.info(
+            "%s: %d candidato(s) a PDF sin resolver; pdf_url queda NULL hasta "
+            "probar la identidad documental",
+            clean_text(item.get("document_key")) or "?", len(pdf_urls),
+        )
 
     payload = {
         "document_key": clean_text(item.get("document_key")),
@@ -305,6 +314,11 @@ def build_insert_payload(item: dict, available_columns: set[str] | None):
         "fecha_publicacion": safe_date(item.get("fecha_publicacion")),
         "fuente_oficial": FUENTE_OFICIAL,
         "source_url": source_url,
+        # F-03B: solo se importa un pdf_url que el inventario haya podido
+        # verificar contra la identidad de la norma. Un unico candidato
+        # tampoco es prueba -puede ser el PDF equivocado, que es exactamente
+        # lo que paso con RD-19-2014 y LEYN27444.pdf-, asi que el candidato
+        # unico se guarda como candidato y la resolucion queda pendiente.
         "pdf_url": pdf_url,
         "file_name": basename_from_url(pdf_url) if pdf_url else None,
         "mime_type": "application/pdf" if pdf_url else None,

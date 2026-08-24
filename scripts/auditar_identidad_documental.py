@@ -276,6 +276,9 @@ def main() -> int:
     parser.add_argument("--limite", type=int, default=None)
     parser.add_argument("--con-ocr", action="store_true",
                         help="Ademas del texto embebido, lee el encabezado del render (300 DPI)")
+    parser.add_argument("--solo", default="",
+                        help="document_key separadas por coma. Audita SOLO esas normas e "
+                             "imprime su ficha completa. Sigue siendo solo lectura.")
     args = parser.parse_args()
 
     supabase = get_supabase()
@@ -295,7 +298,17 @@ def main() -> int:
         desde += 1000
 
     con_texto = [n for n in normas if paginas.get(n["id"])]
-    if args.limite:
+
+    if args.solo:
+        pedidas = [k.strip() for k in args.solo.split(",") if k.strip()]
+        # Con --solo se auditan tambien las normas SIN paginas: la pregunta es
+        # que documento hay, no si ya se transcribio.
+        por_clave = {n["document_key"]: n for n in normas}
+        con_texto = [por_clave[k] for k in pedidas if k in por_clave]
+        faltan = [k for k in pedidas if k not in por_clave]
+        if faltan:
+            logger.warning("No existen en digemid_normas: %s", ", ".join(faltan))
+    elif args.limite:
         con_texto = con_texto[:args.limite]
     logger.info("Normas con texto a auditar: %d (OCR de encabezado: %s)", len(con_texto), args.con_ocr)
 
@@ -305,6 +318,22 @@ def main() -> int:
         filas.append(fila)
         logger.info("%s -> %s (%s)", norma["document_key"], fila["classification"],
                     fila["identities_detected_all"] or "sin encabezados")
+
+    if args.solo:
+        print("\n" + "=" * 74)
+        print("FICHA POR NORMA — SOLO LECTURA, NADA MODIFICADO")
+        print("=" * 74)
+        for f in filas:
+            print(f"\n--- {f['document_key']} ---")
+            for campo in ("identity_expected", "classification", "confidence",
+                          "audit_complete", "pages_analyzed", "pdf_page_count",
+                          "stored_page_count", "document_type",
+                          "identities_detected_all", "start_page", "end_page",
+                          "rango_completo", "evidencia_inicio", "evidencia_fin",
+                          "filename_match", "source_context_match", "content_match",
+                          "visual_match", "pdf_sha256", "pdf_url",
+                          "audit_incomplete_reason", "reason", "recommended_action"):
+                print(f"  {campo:26} {f.get(campo)}")
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)

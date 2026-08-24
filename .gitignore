@@ -22,6 +22,18 @@ supabase/.temp/tmp/
 !data/*.json
 !data/**/*.json
 
+# La spec de identidad normativa es codigo, no configuracion local: la leen a la
+# vez el detector (Python) y el bot (TypeScript). Se versiona una por una, sin
+# abrir config/*.json entero, para no dejar de ignorar credenciales futuras.
+!config/identidad_normativa.spec.json
+
+# Los fixtures son datos de test, no configuracion local: sin ellos la suite no
+# corre. Se versionan por directorio, sin abrir *.json entero.
+!tests/fixtures/*.json
+
+# Matrices de auditoria (solo lectura, sin datos sensibles).
+!docs/reportes/*.json
+
 # Local DIGEMID generated files
 .secrets/
 .tessdata/

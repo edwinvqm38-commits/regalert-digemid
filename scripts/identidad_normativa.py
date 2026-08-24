@@ -22,41 +22,30 @@ H-07  La deduplicacion dependia de la descripcion libre del LLM. Ahora existe
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# H-05 · Representacion canonica del tipo de norma
+# FUENTE DE VERDAD COMPARTIDA (H-08)
 # ---------------------------------------------------------------------------
-# La forma canonica es la ABREVIATURA EN MAYUSCULAS (RM, DS, RD, LEY, ...).
-# Se eligio la abreviatura porque es la que ya usan los document_key y la que
-# devuelve el modelo; la forma larga solo aparece en 7 filas historicas.
-#
-# Ampliar esta tabla es la unica forma correcta de soportar un tipo nuevo.
-TIPOS_CANONICOS: dict[str, str] = {
-    # --- presentes hoy en produccion ---
-    "rm": "RM",
-    "resolucion ministerial": "RM",
-    "ds": "DS",
-    "decreto supremo": "DS",
-    "rd": "RD",
-    "resolucion directoral": "RD",
-    "ley": "LEY",
-    "du": "DU",
-    "decreto de urgencia": "DU",
-    "rs": "RS",
-    "resolucion suprema": "RS",
-    # --- previstos, aun sin filas: la arquitectura queda extensible ---
-    "rvm": "RVM",
-    "resolucion viceministerial": "RVM",
-    "rj": "RJ",
-    "resolucion jefatural": "RJ",
-    "dl": "DL",
-    "decreto legislativo": "DL",
-    "rge": "RGE",
-    "resolucion de gerencia general": "RGE",
-}
+# La tabla de tipos y las constantes de año viven en un unico archivo que
+# tambien consume el bot de Telegram (TypeScript). Agregar un tipo de norma se
+# hace SOLO ahi; tests/test_paridad_identidad.py falla si los dos motores se
+# desincronizan.
+RUTA_SPEC = Path(__file__).resolve().parents[1] / "config" / "identidad_normativa.spec.json"
+SPEC: dict = json.loads(RUTA_SPEC.read_text(encoding="utf-8"))
+
+# H-05 · Representacion canonica del tipo de norma.
+# La forma canonica es la ABREVIATURA EN MAYUSCULAS (RM, DS, RD, LEY, ...):
+# es la que ya usan los document_key y la que devuelve el modelo.
+TIPOS_CANONICOS: dict[str, str] = dict(SPEC["tipos_canonicos"])
+
+ANIO_PIVOTE_DOS_DIGITOS: int = SPEC["anio_pivote_dos_digitos"]
+ANIO_MINIMO: int = SPEC["anio_minimo"]
+ANIO_MAXIMO: int = SPEC["anio_maximo"]
 
 # Tipos juridicamente distintos que NO deben fusionarse jamas, aunque
 # compartan numero y año.
@@ -116,9 +105,9 @@ def _anio_completo(fragmento: str | None) -> int | None:
         return None
     n = int(fragmento)
     if len(fragmento) == 4:
-        return n if 1900 <= n <= 2100 else None
+        return n if ANIO_MINIMO <= n <= ANIO_MAXIMO else None
     if len(fragmento) == 2:
-        return 1900 + n if n >= 50 else 2000 + n
+        return 1900 + n if n >= ANIO_PIVOTE_DOS_DIGITOS else 2000 + n
     return None
 
 
@@ -135,6 +124,10 @@ def normalizar_sector(valor) -> str | None:
     if not valor:
         return None
     plano = _sin_acentos(str(valor)).upper().strip().strip("-/")
+    # "SA/DM" y "SA-DM" son el mismo sector escrito distinto: se unifica el
+    # separador en vez de borrarlo, que dejaria "SADM" y no convergeria con
+    # ninguna de las dos formas reales.
+    plano = plano.replace("/", "-")
     plano = re.sub(r"[^A-Z0-9\-]", "", plano)
     return plano or None
 
@@ -330,6 +323,12 @@ def resolver_identidad(citada: NormaIdentity, catalogo: list[dict]) -> Resultado
 # ---------------------------------------------------------------------------
 # H-07 · Clave estable de deduplicacion
 # ---------------------------------------------------------------------------
+def _slug(texto: str | None) -> str:
+    """Forma comparable de un texto libre: sin acentos, sin mayusculas y sin
+    puntuacion. Absorbe diferencias menores de redaccion."""
+    return re.sub(r"[^a-z0-9]+", "-", _sin_acentos((texto or "").lower())).strip("-")
+
+
 def normalizar_articulos(valor) -> str:
     """Extrae el CONJUNTO de unidades afectadas, ignorando la redaccion.
 
@@ -362,14 +361,28 @@ def clave_dedupe(
     if identidad_afectada.es_utilizable:
         parte_afectada = identidad_afectada.clave()
     else:
-        texto = _sin_acentos((descripcion_afectada or "").lower())
-        parte_afectada = "desc:" + re.sub(r"[^a-z0-9]+", "-", texto).strip("-")[:80]
+        parte_afectada = "desc:" + _slug(descripcion_afectada)[:80]
+
+    # Discriminador del OBJETO afectado cuando no hay unidades explicitas.
+    #
+    # Sin esto, dos afectaciones juridicamente DISTINTAS a la misma norma
+    # colapsaban en una sola clave. Caso real (DS-15-2025, ambas confirmadas):
+    # una modifica el articulo 43 del Reglamento y la otra la infraccion N° 30
+    # del Anexo 01 del mismo Reglamento; las dos con articulos_afectados NULL.
+    # Fusionarlas habria borrado silenciosamente una relacion juridica real.
+    #
+    # Se acepta a cambio el riesgo contrario -que una redaccion distinta del
+    # modelo genere un duplicado visible-, porque un duplicado se revisa y se
+    # descarta, mientras que una relacion perdida no se ve nunca.
+    parte_unidades = normalizar_articulos(articulos_afectados)
+    if not parte_unidades:
+        parte_unidades = "obj:" + _slug(descripcion_afectada)[:60]
 
     return "::".join(
         [
             str(norma_origen_id),
             (tipo_relacion or "").lower(),
             parte_afectada,
-            normalizar_articulos(articulos_afectados),
+            parte_unidades,
         ]
     )

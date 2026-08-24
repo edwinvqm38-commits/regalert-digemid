@@ -1,0 +1,528 @@
+{
+  "_comentario": [
+    "Casos compartidos por el motor Python (scripts/identidad_normativa.py) y el",
+    "motor TypeScript (supabase/functions/telegram-bot/identidad_normativa.ts).",
+    "tests/test_paridad_identidad.py ejecuta AMBOS y exige salida identica.",
+    "El catalogo replica filas reales de produccion (ids y keys verificados por",
+    "SELECT el 2026-08-24), incluidos los stubs, porque el comportamiento ante",
+    "stubs es justamente lo que se esta auditando en H-08."
+  ],
+  "catalogo": [
+    {
+      "id": "ea3c9b32",
+      "document_key": "LEY-29459",
+      "tipo_norma": "Ley",
+      "numero": "29459",
+      "anio": 2009,
+      "process_status": "drive_structured"
+    },
+    {
+      "id": "c80418ab",
+      "document_key": "NORM-LEY-29459-LEY-DE-LOS-PRODUCTOS-FARMACEUT",
+      "tipo_norma": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "process_status": "stub_derogada"
+    },
+    {
+      "id": "2f41afd7",
+      "document_key": "LEY-29698",
+      "tipo_norma": "LEY",
+      "numero": "29698",
+      "anio": null,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "f60c9848",
+      "document_key": "LEY-29698-ART9",
+      "tipo_norma": "LEY",
+      "numero": "29698",
+      "anio": null,
+      "process_status": "stub_derogada"
+    },
+    {
+      "id": "8ece1ded",
+      "document_key": "DS-004-2016",
+      "tipo_norma": "DS",
+      "numero": "004",
+      "anio": 2016,
+      "process_status": "stub_derogada"
+    },
+    {
+      "id": "bba8602b",
+      "document_key": "RD-354-99-DG-DIGEMID-1999",
+      "tipo_norma": "RD",
+      "numero": "354-99-DG-DIGEMID",
+      "anio": 1999,
+      "process_status": "stub_derogada"
+    },
+    {
+      "id": "65b01f4e",
+      "document_key": "RD-993-99-DG-DIGEMID-1999",
+      "tipo_norma": "RD",
+      "numero": "993-99-DG-DIGEMID",
+      "anio": 1999,
+      "process_status": "stub_derogada"
+    },
+    {
+      "id": "88519957",
+      "document_key": "DS-014-2011-SA",
+      "tipo_norma": "Decreto Supremo",
+      "numero": "014-2011-SA",
+      "anio": 2011,
+      "process_status": "drive_structured"
+    },
+    {
+      "id": "84c774de",
+      "document_key": "DS-008-2025-SA",
+      "tipo_norma": "Decreto Supremo",
+      "numero": "008-2025-SA",
+      "anio": 2025,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "a88957f1",
+      "document_key": "DS-14-2002",
+      "tipo_norma": "DS",
+      "numero": "14",
+      "anio": 2002,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "bd928c11",
+      "document_key": "DS-2-2003",
+      "tipo_norma": "DS",
+      "numero": "2",
+      "anio": 2003,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "ea4b2b5c",
+      "document_key": "DS-2-2009",
+      "tipo_norma": "DS",
+      "numero": "2",
+      "anio": 2009,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "fb418827",
+      "document_key": "DS-2-2010",
+      "tipo_norma": "DS",
+      "numero": "2",
+      "anio": 2010,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "rm97",
+      "document_key": "RM-97-2000",
+      "tipo_norma": "RM",
+      "numero": "97",
+      "anio": 2000,
+      "process_status": "pdf_download_error"
+    },
+    {
+      "id": "rm615",
+      "document_key": "RM-615-2024",
+      "tipo_norma": "RM",
+      "numero": "615",
+      "anio": 2024,
+      "process_status": "text_extracted"
+    },
+    {
+      "id": "rm339x",
+      "document_key": "RM-339-2024",
+      "tipo_norma": "RM",
+      "numero": "339",
+      "anio": 2024,
+      "process_status": "text_extracted"
+    }
+  ],
+  "casos_tipo": [
+    {
+      "entrada": "RM",
+      "esperado": "RM"
+    },
+    {
+      "entrada": "Resolución Ministerial",
+      "esperado": "RM"
+    },
+    {
+      "entrada": "resolucion ministerial",
+      "esperado": "RM"
+    },
+    {
+      "entrada": "R.M.",
+      "esperado": "RM"
+    },
+    {
+      "entrada": "Decreto Supremo",
+      "esperado": "DS"
+    },
+    {
+      "entrada": "DS",
+      "esperado": "DS"
+    },
+    {
+      "entrada": "Ley",
+      "esperado": "LEY"
+    },
+    {
+      "entrada": "Resolución Directoral",
+      "esperado": "RD"
+    },
+    {
+      "entrada": "Decreto Legislativo",
+      "esperado": "DL"
+    },
+    {
+      "entrada": "Circular Interna",
+      "esperado": null
+    },
+    {
+      "entrada": "",
+      "esperado": null
+    },
+    {
+      "entrada": null,
+      "esperado": null
+    }
+  ],
+  "casos_identidad": [
+    {
+      "nombre": "numero con año y sector embebidos",
+      "tipo": "Decreto Supremo",
+      "numero": "014-2011-SA",
+      "anio": null,
+      "esperado": {
+        "tipo": "DS",
+        "numero": "14",
+        "anio": 2011,
+        "sector": "SA"
+      }
+    },
+    {
+      "nombre": "sector compuesto y año de dos digitos",
+      "tipo": "RD",
+      "numero": "354-99-DG-DIGEMID",
+      "anio": null,
+      "esperado": {
+        "tipo": "RD",
+        "numero": "354",
+        "anio": 1999,
+        "sector": "DG-DIGEMID"
+      }
+    },
+    {
+      "nombre": "ley sin año",
+      "tipo": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "esperado": {
+        "tipo": "LEY",
+        "numero": "29459",
+        "anio": null,
+        "sector": null
+      }
+    },
+    {
+      "nombre": "DS 02-92-SA (año de dos digitos anterior al 2000)",
+      "tipo": "DS",
+      "numero": "02-92-SA",
+      "anio": null,
+      "esperado": {
+        "tipo": "DS",
+        "numero": "2",
+        "anio": 1992,
+        "sector": "SA"
+      }
+    },
+    {
+      "nombre": "RM 097-2000-SA/DM",
+      "tipo": "RM",
+      "numero": "097-2000-SA/DM",
+      "anio": null,
+      "esperado": {
+        "tipo": "RM",
+        "numero": "97",
+        "anio": 2000,
+        "sector": "SA-DM"
+      }
+    },
+    {
+      "nombre": "tipo desconocido no se inventa",
+      "tipo": "Circular",
+      "numero": "5",
+      "anio": 2020,
+      "esperado": {
+        "tipo": null,
+        "numero": "5",
+        "anio": 2020,
+        "sector": null
+      }
+    }
+  ],
+  "casos_resolucion": [
+    {
+      "nombre": "A · Ley 32319 -> Ley 29459 (con stub en la base)",
+      "tipo": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "excluir_stubs": false,
+      "esperado_nivel": "IDENTIDAD_AMBIGUA",
+      "esperado_key": null,
+      "esperado_candidatas": [
+        "LEY-29459",
+        "NORM-LEY-29459-LEY-DE-LOS-PRODUCTOS-FARMACEUT"
+      ]
+    },
+    {
+      "nombre": "A · Ley 32319 -> Ley 29459 (sin el stub)",
+      "tipo": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "RESUELTA_TIPO_NUMERO",
+      "esperado_key": "LEY-29459",
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "B · Ley 32033 -> Ley 29459 usa la misma identidad",
+      "tipo": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "RESUELTA_TIPO_NUMERO",
+      "esperado_key": "LEY-29459",
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "C · Ley 29698 art. 9 (con stub) es ambiguo",
+      "tipo": "LEY",
+      "numero": "29698",
+      "anio": null,
+      "excluir_stubs": false,
+      "esperado_nivel": "IDENTIDAD_AMBIGUA",
+      "esperado_key": null,
+      "esperado_candidatas": [
+        "LEY-29698",
+        "LEY-29698-ART9"
+      ]
+    },
+    {
+      "nombre": "C · Ley 29698 art. 9 (sin el stub) resuelve la ley real",
+      "tipo": "LEY",
+      "numero": "29698",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "RESUELTA_TIPO_NUMERO",
+      "esperado_key": "LEY-29698",
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "D · DS 02-92-SA no existe en la base",
+      "tipo": "DS",
+      "numero": "02-92-SA",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "NORMA_NO_ENCONTRADA",
+      "esperado_key": null,
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "D · DS 02-92-SA tampoco se resuelve incluyendo stubs",
+      "tipo": "DS",
+      "numero": "02-92-SA",
+      "anio": null,
+      "excluir_stubs": false,
+      "esperado_nivel": "NORMA_NO_ENCONTRADA",
+      "esperado_key": null,
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "E · RM 097-2000-SA/DM resuelve RM-97-2000",
+      "tipo": "RM",
+      "numero": "097-2000-SA/DM",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "RESUELTA_TIPO_NUMERO_ANIO",
+      "esperado_key": "RM-97-2000",
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "F · DS 004-2016 no tiene norma real equivalente",
+      "tipo": "DS",
+      "numero": "004",
+      "anio": 2016,
+      "excluir_stubs": true,
+      "esperado_nivel": "NORMA_NO_ENCONTRADA",
+      "esperado_key": null,
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "F · DS 014-2011 con sector resuelve exacto",
+      "tipo": "DS",
+      "numero": "014-2011-SA",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "RESUELTA_EXACTA",
+      "esperado_key": "DS-014-2011-SA",
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "G · cita de DS 2 sin año: varias candidatas",
+      "tipo": "DS",
+      "numero": "2",
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "IDENTIDAD_AMBIGUA",
+      "esperado_key": null,
+      "esperado_candidatas": [
+        "DS-2-2003",
+        "DS-2-2009",
+        "DS-2-2010"
+      ]
+    },
+    {
+      "nombre": "H · sin numero: datos insuficientes",
+      "tipo": "RM",
+      "numero": null,
+      "anio": 2020,
+      "excluir_stubs": true,
+      "esperado_nivel": "DATOS_INSUFICIENTES",
+      "esperado_key": null,
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "H · descripcion sin numero: datos insuficientes",
+      "tipo": null,
+      "numero": null,
+      "anio": null,
+      "excluir_stubs": true,
+      "esperado_nivel": "DATOS_INSUFICIENTES",
+      "esperado_key": null,
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "cita con año NO se enlaza a otro año (RM 339-2023 vs RM-339-2024)",
+      "tipo": "RM",
+      "numero": "339",
+      "anio": 2023,
+      "excluir_stubs": true,
+      "esperado_nivel": "NORMA_NO_ENCONTRADA",
+      "esperado_key": null,
+      "esperado_candidatas": []
+    },
+    {
+      "nombre": "numero+año sin tipo, unico en el corpus",
+      "tipo": null,
+      "numero": "615",
+      "anio": 2024,
+      "excluir_stubs": true,
+      "esperado_nivel": "RESUELTA_NUMERO_ANIO",
+      "esperado_key": "RM-615-2024",
+      "esperado_candidatas": []
+    }
+  ],
+  "casos_dedupe": [
+    {
+      "nombre": "misma relacion redactada distinto",
+      "origen": "o1",
+      "tipo_relacion": "exonera",
+      "tipo": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "articulos": "artículos 10 y 11",
+      "descripcion": "Ley 29459, Ley de los productos farmacéuticos"
+    },
+    {
+      "nombre": "misma relacion, otra redaccion",
+      "origen": "o1",
+      "tipo_relacion": "exonera",
+      "tipo": "Ley",
+      "numero": "29459",
+      "anio": null,
+      "articulos": "arts. 10 y 11",
+      "descripcion": "Ley N° 29459"
+    },
+    {
+      "nombre": "articulos distintos",
+      "origen": "o1",
+      "tipo_relacion": "exonera",
+      "tipo": "LEY",
+      "numero": "29459",
+      "anio": null,
+      "articulos": "artículo 12",
+      "descripcion": "Ley 29459"
+    },
+    {
+      "nombre": "ceros a la izquierda",
+      "origen": "o2",
+      "tipo_relacion": "modifica",
+      "tipo": "DS",
+      "numero": "014-2011-SA",
+      "anio": null,
+      "articulos": null,
+      "descripcion": "DS 014-2011-SA"
+    },
+    {
+      "nombre": "sin identidad cae a descripcion",
+      "origen": "o3",
+      "tipo_relacion": "deroga",
+      "tipo": null,
+      "numero": null,
+      "anio": null,
+      "articulos": null,
+      "descripcion": "Las disposiciones que se opongan"
+    },
+    {
+      "nombre": "numeral compuesto",
+      "origen": "o4",
+      "tipo_relacion": "modifica",
+      "tipo": "RM",
+      "numero": "615",
+      "anio": 2024,
+      "articulos": "sub numeral 5.1.4 del numeral 5.1",
+      "descripcion": "RM 615-2024"
+    },
+    {
+      "nombre": "DS-15-2025 · modifica el articulo 43 del Reglamento",
+      "origen": "ds15",
+      "tipo_relacion": "modifica",
+      "tipo": "DS",
+      "numero": "014-2011-SA",
+      "anio": 2011,
+      "articulos": null,
+      "descripcion": "Reglamento de Establecimientos Farmacéuticos, aprobado por Decreto Supremo Nº 014-2011-SA"
+    },
+    {
+      "nombre": "DS-15-2025 · modifica la infraccion 30 del Anexo 01 del MISMO Reglamento",
+      "origen": "ds15",
+      "tipo_relacion": "modifica",
+      "tipo": "DS",
+      "numero": "014-2011-SA",
+      "anio": 2011,
+      "articulos": null,
+      "descripcion": "Anexo 01 - Escala por Infracciones y Sanciones a los Establecimientos Farmacéuticos y No Farmacéuticos, del Reglamento de Establecimientos Farmacéuticos, aprobado por Decreto Supremo Nº 014-2011-SA"
+    },
+    {
+      "nombre": "RM-680-2021 · modifica el articulo 2 de la RM 1053-2020",
+      "origen": "rm680",
+      "tipo_relacion": "modifica",
+      "tipo": "RM",
+      "numero": "1053",
+      "anio": 2020,
+      "articulos": null,
+      "descripcion": "Resolución Ministerial N° 1053-2020/MINSA"
+    },
+    {
+      "nombre": "RM-680-2021 · modifica numerales del Manual aprobado por esa RM",
+      "origen": "rm680",
+      "tipo_relacion": "modifica",
+      "tipo": "RM",
+      "numero": "1053",
+      "anio": 2020,
+      "articulos": null,
+      "descripcion": "Documento Técnico: Manual de Buenas Prácticas de Farmacovigilancia, aprobado por Resolución Ministerial N° 1053-2020/MINSA"
+    }
+  ]
+}

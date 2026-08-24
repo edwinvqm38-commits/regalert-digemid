@@ -1,0 +1,40 @@
+{
+  "_comentario": [
+    "FUENTE DE VERDAD UNICA de la identidad normativa (H-05/H-06/H-08).",
+    "La consumen: scripts/identidad_normativa.py (detector y scripts) y",
+    "supabase/functions/telegram-bot/identidad_normativa.ts (bot).",
+    "El .ts de tipos se genera desde aqui con scripts/generar_spec_identidad_ts.py",
+    "y tests/test_paridad_identidad.py falla si se desincronizan.",
+    "Agregar un tipo de norma nuevo se hace SOLO aqui.",
+    "tipos_numero_unico_nacional: tipos cuya numeracion es unica a nivel nacional y no se reinicia cada año (Ley 29459 identifica una sola norma). Para el resto -DS, RM, RD- el numero se repite cada año y sin año NO hay identidad."
+  ],
+  "version": 1,
+  "anio_pivote_dos_digitos": 50,
+  "anio_minimo": 1900,
+  "anio_maximo": 2100,
+  "tipos_canonicos": {
+    "rm": "RM",
+    "resolucion ministerial": "RM",
+    "ds": "DS",
+    "decreto supremo": "DS",
+    "rd": "RD",
+    "resolucion directoral": "RD",
+    "ley": "LEY",
+    "du": "DU",
+    "decreto de urgencia": "DU",
+    "rs": "RS",
+    "resolucion suprema": "RS",
+    "rvm": "RVM",
+    "resolucion viceministerial": "RVM",
+    "rj": "RJ",
+    "resolucion jefatural": "RJ",
+    "dl": "DL",
+    "decreto legislativo": "DL",
+    "rge": "RGE",
+    "resolucion de gerencia general": "RGE"
+  },
+  "tipos_numero_unico_nacional": [
+    "LEY",
+    "DL"
+  ]
+}

@@ -81,6 +81,16 @@ VERBOS_NORMATIVOS = {
 }
 _VERBOS_RE = {k: re.compile(v, re.IGNORECASE) for k, v in VERBOS_NORMATIVOS.items()}
 
+# Negación que invierte el efecto de un verbo normativo cuando aparece justo
+# antes de él: "NO deróguese" produce el efecto jurídico OPUESTO a
+# "deróguese", y una transcripción que pierda o invente ese "no" es un error
+# jurídico aunque no toque ningún número (F-04).
+_NEGACION_RE = re.compile(r"\b(?:no|nunca|jam[aá]s|tampoco)\b", re.IGNORECASE)
+_VENTANA_NEGACION = 25  # caracteres inmediatamente antes del verbo
+# La ventana no cruza a la clausula anterior: "No aplica el articulo 5.
+# Deroguese el articulo 12" no es una negacion de "Deroguese".
+_LIMITE_CLAUSULA_RE = re.compile(r"[.;:\n]")
+
 # ---------------------------------------------------------------------------
 # Tokens jurídicos sensibles (F-01 · punto 9)
 # ---------------------------------------------------------------------------
@@ -121,15 +131,28 @@ def es_pagina_dispositiva(texto: str | None) -> bool:
 
 
 def verbos_normativos(texto: str | None) -> dict[str, int]:
-    """Cuántas veces aparece cada CLASE de verbo jurídico."""
+    """Cuántas veces aparece cada CLASE de verbo jurídico.
+
+    Una negación INMEDIATAMENTE ANTES del verbo invierte el efecto ("no
+    deróguese" no es lo mismo que "deróguese") y se cuenta como una clase
+    aparte ("NO_DEROGA"), no como "DEROGA": dos textos que solo difieren en
+    esa negación deben verse como clases distintas para que la comparación
+    de motores (F-04 · LTER) los marque en desacuerdo, aunque ningún token
+    numérico haya cambiado.
+    """
     if not texto:
         return {}
     plano = _sin_acentos(texto)
-    return {
-        clase: len(regex.findall(plano))
-        for clase, regex in _VERBOS_RE.items()
-        if regex.search(plano)
-    }
+    resultado: dict[str, int] = {}
+    for clase, regex in _VERBOS_RE.items():
+        for m in regex.finditer(plano):
+            ventana = plano[max(0, m.start() - _VENTANA_NEGACION): m.start()]
+            limites = list(_LIMITE_CLAUSULA_RE.finditer(ventana))
+            if limites:
+                ventana = ventana[limites[-1].end():]
+            etiqueta = f"NO_{clase}" if _NEGACION_RE.search(ventana) else clase
+            resultado[etiqueta] = resultado.get(etiqueta, 0) + 1
+    return resultado
 
 
 def marcas_ilegible(texto: str | None) -> int:

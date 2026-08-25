@@ -100,6 +100,41 @@ class TestTokensSensibles(unittest.TestCase):
         self.assertEqual(r.legal_token_error_rate, 1.0)
 
 
+class TestNegacion(unittest.TestCase):
+    """Una negación pegada al verbo invierte el efecto jurídico (F-04): "no
+    deróguese" no es "deróguese", aunque ningún número haya cambiado."""
+
+    def test_negacion_pegada_al_verbo_cambia_la_clase(self):
+        self.assertEqual(verbos_normativos("Artículo 12.- Deróguese la norma"), {"DEROGA": 1})
+        self.assertEqual(verbos_normativos("Artículo 12.- No deróguese la norma"), {"NO_DEROGA": 1})
+
+    def test_perder_o_inventar_la_negacion_es_error_juridico(self):
+        a = "Artículo 12.- Deróguese la Resolución Ministerial N° 100-2020/MINSA"
+        b = "Artículo 12.- No deróguese la Resolución Ministerial N° 100-2020/MINSA"
+        r = comparar_fidelidad(a, b)
+        self.assertLess(r.cer, 0.1, "el texto es casi idéntico salvo el 'no'")
+        self.assertTrue(r.hay_error_juridico)
+        self.assertTrue(r.verbos_cambiados)
+
+    def test_negacion_de_una_clausula_anterior_no_contamina_el_verbo_siguiente(self):
+        """'No aplica el artículo 5. Deróguese el artículo 12' no es una
+        negación de 'deróguese': hay un punto y una oración entera entre
+        medio."""
+        self.assertEqual(
+            verbos_normativos("No aplica el artículo 5. Deróguese el artículo 12."),
+            {"DEROGA": 1},
+        )
+
+    def test_negacion_separada_por_coma_si_cuenta(self):
+        self.assertEqual(
+            verbos_normativos("Artículo 12.- No, en ningún caso, se deroga la norma"),
+            {"NO_DEROGA": 1},
+        )
+
+    def test_texto_sin_negacion_ni_verbo_no_genera_falso_positivo(self):
+        self.assertEqual(verbos_normativos("El presente decreto entra en vigencia mañana"), {})
+
+
 class TestMetricas(unittest.TestCase):
     def test_cer_y_wer_son_cero_en_texto_identico(self):
         self.assertEqual(cer(DISPOSITIVA, DISPOSITIVA), 0.0)

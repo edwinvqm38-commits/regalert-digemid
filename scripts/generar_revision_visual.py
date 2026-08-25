@@ -15,11 +15,12 @@ El HTML no envia nada a ningun servidor: todo ocurre en el navegador.
 
 Uso:
     python scripts/generar_revision_visual.py --document-keys RM-894-2024,DS-12-2023
-    python scripts/generar_revision_visual.py --desde-piloto reportes/PILOTO_VERIFICACION.json
+    python scripts/generar_revision_visual.py --desde-manifest reportes/F04_MANIFEST_PILOTO.csv
 """
 
 import argparse
 import base64
+import csv
 import html
 import io
 import json
@@ -194,6 +195,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document-keys", default="", help="RM-894-2024,DS-12-2023")
     parser.add_argument("--paginas", default="", help="limitar a estas paginas (1,5,9)")
+    parser.add_argument("--desde-manifest", default="",
+                        help="CSV con columnas document_key,page_number (p.ej. "
+                             "F04_MANIFEST_PILOTO.csv): usa EXACTAMENTE esos pares "
+                             "documento+pagina en vez de --document-keys/--paginas")
     parser.add_argument("--limite", type=int, default=50)
     parser.add_argument("--out", default="reportes/REVISION_VISUAL.html")
     args = parser.parse_args()
@@ -201,9 +206,21 @@ def main() -> int:
     import fitz
 
     supabase = get_supabase()
-    claves = [k.strip() for k in args.document_keys.split(",") if k.strip()]
-    if not claves:
-        raise SystemExit("indica --document-keys")
+
+    pares_manifest = None
+    if args.desde_manifest:
+        with open(args.desde_manifest, newline="", encoding="utf-8") as fh:
+            pares_manifest = {
+                (fila["document_key"], int(fila["page_number"]))
+                for fila in csv.DictReader(fh) if fila.get("document_key") and fila.get("page_number")
+            }
+        claves = sorted({dk for dk, _ in pares_manifest})
+        if not claves:
+            raise SystemExit(f"{args.desde_manifest} no tiene filas document_key,page_number")
+    else:
+        claves = [k.strip() for k in args.document_keys.split(",") if k.strip()]
+        if not claves:
+            raise SystemExit("indica --document-keys o --desde-manifest")
     filtro_paginas = {int(x) for x in args.paginas.split(",") if x.strip()} if args.paginas else None
 
     normas = (
@@ -231,6 +248,8 @@ def main() -> int:
         with fitz.open(stream=io.BytesIO(datos), filetype="pdf") as doc:
             for p in paginas:
                 numero = p.get("page_number") or 0
+                if pares_manifest is not None and (norma["document_key"], numero) not in pares_manifest:
+                    continue
                 if filtro_paginas and numero not in filtro_paginas:
                     continue
                 if total >= args.limite:

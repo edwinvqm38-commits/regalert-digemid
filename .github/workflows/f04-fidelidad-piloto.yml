@@ -42,9 +42,36 @@ on:
         required: false
         default: ""
         type: string
+      manifest_basename:
+        description: >-
+          Nombre base (sin extension) del manifest que usan 'comparar' y
+          'revision_visual'. Por defecto el V1 generado en este mismo run
+          (o en 'all'). Usa F04_MANIFEST_PILOTO_V2 para operar sobre el
+          manifest estratificado ya generado y congelado.
+        required: false
+        default: "F04_MANIFEST_PILOTO"
+        type: string
+      manifest_run_id:
+        description: >-
+          Opcional, solo para 'comparar'/'revision_visual': run ID de
+          GitHub Actions (el numero en la URL del run, NO el run_number
+          que aparece en el nombre del artifact) de una corrida ANTERIOR
+          de este mismo workflow desde la cual descargar su artifact
+          antes de operar. Vacio = usar el reportes/ de ESTE run
+          (requiere haber corrido antes 'manifest'/'manifest_v2' en el
+          mismo run, como hace 'all').
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
+  # actions:read (solo lectura) habilita UNICAMENTE descargar, dentro de
+  # este mismo job, el artifact de una corrida ANTERIOR de este workflow
+  # (p.ej. un manifest_v2 ya generado y congelado) cuando 'comparar' o
+  # 'revision_visual' reciben manifest_run_id. No permite escribir,
+  # cancelar ni re-disparar ninguna corrida.
+  actions: read
 
 concurrency:
   group: f04-fidelidad-piloto
@@ -136,6 +163,17 @@ jobs:
           # intente.
           echo "Confirmado: cero escrituras, cero migraciones, cero Edge deploy."
 
+      - name: Descargar manifest de una corrida anterior (opcional, solo comparar/revision_visual)
+        if: >-
+          (inputs.tarea == 'comparar' || inputs.tarea == 'revision_visual') &&
+          inputs.manifest_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          path: reportes
+          run-id: ${{ inputs.manifest_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
       - name: Generar manifest F-04-A (gate F-03 + F-02 + SHA256 reales, abre cada PDF)
         if: ${{ inputs.tarea == 'manifest' || inputs.tarea == 'all' }}
         shell: bash
@@ -179,26 +217,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! -f reportes/F04_MANIFEST_PILOTO.csv ]]; then
-            echo "No existe reportes/F04_MANIFEST_PILOTO.csv en esta corrida."
-            echo "Ejecuta primero la tarea 'manifest' (o usa 'all')."
+          MANIFEST="reportes/${{ inputs.manifest_basename }}.csv"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "No existe $MANIFEST en esta corrida."
+            echo "Ejecuta primero 'manifest'/'manifest_v2' (o usa 'all'), o indica"
+            echo "manifest_run_id con el run ID de una corrida anterior que ya lo genero."
             exit 1
           fi
           python scripts/f04_comparar_motores_piloto.py \
-            --manifest reportes/F04_MANIFEST_PILOTO.csv --out-dir reportes
+            --manifest "$MANIFEST" --out-dir reportes
 
       - name: Reporte visual / golden dataset (a partir del manifest)
         if: ${{ inputs.tarea == 'revision_visual' || inputs.tarea == 'all' }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! -f reportes/F04_MANIFEST_PILOTO.csv ]]; then
-            echo "No existe reportes/F04_MANIFEST_PILOTO.csv en esta corrida."
-            echo "Ejecuta primero la tarea 'manifest' (o usa 'all')."
+          MANIFEST="reportes/${{ inputs.manifest_basename }}.csv"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "No existe $MANIFEST en esta corrida."
+            echo "Ejecuta primero 'manifest'/'manifest_v2' (o usa 'all'), o indica"
+            echo "manifest_run_id con el run ID de una corrida anterior que ya lo genero."
             exit 1
           fi
           python scripts/generar_revision_visual.py \
-            --desde-manifest reportes/F04_MANIFEST_PILOTO.csv \
+            --desde-manifest "$MANIFEST" \
             --limite "${{ inputs.limite_paginas }}" \
             --out reportes/F04_REVISION_VISUAL.html
 

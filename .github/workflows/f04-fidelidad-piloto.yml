@@ -1,0 +1,183 @@
+name: F-04-A - Piloto de fidelidad de transcripcion (SOLO LECTURA)
+
+# Manual a proposito: NINGUN schedule. F-04-A es de solo lectura -SELECT
+# sobre digemid_normas/digemid_norma_paginas y descargas de Storage para
+# poder abrir los PDF con los 3 motores- y publica sus resultados unicamente
+# como GitHub Actions artifact. No escribe pdf_url/file_url, no reemplaza
+# ningun text_raw/text_normalized, no aplica ninguna migracion, no despliega
+# Edge Functions, no usa ningun modelo de pago (nada de openrouter/auto,
+# nada de Vision cloud: el tercer motor es Tesseract local).
+#
+# Reutiliza (sin duplicar) el gate F-03 real de
+# scripts/auditar_identidad_documental.py -que abre cada PDF y prueba su
+# identidad- y F-02 (agents/custodia_documental.py) a traves de
+# agents/f04_seleccion_muestra.py. Un campo historico en la base NUNCA basta
+# por si solo para declarar apto un documento.
+on:
+  workflow_dispatch:
+    inputs:
+      tarea:
+        description: "Que ejecutar"
+        required: true
+        default: "manifest"
+        type: choice
+        options:
+          - manifest         # gate F-03+F-02+SHA256 real -> F04_MANIFEST_PILOTO.csv/json
+          - comparar         # 3 motores sobre un manifest YA generado -> F04_COMPARACION_MOTORES
+          - revision_visual  # HTML golden dataset a partir de un manifest YA generado
+          - all              # manifest -> comparar -> revision_visual, en ese orden
+      limite_paginas:
+        description: "Tamano objetivo de la muestra final (manifest/all) / limite del reporte visual"
+        required: false
+        default: "50"
+        type: string
+      document_key:
+        description: >-
+          Opcional, para diagnostico puntual: solo esta(s) norma(s)
+          (document_key separadas por coma). Vacio = corpus completo.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f04-fidelidad-piloto
+  cancel-in-progress: false
+
+jobs:
+  piloto:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Tesseract OCR (espanol)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verificar que F-04-A no escribe (cierre transitivo completo)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # F-04-A es SOLO LECTURA por diseno: nunca debe llamar
+          # insert/update/upsert/delete contra Supabase ni
+          # upload/remove/move/copy contra Storage. Se audita el cierre
+          # TRANSITIVO real de lo que scripts/f04_*.py importa -F-04-A
+          # reutiliza a proposito el codigo de F-03/F-02/F-01 en vez de
+          # duplicarlo, asi que esa reutilizacion tambien se revisa, no solo
+          # los archivos nuevos-.
+          #
+          # A diferencia de F-03B (scripts/canary_f03b_pdf_detector.py), aqui
+          # NO existe ninguna excepcion equivalente a su --apply: F-04-A no
+          # tiene, y no debe tener nunca, ningun camino de escritura gateado
+          # por variable de entorno. Si aparece uno, el job falla ANTES de
+          # ejecutar nada.
+          ARCHIVOS_F04=(
+            scripts/f04_generar_manifest_piloto.py
+            scripts/f04_comparar_motores_piloto.py
+            agents/f04_seleccion_muestra.py
+            scripts/auditar_identidad_documental.py
+            scripts/piloto_verificacion_paginas.py
+            scripts/generar_revision_visual.py
+            scripts/identidad_normativa.py
+            agents/identidad_documental.py
+            agents/custodia_documental.py
+            agents/fidelidad_legal.py
+          )
+          PATRON_ESCRITURA='(table\([^)]*\)|from_\([^)]*\))\s*\.\s*(insert|update|upsert|delete)\b'
+          PATRON_STORAGE='storage\.from_\([^)]*\)\.(upload|remove|move|copy)'
+          if grep -nEH "$PATRON_ESCRITURA|$PATRON_STORAGE" "${ARCHIVOS_F04[@]}"; then
+            echo "ERROR: operacion de escritura detectada en el cierre transitivo de F-04-A. Abortando."
+            exit 1
+          fi
+          PATRON_MIGRACION='apply_migration|create[[:space:]]+(table|index|view|trigger|function)|alter[[:space:]]+table|drop[[:space:]]+(table|view|trigger|function)'
+          if grep -nEHi "$PATRON_MIGRACION" "${ARCHIVOS_F04[@]}"; then
+            echo "ERROR: migracion/DDL detectada en el cierre transitivo de F-04-A. Abortando."
+            exit 1
+          fi
+          if grep -nEHi "deploy_edge_function|supabase[[:space:]]+functions[[:space:]]+deploy" "${ARCHIVOS_F04[@]}"; then
+            echo "ERROR: deploy de Edge Function detectado en el cierre transitivo de F-04-A. Abortando."
+            exit 1
+          fi
+          # Modelos de pago: la garantia real no es un grep de texto -una
+          # linea legitima como
+          # agents/custodia_documental.py:MODELOS_NO_AUDITABLES =
+          # ("auto", "openrouter/auto", ...) NOMBRA "openrouter/auto" para
+          # RECHAZARLO, y un grep ingenuo la marcaria como falso positivo-,
+          # sino estructural: este workflow (ver "env:" del job) no declara
+          # OPENROUTER_API_KEY, OPENAI_API_KEY ni ANTHROPIC_API_KEY, asi que
+          # ningun codigo que intentara llamar a esas APIs tendria
+          # credenciales con las que hacerlo. Verificado ademas por lectura
+          # completa del cierre transitivo: no existe ningun codigo que lo
+          # intente.
+          echo "Confirmado: cero escrituras, cero migraciones, cero Edge deploy."
+
+      - name: Generar manifest F-04-A (gate F-03 + F-02 + SHA256 reales, abre cada PDF)
+        if: ${{ inputs.tarea == 'manifest' || inputs.tarea == 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/f04_generar_manifest_piloto.py
+               --out-dir reportes --limite-paginas "${{ inputs.limite_paginas }}")
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--solo "${{ inputs.document_key }}")
+          fi
+          printf 'Ejecutando: %q ' "${CMD[@]}"; printf '\n'
+          "${CMD[@]}"
+
+      - name: Comparar motores sobre el manifest (PyMuPDF + pdfplumber + Tesseract a 300 DPI)
+        if: ${{ inputs.tarea == 'comparar' || inputs.tarea == 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f reportes/F04_MANIFEST_PILOTO.csv ]]; then
+            echo "No existe reportes/F04_MANIFEST_PILOTO.csv en esta corrida."
+            echo "Ejecuta primero la tarea 'manifest' (o usa 'all')."
+            exit 1
+          fi
+          python scripts/f04_comparar_motores_piloto.py \
+            --manifest reportes/F04_MANIFEST_PILOTO.csv --out-dir reportes
+
+      - name: Reporte visual / golden dataset (a partir del manifest)
+        if: ${{ inputs.tarea == 'revision_visual' || inputs.tarea == 'all' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f reportes/F04_MANIFEST_PILOTO.csv ]]; then
+            echo "No existe reportes/F04_MANIFEST_PILOTO.csv en esta corrida."
+            echo "Ejecuta primero la tarea 'manifest' (o usa 'all')."
+            exit 1
+          fi
+          python scripts/generar_revision_visual.py \
+            --desde-manifest reportes/F04_MANIFEST_PILOTO.csv \
+            --limite "${{ inputs.limite_paginas }}" \
+            --out reportes/F04_REVISION_VISUAL.html
+
+      - name: Publicar resultados (unicamente como GitHub Actions artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f04-fidelidad-piloto-${{ github.run_number }}
+          path: reportes/
+          if-no-files-found: warn
+          retention-days: 30

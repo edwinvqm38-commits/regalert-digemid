@@ -145,17 +145,37 @@ def _resumen(seleccion: list[dict], candidatas: list[dict], excluidas: list[dict
         clave = e.get("f03_classification") or e["motivo"]
         por_motivo_exclusion[clave] = por_motivo_exclusion.get(clave, 0) + 1
 
+    por_extraction_method: dict[str, int] = {}
+    for fila in seleccion:
+        clave = fila.get("extraction_method") or "SIN_METODO"
+        por_extraction_method[clave] = por_extraction_method.get(clave, 0) + 1
+
+    con_sha256 = sum(1 for f in seleccion if f.get("pdf_sha256"))
+    total = len(seleccion)
+
     return {
         "normas_excluidas": len(excluidas),
         "por_motivo_exclusion": por_motivo_exclusion,
         "paginas_candidatas_tras_gate_f03": len(candidatas),
-        "paginas_seleccionadas": len(seleccion),
+        "paginas_seleccionadas": total,
         "normas_en_muestra": len({f["document_key"] for f in seleccion}),
+        # Verificacion explicita del gate: si esto no da 100%, el manifest
+        # NO esta apto (ver seguridad epistemologica F-04, punto 6/10).
+        "con_sha256_pct": round(100 * con_sha256 / total, 1) if total else None,
         "distribucion_por_razon_de_riesgo": dict(
             sorted(por_razon.items(), key=lambda kv: -kv[1])
         ),
+        "distribucion_por_metodo_extraccion": dict(
+            sorted(por_extraction_method.items(), key=lambda kv: -kv[1])
+        ),
+        "paginas_texto_digital": sum(1 for f in seleccion if not f.get("ocr_used")),
+        "paginas_ocr_previo": sum(1 for f in seleccion if f.get("ocr_used")),
         "multinorma_en_muestra": sum(
             1 for f in seleccion if f["f03_classification"] == "PDF_CONTIENE_NORMA_EN_MULTINORMA"),
+        "f03_classification_en_muestra": {
+            clasif: sum(1 for f in seleccion if f["f03_classification"] == clasif)
+            for clasif in sorted({f["f03_classification"] for f in seleccion})
+        },
     }
 
 
@@ -204,6 +224,11 @@ def main() -> int:
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    # Resumen aparte, liviano: para auditar el gate F-03/F-02/SHA256 sin
+    # tener que abrir el manifest completo (que trae el texto de cada pagina).
+    (out / "F04_RESUMEN_SELECCION.json").write_text(
+        json.dumps(resumen, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
 
     print("\n" + "=" * 72)
     print("F-04-A — MANIFEST DEL PILOTO — SOLO LECTURA, NADA ESCRITO EN SUPABASE")
@@ -212,6 +237,7 @@ def main() -> int:
         print(f"  {k:34} {v}")
     print(f"\nManifest: {out / f'{MANIFEST_BASENAME}.csv'}")
     print(f"Detalle:  {out / f'{MANIFEST_BASENAME}.json'} ({len(excluidas)} normas excluidas, con motivo)")
+    print(f"Resumen:  {out / 'F04_RESUMEN_SELECCION.json'}")
     return 0
 
 

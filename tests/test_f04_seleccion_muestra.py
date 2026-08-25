@@ -273,6 +273,34 @@ class TestPaginaSinComparacionCompletaNoSeVerifica(unittest.TestCase):
         self.assertNotEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
         self.assertEqual(estado, "DISCREPANCIA_ENTRE_MOTORES")
 
+    def test_pymupdf_y_pdfplumber_de_acuerdo_no_bastan_si_el_render_discrepa(self):
+        """PyMuPDF y pdfplumber leen la MISMA capa embebida: que concuerden
+        entre sí no es evidencia independiente si esa capa está mal. Solo el
+        cruce contra el render (Tesseract, una fuente de lectura distinta)
+        puede verificar. Antes de esta corrección, dos lecturas de la misma
+        capa que coincidían ya bastaban para VERIFICADA_AUTOMATICAMENTE,
+        aunque el render dijera otra cosa."""
+        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0,
+                                texto="Artículo 13.- Deróguese la norma")
+        estado, _, _ = estado_verificacion_f04(
+            {"pymupdf": "Artículo 13.- Deróguese la norma",
+             "pdfplumber": "Artículo 13.- Deróguese la norma",
+             "ocr_tesseract": "Artículo 18.- Deróguese la norma"},
+            senales,
+        )
+        self.assertNotEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
+        self.assertEqual(estado, "DISCREPANCIA_ENTRE_MOTORES")
+
+    def test_verificacion_exige_acuerdo_con_el_render_no_solo_entre_parsers(self):
+        """Caso positivo simétrico: los 3 motores deben concordar -no basta
+        con que los dos parsers de la capa embebida concuerden entre sí-."""
+        texto = "Artículo 1.- Deróguese la Resolución Ministerial N° 100-2020/MINSA"
+        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0, texto=texto)
+        estado, _, _ = estado_verificacion_f04(
+            {"pymupdf": texto, "pdfplumber": texto, "ocr_tesseract": texto}, senales,
+        )
+        self.assertEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
+
 
 class TestSeleccionDeMuestra(unittest.TestCase):
     def test_candidatas_sin_razon_de_riesgo_se_descartan(self):

@@ -315,9 +315,23 @@ def estado_verificacion_f04(
     """Envuelve `fidelidad_legal.evaluar_pagina()` con la regla adicional de
     F-04: si no corrieron los tres motores requeridos, el resultado es
     `COMPARACION_INCOMPLETA` -nunca uno de los estados VERIFICADA_*, nunca
-    por confianza declarada de un solo motor-. Con comparación completa,
-    delega en `discrepancia_entre_motores()` + `evaluar_pagina()` (F-01), sin
-    reimplementarlos.
+    por confianza declarada de un solo motor-.
+
+    Con comparación completa, la evidencia cruzada que de verdad cuenta es
+    contra el RENDER VISUAL (Tesseract), no entre pymupdf y pdfplumber entre
+    sí: ambos leen la MISMA capa de texto embebida, así que si esa capa está
+    mal -fuente rota, texto invisible, PDF escaneado con una capa OCR previa
+    de mala calidad- los dos "coinciden" en el mismo error, y esa
+    coincidencia no demuestra nada (es el mismo principio que ya documenta
+    scripts/piloto_verificacion_paginas.py, aplicado aquí a la verificación).
+    Dos motores que leen la misma fuente estando de acuerdo no son evidencia
+    independiente; el cruce contra una fuente de lectura distinta sí lo es.
+
+    Por eso: primero se exige que pymupdf y pdfplumber concuerden en los
+    tokens jurídicos (si NI SIQUIERA ellos concuerdan, ya hay evidencia de
+    discrepancia y no hace falta mirar más); pero la comparación que
+    realmente puede llevar a un estado VERIFICADA_* es la de la capa
+    embebida contra el render independiente.
     """
     if not todas_las_comparaciones_completas(textos_por_motor):
         faltantes = [m for m in MOTORES_REQUERIDOS if textos_por_motor.get(m) is None]
@@ -327,9 +341,15 @@ def estado_verificacion_f04(
             [f"no corrieron todos los motores requeridos: falta(n) {', '.join(faltantes)}"],
         )
 
-    comparacion = discrepancia_entre_motores(textos_por_motor["pymupdf"], textos_por_motor["pdfplumber"])
-    senales_completas = replace(senales, comparacion_motores=comparacion)
-    return evaluar_pagina(senales_completas)
+    cmp_parsers = discrepancia_entre_motores(textos_por_motor["pymupdf"], textos_por_motor["pdfplumber"])
+    if cmp_parsers.hay_error_juridico:
+        # Ni las dos lecturas de la MISMA capa embebida concuerdan: no hace
+        # falta el render para saber que hay un problema.
+        return evaluar_pagina(replace(senales, comparacion_motores=cmp_parsers))
+
+    referencia_embebida = textos_por_motor["pymupdf"] or textos_por_motor["pdfplumber"] or ""
+    cmp_visual = discrepancia_entre_motores(referencia_embebida, textos_por_motor["ocr_tesseract"])
+    return evaluar_pagina(replace(senales, comparacion_motores=cmp_visual))
 
 
 __all__ = [

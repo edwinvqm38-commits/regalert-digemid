@@ -38,10 +38,13 @@ from auditar_identidad_documental import analizar_norma  # noqa: E402
 from f04_seleccion_muestra import (  # noqa: E402
     apto_para_piloto_f04,
     completitud_para_f04,
+    diagnostico_ocr_pool,
     fila_manifest,
     pagina_pertenece_a_norma,
     razones_de_riesgo,
+    resumen_pool,
     seleccionar_muestra,
+    seleccionar_muestra_estratificada,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -134,12 +137,10 @@ def construir_candidatas(
     return candidatas, excluidas
 
 
-def _resumen(seleccion: list[dict], candidatas: list[dict], excluidas: list[dict]) -> dict:
-    por_razon: dict[str, int] = {}
-    for fila in seleccion:
-        for razon in fila["razon_de_riesgo"].split(";"):
-            if razon:
-                por_razon[razon] = por_razon.get(razon, 0) + 1
+def _resumen_seleccion(seleccion: list[dict], candidatas: list[dict], excluidas: list[dict]) -> dict:
+    """Resumen de UNA seleccion final (V1 o V2): ademas de la composicion
+    (que ya da `resumen_pool`), documenta cuantas normas quedaron excluidas
+    y por que -para que la exclusion sea auditable, no silenciosa-."""
     por_motivo_exclusion: dict[str, int] = {}
     for e in excluidas:
         clave = e.get("f03_classification") or e["motivo"]
@@ -150,42 +151,62 @@ def _resumen(seleccion: list[dict], candidatas: list[dict], excluidas: list[dict
         clave = fila.get("extraction_method") or "SIN_METODO"
         por_extraction_method[clave] = por_extraction_method.get(clave, 0) + 1
 
-    con_sha256 = sum(1 for f in seleccion if f.get("pdf_sha256"))
-    total = len(seleccion)
-
-    return {
+    base = resumen_pool(seleccion)
+    base.update({
         "normas_excluidas": len(excluidas),
         "por_motivo_exclusion": por_motivo_exclusion,
         "paginas_candidatas_tras_gate_f03": len(candidatas),
-        "paginas_seleccionadas": total,
-        "normas_en_muestra": len({f["document_key"] for f in seleccion}),
-        # Verificacion explicita del gate: si esto no da 100%, el manifest
-        # NO esta apto (ver seguridad epistemologica F-04, punto 6/10).
-        "con_sha256_pct": round(100 * con_sha256 / total, 1) if total else None,
-        "distribucion_por_razon_de_riesgo": dict(
-            sorted(por_razon.items(), key=lambda kv: -kv[1])
-        ),
+        "paginas_seleccionadas": base["total_paginas"],
+        "normas_en_muestra": base["normas_distintas"],
         "distribucion_por_metodo_extraccion": dict(
             sorted(por_extraction_method.items(), key=lambda kv: -kv[1])
         ),
-        "paginas_texto_digital": sum(1 for f in seleccion if not f.get("ocr_used")),
-        "paginas_ocr_previo": sum(1 for f in seleccion if f.get("ocr_used")),
-        "multinorma_en_muestra": sum(
-            1 for f in seleccion if f["f03_classification"] == "PDF_CONTIENE_NORMA_EN_MULTINORMA"),
-        "f03_classification_en_muestra": {
-            clasif: sum(1 for f in seleccion if f["f03_classification"] == clasif)
-            for clasif in sorted({f["f03_classification"] for f in seleccion})
-        },
-    }
+        "multinorma_en_muestra": base["por_f03_classification"].get(
+            "PDF_CONTIENE_NORMA_EN_MULTINORMA", 0),
+        "f03_classification_en_muestra": base["por_f03_classification"],
+    })
+    return base
+
+
+def _imprimir_resumen(titulo: str, resumen: dict) -> None:
+    print("\n" + "=" * 72)
+    print(titulo)
+    print("=" * 72)
+    for k, v in resumen.items():
+        print(f"  {k:34} {v}")
+    # Bloque JSON explicito y delimitado: pensado para leerse directamente
+    # desde los logs del job de GitHub Actions (get_job_logs), sin depender
+    # de poder descargar el artifact -algunos entornos no tienen salida a
+    # donde el artifact realmente se almacena-.
+    print("\n=== RESUMEN (JSON) ===")
+    print(json.dumps(resumen, ensure_ascii=False, indent=2))
+    print("=== FIN RESUMEN ===")
+
+
+def _escribir_csv(ruta: Path, filas: list[dict]) -> None:
+    if not filas:
+        return
+    with ruta.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(filas[0].keys()))
+        w.writeheader()
+        w.writerows(filas)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--modo", choices=["manifest", "pool_post_gate", "manifest_v2"], default="manifest",
+                        help="manifest: V1, top-N por puntaje de riesgo (comportamiento original). "
+                             "pool_post_gate: NO selecciona nada, vuelca el pool COMPLETO que paso "
+                             "el gate F-03+F-02+SHA256, para auditar que existe antes de elegir 50. "
+                             "manifest_v2: selector estratificado por cuotas (OCR/digital/tablas/"
+                             "exacta-multinorma), solo tiene sentido correrlo despues de revisar "
+                             "pool_post_gate.")
     parser.add_argument("--out-dir", default="reportes")
     parser.add_argument("--limite-normas", type=int, default=None,
                         help="Maximo de normas a auditar contra F-03 (control de costo/tiempo)")
     parser.add_argument("--limite-paginas", type=int, default=50,
-                        help="Tamano objetivo de la muestra final")
+                        help="Tamano objetivo de la muestra final (modos manifest/manifest_v2; "
+                             "ignorado en pool_post_gate, que no trunca nada)")
     parser.add_argument("--solo", default="",
                         help="document_key separadas por coma: audita SOLO esas normas")
     parser.add_argument("--con-ocr", action="store_true", default=True,
@@ -205,39 +226,75 @@ def main() -> int:
 
     inicio = time.time()
     candidatas, excluidas = construir_candidatas(supabase, normas, paginas_por_norma, args.con_ocr)
-    seleccion = seleccionar_muestra(candidatas, args.limite_paginas)
     duracion = time.time() - inicio
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    if seleccion:
-        with (out / f"{MANIFEST_BASENAME}.csv").open("w", newline="", encoding="utf-8") as fh:
-            w = csv.DictWriter(fh, fieldnames=list(seleccion[0].keys()))
-            w.writeheader()
-            w.writerows(seleccion)
+    if args.modo == "pool_post_gate":
+        # Sin seleccionar nada: el pool COMPLETO que ya paso el gate real,
+        # para decidir -con datos, no a ciegas- si hace falta un selector
+        # estratificado y con que cuotas son realmente alcanzables.
+        _escribir_csv(out / "F04_POOL_POST_GATE.csv", candidatas)
+        resumen = resumen_pool(candidatas)
+        resumen["normas_excluidas"] = len(excluidas)
+        resumen["por_motivo_exclusion_f03"] = {
+            (e.get("f03_classification") or e["motivo"]): 0 for e in excluidas
+        }
+        for e in excluidas:
+            clave = e.get("f03_classification") or e["motivo"]
+            resumen["por_motivo_exclusion_f03"][clave] = resumen["por_motivo_exclusion_f03"].get(clave, 0) + 1
+        resumen["diagnostico_ocr"] = diagnostico_ocr_pool(resumen)
+        resumen["segundos"] = round(duracion, 1)
+        (out / "F04_POOL_POST_GATE.json").write_text(
+            json.dumps({"resumen": resumen, "paginas": candidatas, "normas_excluidas": excluidas},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (out / "F04_POOL_POST_GATE_RESUMEN.json").write_text(
+            json.dumps(resumen, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        _imprimir_resumen(
+            "F-04-A.1 — POOL POST-GATE (SIN SELECCIONAR) — SOLO LECTURA, NADA ESCRITO EN SUPABASE",
+            resumen,
+        )
+        print(f"\nPool completo: {out / 'F04_POOL_POST_GATE.csv'} ({len(candidatas)} paginas)")
+        print(f"Resumen:       {out / 'F04_POOL_POST_GATE_RESUMEN.json'}")
+        return 0
 
-    resumen = _resumen(seleccion, candidatas, excluidas)
+    if args.modo == "manifest_v2":
+        seleccion, diagnostico_seleccion = seleccionar_muestra_estratificada(candidatas, args.limite_paginas)
+        basename = "F04_MANIFEST_PILOTO_V2"
+        resumen_basename = "F04_RESUMEN_SELECCION_V2"
+        titulo = "F-04-A.1 — MANIFEST V2 (ESTRATIFICADO) — SOLO LECTURA, NADA ESCRITO EN SUPABASE"
+    else:
+        seleccion = seleccionar_muestra(candidatas, args.limite_paginas)
+        diagnostico_seleccion = None
+        basename = MANIFEST_BASENAME
+        resumen_basename = "F04_RESUMEN_SELECCION"
+        titulo = "F-04-A — MANIFEST DEL PILOTO — SOLO LECTURA, NADA ESCRITO EN SUPABASE"
+
+    _escribir_csv(out / f"{basename}.csv", seleccion)
+
+    resumen = _resumen_seleccion(seleccion, candidatas, excluidas)
+    if diagnostico_seleccion is not None:
+        resumen["diagnostico_cuotas"] = diagnostico_seleccion
     resumen["segundos"] = round(duracion, 1)
-    (out / f"{MANIFEST_BASENAME}.json").write_text(
+    (out / f"{basename}.json").write_text(
         json.dumps({"resumen": resumen, "paginas": seleccion, "normas_excluidas": excluidas},
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     # Resumen aparte, liviano: para auditar el gate F-03/F-02/SHA256 sin
     # tener que abrir el manifest completo (que trae el texto de cada pagina).
-    (out / "F04_RESUMEN_SELECCION.json").write_text(
+    (out / f"{resumen_basename}.json").write_text(
         json.dumps(resumen, ensure_ascii=False, indent=2), encoding="utf-8",
     )
 
-    print("\n" + "=" * 72)
-    print("F-04-A — MANIFEST DEL PILOTO — SOLO LECTURA, NADA ESCRITO EN SUPABASE")
-    print("=" * 72)
-    for k, v in resumen.items():
-        print(f"  {k:34} {v}")
-    print(f"\nManifest: {out / f'{MANIFEST_BASENAME}.csv'}")
-    print(f"Detalle:  {out / f'{MANIFEST_BASENAME}.json'} ({len(excluidas)} normas excluidas, con motivo)")
-    print(f"Resumen:  {out / 'F04_RESUMEN_SELECCION.json'}")
+    _imprimir_resumen(titulo, resumen)
+    print(f"\nManifest: {out / f'{basename}.csv'}")
+    print(f"Detalle:  {out / f'{basename}.json'} ({len(excluidas)} normas excluidas, con motivo)")
+    print(f"Resumen:  {out / f'{resumen_basename}.json'}")
     return 0
 
 

@@ -22,12 +22,16 @@ on:
         default: "manifest"
         type: choice
         options:
-          - manifest         # gate F-03+F-02+SHA256 real -> F04_MANIFEST_PILOTO.csv/json
+          - manifest         # gate F-03+F-02+SHA256 real -> F04_MANIFEST_PILOTO.csv/json (top-N por riesgo)
+          - pool_post_gate   # F-04-A.1: NO selecciona nada, vuelca el pool COMPLETO post-gate para auditarlo
+          - manifest_v2      # F-04-A.1: selector estratificado por cuotas (OCR/digital/tablas/exacta-multinorma)
           - comparar         # 3 motores sobre un manifest YA generado -> F04_COMPARACION_MOTORES
           - revision_visual  # HTML golden dataset a partir de un manifest YA generado
           - all              # manifest -> comparar -> revision_visual, en ese orden
       limite_paginas:
-        description: "Tamano objetivo de la muestra final (manifest/all) / limite del reporte visual"
+        description: >-
+          Tamano objetivo de la muestra final (manifest/manifest_v2/all) /
+          limite del reporte visual. Ignorado en pool_post_gate (no trunca nada).
         required: false
         default: "50"
         type: string
@@ -138,6 +142,31 @@ jobs:
         run: |
           set -euo pipefail
           CMD=(python scripts/f04_generar_manifest_piloto.py
+               --out-dir reportes --limite-paginas "${{ inputs.limite_paginas }}")
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--solo "${{ inputs.document_key }}")
+          fi
+          printf 'Ejecutando: %q ' "${CMD[@]}"; printf '\n'
+          "${CMD[@]}"
+
+      - name: "F-04-A.1: pool completo POST-GATE (sin seleccionar nada)"
+        if: ${{ inputs.tarea == 'pool_post_gate' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/f04_generar_manifest_piloto.py --modo pool_post_gate --out-dir reportes)
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--solo "${{ inputs.document_key }}")
+          fi
+          printf 'Ejecutando: %q ' "${CMD[@]}"; printf '\n'
+          "${CMD[@]}"
+
+      - name: "F-04-A.1: manifest V2 (selector estratificado por cuotas)"
+        if: ${{ inputs.tarea == 'manifest_v2' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/f04_generar_manifest_piloto.py --modo manifest_v2
                --out-dir reportes --limite-paginas "${{ inputs.limite_paginas }}")
           if [[ -n "${{ inputs.document_key }}" ]]; then
             CMD+=(--solo "${{ inputs.document_key }}")

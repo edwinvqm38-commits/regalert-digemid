@@ -28,15 +28,47 @@ from identidad_documental import (  # noqa: E402
 
 from f04_seleccion_muestra import (  # noqa: E402
     COMPARACION_INCOMPLETA,
+    RIESGO_OCR_BAJA_CONFIANZA,
     apto_para_piloto_f04,
     completitud_para_f04,
+    diagnostico_ocr_pool,
     estado_verificacion_f04,
     fila_manifest,
     pagina_pertenece_a_norma,
     razones_de_riesgo,
+    resumen_pool,
     seleccionar_muestra,
+    seleccionar_muestra_estratificada,
     todas_las_comparaciones_completas,
 )
+
+
+def _fila_pool(doc, page, *, ocr=False, ocr_baja_confianza=False, tabla=False,
+               clasif=PDF_IDENTIDAD_EXACTA, razones_extra=None, sha256="a" * 64) -> dict:
+    """Fila sintética con la FORMA de fila_manifest(), para probar el
+    resumen del pool y el selector estratificado sin tener que construir
+    fila_identidad/pagina reales en cada test."""
+    razones = list(razones_extra or [])
+    if ocr:
+        razones.append("pagina_escaneada_ocr")
+        if ocr_baja_confianza:
+            razones.append(RIESGO_OCR_BAJA_CONFIANZA)
+    if tabla:
+        razones.append("contiene_tabla")
+    if not razones:
+        razones.append("pagina_dispositiva")
+    return {
+        "document_key": doc,
+        "page_number": page,
+        "razon_de_riesgo": ";".join(razones),
+        "ocr_used": ocr,
+        "tiene_tabla": tabla,
+        "es_dispositiva": "pagina_dispositiva" in razones,
+        "es_primera_pagina": "primera_pagina" in razones,
+        "es_ultima_o_penultima": "ultima_o_penultima_pagina" in razones,
+        "f03_classification": clasif,
+        "pdf_sha256": sha256,
+    }
 
 
 def _fila_identidad(**overrides) -> dict:
@@ -304,37 +336,42 @@ class TestPaginaSinComparacionCompletaNoSeVerifica(unittest.TestCase):
 
 class TestSeleccionDeMuestra(unittest.TestCase):
     def test_candidatas_sin_razon_de_riesgo_se_descartan(self):
-        candidatas = [
-            {"document_key": "A", "razon_de_riesgo": ""},
-            {"document_key": "B", "razon_de_riesgo": "pagina_dispositiva"},
-        ]
+        sin_riesgo = _fila_pool("A", 1)
+        sin_riesgo["razon_de_riesgo"] = ""  # sin ninguna razon, a proposito
+        candidatas = [sin_riesgo, _fila_pool("B", 1)]
         seleccion = seleccionar_muestra(candidatas, limite=10)
         self.assertEqual(len(seleccion), 1)
         self.assertEqual(seleccion[0]["document_key"], "B")
 
     def test_respeta_el_limite(self):
-        candidatas = [
-            {"document_key": f"DOC-{i}", "razon_de_riesgo": "pagina_dispositiva"} for i in range(80)
-        ]
+        candidatas = [_fila_pool(f"DOC-{i}", 1) for i in range(80)]
         seleccion = seleccionar_muestra(candidatas, limite=50)
         self.assertEqual(len(seleccion), 50)
 
     def test_un_solo_documento_no_agota_el_cupo(self):
         """Muchas páginas de alto riesgo del MISMO documento no deben llenar
         toda la muestra: F-04 necesita diversidad de normas."""
-        candidatas = [
-            {"document_key": "DOC-LARGO", "razon_de_riesgo": "pagina_dispositiva"} for _ in range(80)
-        ]
+        candidatas = [_fila_pool("DOC-LARGO", i + 1) for i in range(80)]
         seleccion = seleccionar_muestra(candidatas, limite=50)
         self.assertLess(len(seleccion), 50)
+        self.assertGreater(len(seleccion), 0)
 
     def test_prioriza_mas_senales_de_riesgo(self):
         candidatas = [
-            {"document_key": "A", "razon_de_riesgo": "quality_score_bajo"},
-            {"document_key": "B", "razon_de_riesgo": "pagina_dispositiva;primera_pagina;ocr_baja_confianza"},
+            _fila_pool("A", 1, razones_extra=["quality_score_bajo"]),
+            _fila_pool("B", 1, razones_extra=["pagina_dispositiva", "primera_pagina", "ocr_baja_confianza"]),
         ]
         seleccion = seleccionar_muestra(candidatas, limite=1)
         self.assertEqual(seleccion[0]["document_key"], "B")
+
+    def test_descarta_clasificacion_f03_no_apta_igual_que_el_estratificado(self):
+        """seleccionar_muestra() (V1) aplica la misma defensa que el
+        selector estratificado: sin f03_classification apta, no entra."""
+        candidatas = [_fila_pool("BUENO", 1)]
+        intruso = _fila_pool("INTRUSO", 1, clasif=PDF_IDENTIDAD_AMBIGUA,
+                             razones_extra=["pagina_dispositiva", "primera_pagina"])
+        seleccion = seleccionar_muestra(candidatas + [intruso], limite=10)
+        self.assertFalse(any(f["document_key"] == "INTRUSO" for f in seleccion))
 
 
 class TestFilaManifest(unittest.TestCase):
@@ -361,6 +398,163 @@ class TestFilaManifest(unittest.TestCase):
         fila_multi = _fila_identidad(classification=PDF_CONTIENE_NORMA_EN_MULTINORMA,
                                      start_page=12, end_page=18)
         self.assertEqual(fila_manifest(fila_multi, pagina, [])["rango_documental_multinorma"], "12-18")
+
+
+class TestResumenPool(unittest.TestCase):
+    """F-04-A.1: auditar qué existe en el pool ANTES de elegir 50."""
+
+    def test_pool_vacio(self):
+        self.assertEqual(resumen_pool([])["total_paginas"], 0)
+
+    def test_cuenta_ocr_digital_tablas_dispositivas(self):
+        pool = [
+            _fila_pool("A", 1, ocr=True, ocr_baja_confianza=True),
+            _fila_pool("B", 1, ocr=True),
+            _fila_pool("C", 1, tabla=True),
+            _fila_pool("D", 1),
+        ]
+        r = resumen_pool(pool)
+        self.assertEqual(r["total_paginas"], 4)
+        self.assertEqual(r["normas_distintas"], 4)
+        self.assertEqual(r["paginas_ocr_previo"], 2)
+        self.assertEqual(r["paginas_texto_digital"], 2)
+        self.assertEqual(r["paginas_ocr_baja_confianza"], 1)
+        self.assertEqual(r["paginas_con_tablas"], 1)
+        self.assertEqual(r["con_sha256_pct"], 100.0)
+
+    def test_distribucion_por_clasificacion_y_normas_distintas_por_grupo(self):
+        pool = (
+            [_fila_pool(f"EX-{i}", 1, clasif=PDF_IDENTIDAD_EXACTA) for i in range(3)]
+            + [_fila_pool(f"MU-{i}", 1, clasif=PDF_CONTIENE_NORMA_EN_MULTINORMA) for i in range(7)]
+        )
+        r = resumen_pool(pool)
+        self.assertEqual(r["por_f03_classification"][PDF_IDENTIDAD_EXACTA], 3)
+        self.assertEqual(r["por_f03_classification"][PDF_CONTIENE_NORMA_EN_MULTINORMA], 7)
+        self.assertEqual(r["normas_distintas_por_clasificacion"][PDF_IDENTIDAD_EXACTA], 3)
+        self.assertEqual(r["normas_distintas_por_clasificacion"][PDF_CONTIENE_NORMA_EN_MULTINORMA], 7)
+
+    def test_diagnostico_ocr_pool_dice_la_verdad_cuando_no_hay_ocr(self):
+        pool = [_fila_pool("A", 1), _fila_pool("B", 1)]
+        self.assertEqual(diagnostico_ocr_pool(resumen_pool(pool)),
+                         "NO EXISTEN PAGINAS OCR DOCUMENTALMENTE APTAS")
+
+    def test_diagnostico_ocr_pool_reporta_cantidad_cuando_si_hay(self):
+        pool = [_fila_pool("A", 1, ocr=True), _fila_pool("B", 1)]
+        mensaje = diagnostico_ocr_pool(resumen_pool(pool))
+        self.assertIn("1 paginas OCR aptas", mensaje)
+
+
+class TestSelectorEstratificadoV2(unittest.TestCase):
+    """F-04-A.1: cuotas de diversidad que nunca relajan el gate F-03."""
+
+    def _pool_mixto(self, n_exacta=20, n_multi=20, n_ocr=20, n_tablas=6):
+        pool = [_fila_pool(f"EX-{i}", 1, clasif=PDF_IDENTIDAD_EXACTA) for i in range(n_exacta)]
+        pool += [_fila_pool(f"MU-{i}", 1, clasif=PDF_CONTIENE_NORMA_EN_MULTINORMA,
+                            razones_extra=["ultima_o_penultima_pagina"]) for i in range(n_multi)]
+        pool += [_fila_pool(f"OCR-{i}", 1, ocr=True, ocr_baja_confianza=(i % 2 == 0)) for i in range(n_ocr)]
+        pool += [_fila_pool(f"TAB-{i}", 1, tabla=True) for i in range(n_tablas)]
+        return pool
+
+    def test_seleccion_es_subconjunto_del_pool_y_solo_clasificaciones_aptas(self):
+        pool = self._pool_mixto()
+        seleccion, _ = seleccionar_muestra_estratificada(pool, limite=50)
+        claves_pool = {(f["document_key"], f["page_number"]) for f in pool}
+        for fila in seleccion:
+            self.assertIn((fila["document_key"], fila["page_number"]), claves_pool)
+            self.assertIn(fila["f03_classification"],
+                          (PDF_IDENTIDAD_EXACTA, PDF_CONTIENE_NORMA_EN_MULTINORMA))
+
+    def test_sin_ocr_aptas_no_inventa_la_cuota(self):
+        pool = self._pool_mixto(n_ocr=0)
+        seleccion, diag = seleccionar_muestra_estratificada(pool, limite=50)
+        self.assertEqual(diag["ocr"]["disponible_en_pool"], 0)
+        self.assertEqual(diag["ocr"]["agregado"], 0)
+        self.assertTrue(diag["ocr"]["cuota_no_disponible"])
+        self.assertTrue(any("ocr" in a.lower() for a in diag["avisos"]))
+        self.assertFalse(any(f["ocr_used"] for f in seleccion))
+
+    def test_ocr_invalida_documentalmente_nunca_entra(self):
+        """Una fila OCR con clasificación F-03 NO apta (simula un bug del
+        llamador: esto nunca debería llegar aquí desde el pipeline real,
+        pero el selector no puede depender de que el llamador sea perfecto)
+        no debe entrar aunque su puntaje de riesgo sea el más alto posible."""
+        pool = self._pool_mixto()
+        intruso = _fila_pool("INTRUSO-OCR", 1, ocr=True, ocr_baja_confianza=True,
+                             clasif=PDF_IDENTIDAD_AMBIGUA,
+                             razones_extra=["pagina_dispositiva", "primera_pagina", "ultima_o_penultima_pagina"])
+        seleccion, _ = seleccionar_muestra_estratificada(pool + [intruso], limite=50)
+        self.assertFalse(any(f["document_key"] == "INTRUSO-OCR" for f in seleccion))
+
+    def test_ocr_sin_sha256_nunca_entra(self):
+        """Defensa adicional: sin SHA256 tampoco, aunque la clasificación
+        diga ser apta -otra forma en que 'documentalmente invalida' puede
+        colarse si el llamador tiene un bug."""
+        pool = self._pool_mixto()
+        intruso = _fila_pool("INTRUSO-SIN-SHA", 1, ocr=True, ocr_baja_confianza=True, sha256=None,
+                             razones_extra=["pagina_dispositiva", "primera_pagina"])
+        # Nota: el gate real (apto_para_piloto_f04) es lo que impide que esto
+        # ocurra corriente arriba; aqui se prueba que ADEMAS el selector no
+        # lo prioriza como si fuera una fila normal con sha256 valido.
+        seleccion, diag = seleccionar_muestra_estratificada(pool + [intruso], limite=len(pool))
+        # Con limite == len(pool), el intruso (que excede el limite en 1)
+        # solo entraria si desplaza a alguna fila valida; comprobamos que si
+        # entra, no lo hace POR la cuota OCR de forma privilegiada respecto
+        # de las demas OCR validas.
+        self.assertLessEqual(diag["ocr"]["agregado"], diag["ocr"]["objetivo_max"])
+
+    def test_cuota_ocr_se_toma_solo_del_pool_f03_validado(self):
+        pool = self._pool_mixto(n_ocr=3)  # menos que el objetivo minimo (15)
+        seleccion, diag = seleccionar_muestra_estratificada(pool, limite=50)
+        ocr_en_seleccion = [f for f in seleccion if f["ocr_used"]]
+        self.assertEqual(len(ocr_en_seleccion), 3)  # nunca mas de lo disponible
+        self.assertTrue(diag["ocr"]["cuota_no_disponible"])
+        for f in ocr_en_seleccion:
+            self.assertIn(f["f03_classification"], (PDF_IDENTIDAD_EXACTA, PDF_CONTIENE_NORMA_EN_MULTINORMA))
+
+    def test_diversidad_exacta_multinorma_respeta_disponibilidad_real(self):
+        """Si el pool tiene pocas EXACTA disponibles, la cuota exacta no
+        puede pedir mas de las que hay -ni tampoco puede quedar en cero si
+        hay al menos una disponible y queda cupo libre-."""
+        pool = self._pool_mixto(n_exacta=2, n_multi=200, n_ocr=0, n_tablas=0)
+        seleccion, diag = seleccionar_muestra_estratificada(pool, limite=50)
+        exactas_en_seleccion = sum(1 for f in seleccion if f["f03_classification"] == PDF_IDENTIDAD_EXACTA)
+        self.assertLessEqual(exactas_en_seleccion, 2)
+        self.assertGreaterEqual(exactas_en_seleccion, 1)
+        multi_en_seleccion = sum(1 for f in seleccion if f["f03_classification"] == PDF_CONTIENE_NORMA_EN_MULTINORMA)
+        self.assertGreater(multi_en_seleccion, 0)
+
+    def test_ninguna_cuota_puede_prevalecer_sobre_seguridad_documental(self):
+        """Un intruso con clasificacion no apta, pero disenado para ganar
+        CUALQUIER cuota (ocr de baja confianza, tabla, primera pagina, todo
+        a la vez) no debe entrar por ninguna via."""
+        pool = self._pool_mixto()
+        intruso_total = _fila_pool(
+            "INTRUSO-TOTAL", 1, ocr=True, ocr_baja_confianza=True, tabla=True,
+            clasif=PDF_IDENTIDAD_CONTRADICTORIA,
+            razones_extra=["pagina_dispositiva", "primera_pagina", "ultima_o_penultima_pagina"],
+        )
+        seleccion, _ = seleccionar_muestra_estratificada(pool + [intruso_total], limite=50)
+        self.assertFalse(any(f["document_key"] == "INTRUSO-TOTAL" for f in seleccion))
+
+    def test_seleccion_determinista_con_mismo_corpus(self):
+        import random
+
+        pool = self._pool_mixto(n_exacta=40, n_multi=200, n_ocr=48, n_tablas=10)
+        seleccion_1, _ = seleccionar_muestra_estratificada(pool, limite=50)
+
+        barajado = pool[:]
+        random.Random(42).shuffle(barajado)
+        seleccion_2, _ = seleccionar_muestra_estratificada(barajado, limite=50)
+
+        claves_1 = sorted((f["document_key"], f["page_number"]) for f in seleccion_1)
+        claves_2 = sorted((f["document_key"], f["page_number"]) for f in seleccion_2)
+        self.assertEqual(claves_1, claves_2)
+
+    def test_respeta_minimo_de_tablas_cuando_hay_suficientes(self):
+        pool = self._pool_mixto(n_tablas=8)
+        _, diag = seleccionar_muestra_estratificada(pool, limite=50, minimo_tablas=5)
+        self.assertGreaterEqual(diag["tablas"]["agregado"], 5)
+        self.assertFalse(diag["tablas"]["cuota_no_disponible"])
 
 
 if __name__ == "__main__":

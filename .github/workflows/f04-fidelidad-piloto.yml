@@ -27,6 +27,7 @@ on:
           - manifest_v2      # F-04-A.1: selector estratificado por cuotas (OCR/digital/tablas/exacta-multinorma)
           - comparar         # 3 motores sobre un manifest YA generado -> F04_COMPARACION_MOTORES
           - revision_visual  # HTML golden dataset a partir de un manifest YA generado
+          - golden_package   # F-04-B.1: paquete visual autocontenido (imagenes 300 DPI) a partir de un manifest + comparacion YA generados
           - all              # manifest -> comparar -> revision_visual, en ese orden
       limite_paginas:
         description: >-
@@ -53,13 +54,24 @@ on:
         type: string
       manifest_run_id:
         description: >-
-          Opcional, solo para 'comparar'/'revision_visual': run ID de
-          GitHub Actions (el numero en la URL del run, NO el run_number
-          que aparece en el nombre del artifact) de una corrida ANTERIOR
-          de este mismo workflow desde la cual descargar su artifact
-          antes de operar. Vacio = usar el reportes/ de ESTE run
-          (requiere haber corrido antes 'manifest'/'manifest_v2' en el
-          mismo run, como hace 'all').
+          Opcional, para 'comparar'/'revision_visual'/'golden_package': run
+          ID de GitHub Actions (el numero en la URL del run, NO el
+          run_number que aparece en el nombre del artifact) de una corrida
+          ANTERIOR de este mismo workflow desde la cual descargar el
+          manifest (F04_MANIFEST_PILOTO_V2/F04_MANIFEST_PILOTO) antes de
+          operar. Vacio = usar el reportes/ de ESTE run (requiere haber
+          corrido antes 'manifest'/'manifest_v2' en el mismo run, como hace
+          'all').
+        required: false
+        default: ""
+        type: string
+      comparacion_run_id:
+        description: >-
+          Opcional, solo para 'golden_package': run ID de GitHub Actions de
+          una corrida ANTERIOR desde la cual descargar
+          F04_COMPARACION_MOTORES.json antes de generar el paquete visual.
+          Vacio = usar el reportes/ de ESTE run (requiere haber corrido
+          'comparar' antes en el mismo run).
         required: false
         default: ""
         type: string
@@ -126,7 +138,9 @@ jobs:
           ARCHIVOS_F04=(
             scripts/f04_generar_manifest_piloto.py
             scripts/f04_comparar_motores_piloto.py
+            scripts/f04b_generar_paquete_golden.py
             agents/f04_seleccion_muestra.py
+            agents/f04b_paquete_golden.py
             scripts/auditar_identidad_documental.py
             scripts/piloto_verificacion_paginas.py
             scripts/generar_revision_visual.py
@@ -163,14 +177,23 @@ jobs:
           # intente.
           echo "Confirmado: cero escrituras, cero migraciones, cero Edge deploy."
 
-      - name: Descargar manifest de una corrida anterior (opcional, solo comparar/revision_visual)
+      - name: Descargar manifest de una corrida anterior (opcional, comparar/revision_visual/golden_package)
         if: >-
-          (inputs.tarea == 'comparar' || inputs.tarea == 'revision_visual') &&
+          (inputs.tarea == 'comparar' || inputs.tarea == 'revision_visual' || inputs.tarea == 'golden_package') &&
           inputs.manifest_run_id != ''
         uses: actions/download-artifact@v4
         with:
           path: reportes
           run-id: ${{ inputs.manifest_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+
+      - name: Descargar comparacion de motores de una corrida anterior (opcional, solo golden_package)
+        if: ${{ inputs.tarea == 'golden_package' && inputs.comparacion_run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          path: reportes
+          run-id: ${{ inputs.comparacion_run_id }}
           github-token: ${{ github.token }}
           merge-multiple: true
 
@@ -244,11 +267,40 @@ jobs:
             --limite "${{ inputs.limite_paginas }}" \
             --out reportes/F04_REVISION_VISUAL.html
 
+      - name: "F-04-B.1: paquete visual golden (imagenes 300 DPI, autocontenido)"
+        if: ${{ inputs.tarea == 'golden_package' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="reportes/${{ inputs.manifest_basename }}.json"
+          COMPARACION="reportes/F04_COMPARACION_MOTORES.json"
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "No existe $MANIFEST en esta corrida."
+            echo "Indica manifest_run_id con el run ID de una corrida anterior que ya genero el manifest V2."
+            exit 1
+          fi
+          if [[ ! -f "$COMPARACION" ]]; then
+            echo "No existe $COMPARACION en esta corrida."
+            echo "Indica comparacion_run_id con el run ID de una corrida anterior que ya corrio 'comparar'."
+            exit 1
+          fi
+          python scripts/f04b_generar_paquete_golden.py \
+            --manifest "$MANIFEST" --comparacion "$COMPARACION" --out-dir reportes/golden_package
+
       - name: Publicar resultados (unicamente como GitHub Actions artifact)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: f04-fidelidad-piloto-${{ github.run_number }}
           path: reportes/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: "Publicar paquete visual golden (artifact unico y autocontenido)"
+        if: ${{ always() && inputs.tarea == 'golden_package' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: F04B_GOLDEN_REVISION_PACKAGE
+          path: reportes/golden_package/
           if-no-files-found: warn
           retention-days: 30

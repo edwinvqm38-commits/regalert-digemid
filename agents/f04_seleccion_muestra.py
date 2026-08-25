@@ -18,8 +18,13 @@ CALCULADOS por las capas de F-02/F-03 (el mismo `analizar_norma()` de
     2. si una página concreta pertenece al rango probado de esa norma
        (`pagina_pertenece_a_norma`, solo relevante en documentos multinorma);
     3. por qué esa página es de alto riesgo (`razones_de_riesgo`);
-    4. cuáles ~50 páginas entran a la muestra final (`seleccionar_muestra`);
-    5. si una página puede marcarse verificada, dado que exige comparación
+    4. qué existe REALMENTE en el pool completo post-gate, antes de elegir
+       nada (`resumen_pool`, `diagnostico_ocr_pool`) -F-04-A.1: auditar antes
+       de seleccionar, para no diseñar cuotas sobre un pool que no se conoce-;
+    5. cuáles ~50 páginas entran a la muestra final, por puro puntaje de
+       riesgo (`seleccionar_muestra`) o por cuotas de diversidad que nunca
+       relajan el gate (`seleccionar_muestra_estratificada`);
+    6. si una página puede marcarse verificada, dado que exige comparación
        COMPLETA entre motores -nunca por confianza declarada de uno solo-
        (`estado_verificacion_f04`).
 
@@ -229,11 +234,16 @@ def razones_de_riesgo(
 # 3) Manifest y selección de la muestra (~50 páginas)
 # ---------------------------------------------------------------------------
 def fila_manifest(fila_identidad: dict, pagina: dict, razones: list[str]) -> dict:
-    """Una fila de F04_MANIFEST_PILOTO.csv. Todas las claves que pide F-04."""
+    """Una fila de F04_MANIFEST_PILOTO.csv (y de F04_POOL_POST_GATE.csv, que
+    usa la misma forma sobre el pool completo sin truncar). Todas las claves
+    que pide F-04, más columnas explícitas para lo que ya estaba implícito
+    en `razon_de_riesgo` -primera/última página, tabla, tokens- para que el
+    CSV se pueda auditar por columna sin tener que parsear la razón."""
     rango = None
     if fila_identidad.get("classification") == PDF_CONTIENE_NORMA_EN_MULTINORMA:
         rango = f"{fila_identidad.get('start_page')}-{fila_identidad.get('end_page')}"
     texto = pagina.get("text_normalized") or pagina.get("text_raw") or ""
+    tokens = [r.split(":", 1)[1] for r in razones if r.startswith("token_sensible:")]
     return {
         "document_key": fila_identidad.get("document_key"),
         "identidad_normativa": fila_identidad.get("identity_expected"),
@@ -246,6 +256,11 @@ def fila_manifest(fila_identidad: dict, pagina: dict, razones: list[str]) -> dic
         "extraction_method": pagina.get("extraction_method"),
         "quality_score": pagina.get("quality_score"),
         "ocr_used": bool(pagina.get("ocr_used")),
+        "ocr_confidence": pagina.get("ocr_confidence"),
+        "tiene_tabla": bool(pagina.get("has_tables")),
+        "es_primera_pagina": RIESGO_PRIMERA_PAGINA in razones,
+        "es_ultima_o_penultima": RIESGO_ULTIMA_O_PENULTIMA in razones,
+        "tokens_juridicos_sensibles": ",".join(tokens),
         "razon_de_riesgo": ";".join(razones),
         "texto_almacenado": texto,
         "f03_classification": fila_identidad.get("classification"),
@@ -258,25 +273,45 @@ def _puntaje_riesgo(razones: list[str]) -> int:
     return sum(2 if r in _RAZONES_PRIORITARIAS else 1 for r in razones)
 
 
+def _con_riesgo_y_gate_valido(candidatas: list[dict]) -> list[dict]:
+    """Filtro defensivo: además de exigir alguna razón de riesgo, vuelve a
+    comprobar que la clasificación F-03 sea una de las aptas.
+
+    `candidatas` debería llegar ya gateada por `apto_para_piloto_f04` -este
+    módulo no vuelve a resolver identidad ni a tocar la red-, pero ninguna
+    cuota de diversidad (ni OCR, ni tablas, ni el balance exacta/multinorma)
+    puede ser el motivo por el que una fila con clasificación no apta entre
+    a la muestra. Si algo con `f03_classification` inválida llegara hasta
+    aquí -un bug en el llamador-, esta función lo descarta igual.
+    """
+    return [
+        c for c in candidatas
+        if c.get("razon_de_riesgo") and c.get("f03_classification") in CLASIFICACIONES_UTILIZABLES
+    ]
+
+
+def _orden_riesgo(fila: dict) -> tuple:
+    """Clave de orden determinista: mayor puntaje de riesgo primero: empates
+    se resuelven por (document_key, page_number), nunca por el orden de
+    llegada de la consulta a Supabase -que no está garantizado-."""
+    return (-_puntaje_riesgo(fila["razon_de_riesgo"].split(";")), fila["document_key"], fila["page_number"])
+
+
 def seleccionar_muestra(candidatas: list[dict], limite: int = 50) -> list[dict]:
     """`candidatas`: filas de manifest ya construidas por `fila_manifest`
-    (deben traer `razon_de_riesgo` y `document_key`), de normas que YA
-    pasaron `apto_para_piloto_f04` y páginas que YA pasaron
-    `pagina_pertenece_a_norma`.
+    (deben traer `razon_de_riesgo`, `document_key` y `f03_classification`),
+    de normas que YA pasaron `apto_para_piloto_f04` y páginas que YA
+    pasaron `pagina_pertenece_a_norma`.
 
     Selecciona hasta `limite`, priorizando por número y tipo de señales de
     riesgo, con un tope por documento para que un solo PDF largo no agote el
     cupo -la muestra debe cubrir muchas normas distintas, no una a fondo-.
     Descarta candidatas sin ninguna razón de riesgo: esta función no decide
     qué es alto riesgo, solo ordena y recorta lo que ya se decidió que sí lo
-    es.
+    es. Determinista: mismo `candidatas` (en cualquier orden) siempre
+    produce la misma selección.
     """
-    con_riesgo = [c for c in candidatas if c.get("razon_de_riesgo")]
-    ordenadas = sorted(
-        con_riesgo,
-        key=lambda c: _puntaje_riesgo(c["razon_de_riesgo"].split(";")),
-        reverse=True,
-    )
+    ordenadas = sorted(_con_riesgo_y_gate_valido(candidatas), key=_orden_riesgo)
 
     tope_por_documento = max(3, limite // 8)
     seleccion: list[dict] = []
@@ -290,6 +325,228 @@ def seleccionar_muestra(candidatas: list[dict], limite: int = 50) -> list[dict]:
         seleccion.append(fila)
         cupo_por_doc[doc] = cupo_por_doc.get(doc, 0) + 1
     return seleccion
+
+
+# ---------------------------------------------------------------------------
+# 3.1) Auditoría del pool POST-GATE (F-04-A.1): qué existe antes de elegir 50
+# ---------------------------------------------------------------------------
+def resumen_pool(filas: list[dict]) -> dict:
+    """Composición real de un conjunto de filas de manifest F-04 (misma
+    forma que produce `fila_manifest`). Sirve tanto para auditar el POOL
+    COMPLETO post-gate F-03 -antes de seleccionar nada- como para auditar
+    una selección final: la composición se calcula igual, solo cambia qué
+    lista se le pasa. No decide nada, solo cuenta lo que ya está en `filas`.
+    """
+    total = len(filas)
+    if total == 0:
+        return {
+            "total_paginas": 0, "normas_distintas": 0, "con_sha256_pct": None,
+            "paginas_ocr_previo": 0, "normas_distintas_ocr_previo": 0,
+            "paginas_texto_digital": 0, "normas_distintas_texto_digital": 0,
+            "paginas_ocr_baja_confianza": 0, "paginas_quality_score_bajo": 0,
+            "paginas_con_tablas": 0, "paginas_dispositivas": 0,
+            "paginas_primera": 0, "paginas_ultima_o_penultima": 0,
+            "por_f03_classification": {}, "normas_distintas_por_clasificacion": {},
+            "distribucion_por_razon_de_riesgo": {},
+        }
+
+    def cuenta_razon(tag: str) -> int:
+        return sum(1 for f in filas if tag in (f.get("razon_de_riesgo") or "").split(";"))
+
+    def normas_donde(pred) -> int:
+        return len({f["document_key"] for f in filas if pred(f)})
+
+    por_clasificacion: dict[str, int] = {}
+    for f in filas:
+        c = f.get("f03_classification")
+        por_clasificacion[c] = por_clasificacion.get(c, 0) + 1
+
+    por_razon: dict[str, int] = {}
+    for f in filas:
+        for r in (f.get("razon_de_riesgo") or "").split(";"):
+            if r:
+                por_razon[r] = por_razon.get(r, 0) + 1
+
+    con_sha256 = sum(1 for f in filas if f.get("pdf_sha256"))
+
+    return {
+        "total_paginas": total,
+        "normas_distintas": len({f["document_key"] for f in filas}),
+        "con_sha256_pct": round(100 * con_sha256 / total, 1),
+        "paginas_ocr_previo": sum(1 for f in filas if f.get("ocr_used")),
+        "normas_distintas_ocr_previo": normas_donde(lambda f: f.get("ocr_used")),
+        "paginas_texto_digital": sum(1 for f in filas if not f.get("ocr_used")),
+        "normas_distintas_texto_digital": normas_donde(lambda f: not f.get("ocr_used")),
+        "paginas_ocr_baja_confianza": cuenta_razon(RIESGO_OCR_BAJA_CONFIANZA),
+        "paginas_quality_score_bajo": cuenta_razon(RIESGO_QUALITY_BAJO),
+        "paginas_con_tablas": sum(1 for f in filas if f.get("tiene_tabla")),
+        "paginas_dispositivas": sum(1 for f in filas if f.get("es_dispositiva")),
+        "paginas_primera": sum(1 for f in filas if f.get("es_primera_pagina")),
+        "paginas_ultima_o_penultima": sum(1 for f in filas if f.get("es_ultima_o_penultima")),
+        "por_f03_classification": por_clasificacion,
+        "normas_distintas_por_clasificacion": {
+            c: normas_donde(lambda f, c=c: f.get("f03_classification") == c) for c in por_clasificacion
+        },
+        "distribucion_por_razon_de_riesgo": dict(sorted(por_razon.items(), key=lambda kv: -kv[1])),
+    }
+
+
+def diagnostico_ocr_pool(resumen: dict) -> str:
+    """Mensaje explícito exigido por F-04-A.1: si el pool post-gate no tiene
+    NINGUNA página OCR apta, se dice tal cual -no se rellena la cuota con
+    documentos ambiguos o no encontrados para simular diversidad-."""
+    if resumen.get("paginas_ocr_previo", 0) == 0:
+        return "NO EXISTEN PAGINAS OCR DOCUMENTALMENTE APTAS"
+    return (f"{resumen['paginas_ocr_previo']} paginas OCR aptas en el pool "
+            f"({resumen.get('paginas_ocr_baja_confianza', 0)} de baja confianza)")
+
+
+# ---------------------------------------------------------------------------
+# 3.2) Selección estratificada V2 (F-04-A.1)
+# ---------------------------------------------------------------------------
+def seleccionar_muestra_estratificada(
+    candidatas: list[dict],
+    limite: int = 50,
+    objetivo_digital: tuple[int, int] = (15, 20),
+    objetivo_ocr: tuple[int, int] = (15, 20),
+    minimo_tablas: int = 5,
+) -> tuple[list[dict], dict]:
+    """Muestreo por cuotas que NUNCA relaja el gate F-03: opera
+    exclusivamente sobre `candidatas` ya gateadas (mismo filtro defensivo
+    que `seleccionar_muestra`), y cada cuota se llena SOLO con lo que el
+    pool realmente tiene -si no alcanza, se reporta como cuota no
+    disponible en vez de rellenarla con páginas fuera de gate o de menor
+    señal de riesgo de la que la cuota pide-.
+
+    El balance EXACTA vs MULTINORMA no usa una proporción fija: para el
+    cupo que queda después de las cuotas OCR/digital/tablas, se reparte en
+    proporción a la disponibilidad REAL de cada clasificación en lo que
+    resta del pool.
+
+    Devuelve (seleccion, diagnostico). `diagnostico` documenta qué cuota se
+    cumplió, cuál no y por qué, más `avisos` con el literal
+    `CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO` cuando corresponda.
+    """
+    con_riesgo = _con_riesgo_y_gate_valido(candidatas)
+
+    def ordenar(lista: list[dict]) -> list[dict]:
+        return sorted(lista, key=_orden_riesgo)
+
+    tope_por_documento = max(3, limite // 8)
+    seleccion: list[dict] = []
+    vistos: set[tuple] = set()
+    cupo_por_doc: dict[str, int] = {}
+
+    def clave(f: dict) -> tuple:
+        return (f["document_key"], f["page_number"])
+
+    def agregar(pool: list[dict], cuota: int) -> int:
+        agregados = 0
+        for fila in pool:
+            if agregados >= cuota or len(seleccion) >= limite:
+                break
+            k = clave(fila)
+            if k in vistos or cupo_por_doc.get(fila["document_key"], 0) >= tope_por_documento:
+                continue
+            seleccion.append(fila)
+            vistos.add(k)
+            cupo_por_doc[fila["document_key"]] = cupo_por_doc.get(fila["document_key"], 0) + 1
+            agregados += 1
+        return agregados
+
+    diagnostico: dict = {"avisos": []}
+
+    ocr_pool = ordenar([c for c in con_riesgo if c.get("ocr_used")])
+    objetivo_ocr_max = min(objetivo_ocr[1], len(ocr_pool))
+    agregado_ocr = agregar(ocr_pool, objetivo_ocr_max)
+    diagnostico["ocr"] = {
+        "objetivo_min": objetivo_ocr[0], "objetivo_max": objetivo_ocr[1],
+        "disponible_en_pool": len(ocr_pool), "agregado": agregado_ocr,
+        "baja_confianza_en_pool": sum(1 for f in ocr_pool if RIESGO_OCR_BAJA_CONFIANZA in f["razon_de_riesgo"].split(";")),
+        "baja_confianza_seleccionada": sum(
+            1 for f in seleccion if RIESGO_OCR_BAJA_CONFIANZA in f["razon_de_riesgo"].split(";")),
+        "cuota_no_disponible": len(ocr_pool) < objetivo_ocr[0],
+    }
+    if diagnostico["ocr"]["cuota_no_disponible"]:
+        diagnostico["avisos"].append(
+            f"CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO: ocr (objetivo minimo "
+            f"{objetivo_ocr[0]}, disponible en el pool {len(ocr_pool)})"
+        )
+
+    # Tablas ANTES que el llenado flexible de "digital": es una cuota con
+    # piso fijo pequeño (5+) que "digital" (hasta 20) podria agotar por
+    # completo si corriera primero, dejando la cuota de tablas sin cupo
+    # aunque el pool si tuviera suficientes.
+    tabla_pool = ordenar([c for c in con_riesgo if c.get("tiene_tabla")])
+    agregado_tablas = agregar(tabla_pool, minimo_tablas)
+    diagnostico["tablas"] = {
+        "objetivo_minimo": minimo_tablas, "disponible_en_pool": len(tabla_pool),
+        "agregado": agregado_tablas, "cuota_no_disponible": len(tabla_pool) < minimo_tablas,
+    }
+    if diagnostico["tablas"]["cuota_no_disponible"]:
+        diagnostico["avisos"].append(
+            f"CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO: tablas (objetivo minimo "
+            f"{minimo_tablas}, disponible en el pool {len(tabla_pool)})"
+        )
+
+    digital_pool = ordenar([c for c in con_riesgo if not c.get("ocr_used")])
+    objetivo_digital_max = min(objetivo_digital[1], len(digital_pool))
+    agregado_digital = agregar(digital_pool, objetivo_digital_max)
+    diagnostico["digital"] = {
+        "objetivo_min": objetivo_digital[0], "objetivo_max": objetivo_digital[1],
+        "disponible_en_pool": len(digital_pool), "agregado": agregado_digital,
+        "cuota_no_disponible": len(digital_pool) < objetivo_digital[0],
+    }
+    if diagnostico["digital"]["cuota_no_disponible"]:
+        diagnostico["avisos"].append(
+            f"CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO: digital (objetivo minimo "
+            f"{objetivo_digital[0]}, disponible en el pool {len(digital_pool)})"
+        )
+
+    # Balance EXACTA vs MULTINORMA para TODO el cupo que queda tras las
+    # cuotas de OCR/tablas/digital -no solo un piso seguido de un relleno
+    # generico-: `_con_riesgo_y_gate_valido` ya filtra a las unicas dos
+    # clasificaciones aptas, asi que "restantes" queda completamente
+    # particionado entre estas dos. Un relleno generico por puntaje puro
+    # aqui reintroduciria el sesgo que motiva esta funcion: si muchas
+    # paginas empatan en puntaje (comun cuando comparten la misma razon,
+    # p.ej. "ultima_o_penultima_pagina"), el desempate por document_key
+    # favorece a quien tenga menos claves "por delante" alfabeticamente, NO
+    # a una clasificacion sobre otra -asi es como una muestra puede terminar
+    # dominada por multinorma sin que nadie lo haya decidido-.
+    restantes = [c for c in con_riesgo if clave(c) not in vistos]
+    restantes_exacta = ordenar([c for c in restantes if c.get("f03_classification") == PDF_IDENTIDAD_EXACTA])
+    restantes_multi = ordenar([c for c in restantes if c.get("f03_classification") == PDF_CONTIENE_NORMA_EN_MULTINORMA])
+    cupo_libre = limite - len(seleccion)
+    total_clasificable = len(restantes_exacta) + len(restantes_multi)
+    cuota_exacta_objetivo = 0
+    if cupo_libre > 0 and total_clasificable and restantes_exacta:
+        cuota_exacta_objetivo = min(
+            len(restantes_exacta), cupo_libre,
+            max(1, round(cupo_libre * len(restantes_exacta) / total_clasificable)),
+        )
+    agregado_exacta_cuota = agregar(restantes_exacta, cuota_exacta_objetivo)
+    # El resto del cupo va primero a multinorma; si su pool se agota antes
+    # de llenar el cupo, lo que sobra se rellena con mas exacta -nunca con
+    # paginas fuera de gate, y nunca con un desempate alfabetico ciego-.
+    agregado_multi = agregar(restantes_multi, limite - len(seleccion))
+    agregado_exacta_resto = agregar(restantes_exacta, limite - len(seleccion)) if len(seleccion) < limite else 0
+
+    diagnostico["exacta_vs_multinorma"] = {
+        "disponible_exacta_restante": len(restantes_exacta),
+        "disponible_multinorma_restante": len(restantes_multi),
+        "cuota_exacta_objetivo": cuota_exacta_objetivo,
+        "agregado_exacta_total": agregado_exacta_cuota + agregado_exacta_resto,
+        "agregado_multinorma_total": agregado_multi,
+    }
+
+    diagnostico["seleccionadas_total"] = len(seleccion)
+    diagnostico["normas_distintas_seleccionadas"] = len({f["document_key"] for f in seleccion})
+    diagnostico["por_f03_classification_seleccion"] = {
+        c: sum(1 for f in seleccion if f.get("f03_classification") == c)
+        for c in sorted({f.get("f03_classification") for f in seleccion})
+    }
+    return sorted(seleccion, key=_orden_riesgo), diagnostico
 
 
 # ---------------------------------------------------------------------------
@@ -359,10 +616,18 @@ __all__ = [
     "razones_de_riesgo",
     "fila_manifest",
     "seleccionar_muestra",
+    "seleccionar_muestra_estratificada",
+    "resumen_pool",
+    "diagnostico_ocr_pool",
     "MOTORES_REQUERIDOS",
     "COMPARACION_INCOMPLETA",
     "todas_las_comparaciones_completas",
     "estado_verificacion_f04",
     "PDF_IDENTIDAD_EXACTA",
     "PDF_CONTIENE_NORMA_EN_MULTINORMA",
+    "RIESGO_OCR_BAJA_CONFIANZA",
+    "RIESGO_QUALITY_BAJO",
+    "RIESGO_PRIMERA_PAGINA",
+    "RIESGO_ULTIMA_O_PENULTIMA",
+    "RIESGO_TABLA",
 ]

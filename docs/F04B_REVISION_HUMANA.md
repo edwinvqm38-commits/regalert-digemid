@@ -1,5 +1,15 @@
 # F-04-B — Instructivo de revisión humana (golden)
 
+> **Actualización F-04-B.1:** ya existe un artifact único y autocontenido,
+> `F04B_GOLDEN_REVISION_PACKAGE`, que trae la herramienta, los datos **y las 50
+> imágenes de página ya renderizadas** en una sola descarga — con eso, la revisión
+> ya no requiere abrir el PDF por separado ni buscar la página a mano (el enlace al
+> PDF queda solo como respaldo). Si tienes acceso a ese paquete, descárgalo y sigue
+> el `README.md` que trae adentro; el resto de este documento sigue siendo válido
+> para las secciones 6 en adelante (qué mirar, las 5 decisiones, qué es crítico,
+> cómo guardar y entregar) y como referencia si solo cuentas con el artifact anterior
+> (`f04-fidelidad-piloto-4`, sin imágenes).
+
 Guía paso a paso, para una persona **sin conocimientos técnicos**, para revisar las 50
 páginas del Manifest V2 y producir la transcripción validada (`golden_text`) de cada una.
 

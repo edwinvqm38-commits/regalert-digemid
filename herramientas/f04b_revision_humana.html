@@ -115,6 +115,24 @@
   .tabla-pares th, .tabla-pares td { border: 1px solid var(--borde); padding: 5px 7px; text-align: left; }
   .tabla-pares th { background: var(--gris-claro); }
   .si-critico { color: var(--rojo); font-weight: 700; }
+  .visor-imagen {
+    border: 2px solid var(--azul); border-radius: 8px; overflow: hidden; margin-bottom: 14px; background: white;
+  }
+  .visor-imagen .controles-imagen {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    background: var(--azul-claro); padding: 6px 10px; font-size: 12.5px;
+  }
+  .visor-imagen .controles-imagen button { padding: 4px 10px; font-size: 12px; }
+  .visor-imagen .nivel-zoom { font-weight: 700; min-width: 46px; text-align: center; }
+  .visor-imagen .contenedor-scroll-imagen {
+    overflow: auto; max-height: 640px; background: #52525b; text-align: center; padding: 10px;
+  }
+  .visor-imagen .contenedor-scroll-imagen img { display: inline-block; max-width: none; }
+  .sin-imagen-aviso {
+    border: 1px dashed var(--gris); border-radius: 8px; padding: 14px; margin-bottom: 14px;
+    color: var(--gris); font-size: 13px; background: var(--gris-claro);
+  }
+  .estado-imagenes { font-size: 12px; color: var(--gris); }
   .textos-candidatos { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
   @media (max-width: 900px) { .textos-candidatos { grid-template-columns: 1fr; } }
   .caja-texto {
@@ -160,11 +178,15 @@
       <input type="file" id="input-comparacion" accept=".json">
     </div>
     <div class="grupo">
-      <label>2&#41; Manifest V2 (opcional, da el enlace al PDF)</label>
+      <label>2&#41; Manifest V2 (opcional, da el enlace al PDF de respaldo)</label>
       <input type="file" id="input-manifest" accept=".json">
     </div>
     <div class="grupo">
-      <label>3&#41; Continuar progreso guardado (opcional)</label>
+      <label>3&#41; Índice de imágenes (recomendado, muestra la página)</label>
+      <input type="file" id="input-indice-imagenes" accept=".json">
+    </div>
+    <div class="grupo">
+      <label>4&#41; Continuar progreso guardado (opcional)</label>
       <input type="file" id="input-progreso" accept=".json">
     </div>
     <div class="grupo">
@@ -174,6 +196,7 @@
     <div class="grupo">
       <label>Progreso</label>
       <span class="progreso"><span class="n" id="contador-revisadas">0</span> / <span id="contador-total">0</span> revisadas</span>
+      <span class="estado-imagenes" id="estado-imagenes"></span>
     </div>
     <button id="btn-exportar-json" disabled>Exportar decisiones (JSON)</button>
     <button id="btn-exportar-csv" class="secundario" disabled>Exportar tabla (CSV, solo lectura)</button>
@@ -190,9 +213,12 @@
   <p><strong>Pasos por cada página:</strong></p>
   <ol>
     <li>En la barra lateral izquierda, haz clic en una página (las no revisadas tienen un punto gris).</li>
-    <li>Si aparece un enlace "Abrir PDF", ábrelo y ubica la página indicada (el número de página del manifest, no
-      necesariamente el número que muestra tu lector de PDF si el archivo tiene portada u otras páginas antes).</li>
-    <li>Lee las 4 cajas de texto (guardado, PyMuPDF, pdfplumber, Tesseract) y compáralas contra el PDF real.</li>
+    <li>La imagen de esa página exacta aparece arriba, dentro de la misma herramienta &mdash;no hace falta abrir el PDF
+      por separado ni buscar la página a mano. Usa los botones "+"/"−" para acercar o alejar, o "Abrir imagen a
+      tamaño completo" para verla al máximo detalle en una pestaña nueva (útil para números, artículos, porcentajes,
+      tablas y letra pequeña). El enlace al PDF completo queda solo como respaldo, por si necesitas ver páginas
+      vecinas.</li>
+    <li>Lee las 4 cajas de texto (guardado, PyMuPDF, pdfplumber, Tesseract) y compáralas contra la imagen.</li>
     <li>Revisa la caja amarilla "Diagnóstico automático": te dice en qué NO coinciden los motores entre sí. Es una
       ayuda para saber dónde mirar con más cuidado &mdash;no es una verificación.</li>
     <li>Marca una decisión (más abajo se explica cada una) y ajusta el texto en <code>golden_text</code> hasta que sea
@@ -290,11 +316,16 @@
   ];
   var CLAVE_LOCALSTORAGE = "f04b_revision_progreso_v1";
 
+  var NIVELES_ZOOM = [0.5, 0.75, 1, 1.5, 2, 3, 4];
+  var ANCHO_BASE_IMAGEN_PX = 800;
+
   var paginas = [];          // arreglo de registros de F04_COMPARACION_MOTORES.json (.paginas)
   var manifestPorClave = {}; // clave -> fila del manifest V2
+  var indicePorClave = {};   // clave -> {archivo_imagen, estado} de F04B_INDICE_IMAGENES.json
   var decisiones = {};       // clave -> {decision, golden_text, observaciones, revisado_en}
   var claveActual = null;
   var cambiosSinExportar = false;
+  var zoomActualIdx = NIVELES_ZOOM.indexOf(1);
 
   function clave(docKey, pageNumber) { return docKey + "::" + pageNumber; }
   function escapeHtml(s) {
@@ -409,19 +440,38 @@
       "stored_vs_embedded", "stored_vs_render_tesseract", "tesseract_reproducibility"];
     var filasPares = pares.map(function (campo) { return filaParPares(campo, p[campo]); }).join("");
 
+    var indiceImg = indicePorClave[k];
+    var tieneImagen = indiceImg && indiceImg.estado === "RENDERIZADO_OK" && indiceImg.archivo_imagen;
+
     var html = '<div class="cabecera-pagina">';
     html += "<h2>" + escapeHtml(p.document_key) + " &mdash; página " + escapeHtml(p.page_number) + "</h2>";
     if (m) {
       html += '<div class="meta-linea">Clasificación F-03: <b>' + escapeHtml(m.f03_classification || "?") + "</b>";
       if (m.pdf_page_count) html += " · PDF completo tiene " + escapeHtml(m.pdf_page_count) + " página(s)";
       html += "</div>";
-      if (m.pdf_url) {
-        html += '<div class="meta-linea">📄 <a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener">Abrir PDF</a> y ubicar la página ' + escapeHtml(p.page_number) + "</div>";
-      }
-    } else {
+    } else if (!tieneImagen) {
       html += '<div class="meta-linea">No se cargó el Manifest V2: no hay enlace directo al PDF disponible. (Puedes cargarlo arriba en el punto 2.)</div>';
     }
     html += "</div>";
+
+    if (tieneImagen) {
+      html += '<div class="visor-imagen">' +
+        '<div class="controles-imagen">' +
+        '<button type="button" class="secundario" id="btn-zoom-menos">&minus;</button>' +
+        '<span class="nivel-zoom" id="nivel-zoom-actual"></span>' +
+        '<button type="button" class="secundario" id="btn-zoom-mas">+</button>' +
+        '<button type="button" class="gris" id="btn-zoom-reset">Restablecer</button>' +
+        '<a class="secundario" style="text-decoration:none;padding:4px 10px;border-radius:6px;border:1px solid var(--azul);color:var(--azul);" href="' + escapeHtml(indiceImg.archivo_imagen) + '" target="_blank" rel="noopener">Abrir imagen a tamaño completo ⤢</a>' +
+        (m && m.pdf_url ? '<a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px;">(Respaldo) Abrir PDF completo, página ' + escapeHtml(p.page_number) + "</a>" : "") +
+        "</div>" +
+        '<div class="contenedor-scroll-imagen"><img id="imagen-pagina-actual" src="' + escapeHtml(indiceImg.archivo_imagen) + '" alt="Página ' + escapeHtml(p.page_number) + " de " + escapeHtml(p.document_key) + '"></div>' +
+        "</div>";
+    } else {
+      html += '<div class="sin-imagen-aviso">⚠ No hay imagen disponible para esta página en el paquete cargado' +
+        (indiceImg && indiceImg.estado ? " (motivo: " + escapeHtml(indiceImg.estado) + ")" : " (carga el archivo del punto 3, \"Índice de imágenes\", si aún no lo hiciste)") +
+        (m && m.pdf_url ? '. Usa el enlace de respaldo: <a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener">Abrir PDF</a> y ubica la página ' + escapeHtml(p.page_number) + "." : ".") +
+        "</div>";
+    }
 
     html += '<div class="badges">';
     html += '<span class="badge estado-' + escapeHtml(p.estado || "") + '">' + escapeHtml(ESTADOS_LABEL[p.estado] || p.estado || "sin estado") + "</span>";
@@ -470,6 +520,23 @@
     var det = document.getElementById("detalle");
     det.innerHTML = html;
 
+    if (tieneImagen) {
+      zoomActualIdx = NIVELES_ZOOM.indexOf(1);
+      aplicarZoom();
+      document.getElementById("btn-zoom-mas").addEventListener("click", function () {
+        zoomActualIdx = Math.min(zoomActualIdx + 1, NIVELES_ZOOM.length - 1);
+        aplicarZoom();
+      });
+      document.getElementById("btn-zoom-menos").addEventListener("click", function () {
+        zoomActualIdx = Math.max(zoomActualIdx - 1, 0);
+        aplicarZoom();
+      });
+      document.getElementById("btn-zoom-reset").addEventListener("click", function () {
+        zoomActualIdx = NIVELES_ZOOM.indexOf(1);
+        aplicarZoom();
+      });
+    }
+
     det.querySelectorAll(".copiar-golden").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var fuente = btn.dataset.fuente;
@@ -516,6 +583,15 @@
       actualizarContadores();
       seleccionarPagina(k);
     });
+  }
+
+  function aplicarZoom() {
+    var img = document.getElementById("imagen-pagina-actual");
+    var etiqueta = document.getElementById("nivel-zoom-actual");
+    if (!img || !etiqueta) return;
+    var factor = NIVELES_ZOOM[zoomActualIdx];
+    img.style.width = Math.round(ANCHO_BASE_IMAGEN_PX * factor) + "px";
+    etiqueta.textContent = Math.round(factor * 100) + "%";
   }
 
   function seleccionarPagina(k) {
@@ -577,6 +653,30 @@
     if (claveActual) seleccionarPagina(claveActual);
   }
 
+  function cargarIndiceImagenes(datos) {
+    var filas = Array.isArray(datos) ? datos : datos.imagenes;
+    if (!Array.isArray(filas)) {
+      alert('El archivo no tiene el formato esperado (falta la lista "imagenes"). Verifica que sea F04B_INDICE_IMAGENES.json.');
+      return;
+    }
+    indicePorClave = {};
+    filas.forEach(function (fila) {
+      indicePorClave[clave(fila.document_key, fila.page_number)] = fila;
+    });
+    actualizarEstadoImagenes();
+    if (claveActual) seleccionarPagina(claveActual);
+  }
+
+  function actualizarEstadoImagenes() {
+    var el = document.getElementById("estado-imagenes");
+    var total = Object.keys(indicePorClave).length;
+    if (!total) { el.textContent = ""; return; }
+    var conImagen = Object.keys(indicePorClave).filter(function (k) {
+      return indicePorClave[k].estado === "RENDERIZADO_OK";
+    }).length;
+    el.textContent = "Imágenes: " + conImagen + "/" + total + (conImagen < total ? " (algunas páginas no tienen imagen disponible)" : "");
+  }
+
   function leerArchivoJSON(file, onOk) {
     var lector = new FileReader();
     lector.onload = function () {
@@ -595,6 +695,9 @@
   });
   document.getElementById("input-manifest").addEventListener("change", function (e) {
     if (e.target.files[0]) leerArchivoJSON(e.target.files[0], cargarManifest);
+  });
+  document.getElementById("input-indice-imagenes").addEventListener("change", function (e) {
+    if (e.target.files[0]) leerArchivoJSON(e.target.files[0], cargarIndiceImagenes);
   });
   document.getElementById("input-progreso").addEventListener("change", function (e) {
     if (!e.target.files[0]) return;

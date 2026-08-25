@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>F-04-B — Revisión humana (golden) — SOLO LECTURA / SIN INTERNET</title>
+<style>
+  :root {
+    --azul: #1d4ed8;
+    --azul-claro: #eff6ff;
+    --verde: #15803d;
+    --verde-claro: #f0fdf4;
+    --rojo: #b91c1c;
+    --rojo-claro: #fef2f2;
+    --gris: #6b7280;
+    --gris-claro: #f3f4f6;
+    --borde: #d1d5db;
+    --texto: #111827;
+    --amarillo-claro: #fffbeb;
+    --amarillo: #92400e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    color: var(--texto);
+    background: #f9fafb;
+  }
+  pre, textarea, code, .mono { font-family: Consolas, "Courier New", monospace; }
+  header {
+    position: sticky; top: 0; z-index: 20;
+    background: white; border-bottom: 2px solid var(--borde);
+    padding: 10px 16px;
+  }
+  header h1 { margin: 0 0 2px 0; font-size: 18px; }
+  header .sub { color: var(--gris); font-size: 13px; margin-bottom: 8px; }
+  .barra {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    padding-top: 6px; border-top: 1px solid var(--gris-claro);
+  }
+  .barra .grupo {
+    display: flex; flex-direction: column; gap: 2px;
+    border: 1px solid var(--borde); border-radius: 6px; padding: 6px 10px;
+    background: var(--gris-claro);
+  }
+  .barra label { font-size: 11px; font-weight: 600; color: var(--gris); }
+  .barra input[type=file] { font-size: 12px; max-width: 220px; }
+  .barra input[type=text] { font-size: 13px; padding: 3px 5px; }
+  button {
+    cursor: pointer; border: 1px solid var(--azul); background: var(--azul);
+    color: white; padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+  }
+  button.secundario { background: white; color: var(--azul); }
+  button.gris { background: white; color: var(--texto); border-color: var(--borde); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  .progreso { font-size: 13px; font-weight: 600; }
+  .progreso .n { color: var(--azul); }
+  details.panel {
+    background: white; border: 1px solid var(--borde); border-radius: 8px;
+    margin: 10px 16px; padding: 10px 14px;
+  }
+  details.panel > summary { cursor: pointer; font-weight: 700; font-size: 14px; padding: 4px 0; }
+  details.panel table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  details.panel table th, details.panel table td {
+    border: 1px solid var(--borde); padding: 6px 8px; text-align: left; vertical-align: top;
+  }
+  details.panel table th { background: var(--gris-claro); }
+  .critico { color: var(--rojo); font-weight: 700; }
+  .no-critico { color: var(--verde); }
+  main.layout {
+    display: flex; align-items: flex-start; gap: 0;
+    height: calc(100vh - 190px); min-height: 400px;
+  }
+  #sidebar {
+    width: 300px; flex: 0 0 300px; overflow-y: auto; height: 100%;
+    border-right: 1px solid var(--borde); background: white;
+  }
+  #sidebar .fila-doc {
+    padding: 8px 10px; border-bottom: 1px solid var(--gris-claro); cursor: pointer;
+    font-size: 12.5px; display: flex; gap: 8px; align-items: flex-start;
+  }
+  #sidebar .fila-doc:hover { background: var(--azul-claro); }
+  #sidebar .fila-doc.activa { background: var(--azul-claro); border-left: 4px solid var(--azul); }
+  #sidebar .punto {
+    width: 10px; height: 10px; border-radius: 50%; margin-top: 3px; flex: 0 0 10px;
+    background: var(--gris);
+  }
+  #sidebar .punto.revisada { background: var(--verde); }
+  #sidebar .clave-doc { font-weight: 600; word-break: break-all; }
+  #sidebar .badge-estado { font-size: 10.5px; color: var(--gris); display: block; margin-top: 2px; }
+  #detalle { flex: 1 1 auto; overflow-y: auto; height: 100%; padding: 16px 20px; background: #f9fafb; }
+  #detalle .vacio { color: var(--gris); font-style: italic; padding: 40px; text-align: center; }
+  .cabecera-pagina h2 { margin: 0 0 4px 0; font-size: 17px; }
+  .meta-linea { font-size: 13px; color: var(--gris); margin-bottom: 4px; }
+  .meta-linea a { color: var(--azul); }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px 0; }
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+    border: 1px solid var(--borde); background: var(--gris-claro);
+  }
+  .badge.estado-CONCORDANCIA_AUTOMATICA_ALTA { background: var(--verde-claro); color: var(--verde); border-color: var(--verde); }
+  .badge.estado-DISCREPANCIA_ENTRE_FUENTES { background: var(--rojo-claro); color: var(--rojo); border-color: var(--rojo); }
+  .badge.estado-REQUIERE_REVISION_HUMANA { background: var(--amarillo-claro); color: var(--amarillo); border-color: var(--amarillo); }
+  .badge.estado-COMPARACION_INCOMPLETA,
+  .badge.estado-PDF_NO_DESCARGABLE,
+  .badge.estado-PAGINA_FUERA_DEL_PDF { background: var(--gris-claro); color: var(--gris); }
+  .caja-diagnostico {
+    border: 1px solid var(--borde); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
+    background: #fffef7; font-size: 13px;
+  }
+  .caja-diagnostico .titulo { font-weight: 700; margin-bottom: 4px; }
+  .caja-diagnostico ul { margin: 4px 0 0 18px; padding: 0; }
+  .tabla-pares { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 14px; }
+  .tabla-pares th, .tabla-pares td { border: 1px solid var(--borde); padding: 5px 7px; text-align: left; }
+  .tabla-pares th { background: var(--gris-claro); }
+  .si-critico { color: var(--rojo); font-weight: 700; }
+  .textos-candidatos { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  @media (max-width: 900px) { .textos-candidatos { grid-template-columns: 1fr; } }
+  .caja-texto {
+    border: 1px solid var(--borde); border-radius: 8px; overflow: hidden; background: white;
+  }
+  .caja-texto .cabecera-caja {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--gris-claro); padding: 5px 9px; font-size: 12.5px; font-weight: 700;
+  }
+  .caja-texto .cabecera-caja button { padding: 3px 8px; font-size: 11px; }
+  .caja-texto pre {
+    margin: 0; padding: 8px 9px; max-height: 220px; overflow: auto; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .caja-texto .vacio-motor { color: var(--gris); font-style: italic; padding: 8px 9px; font-size: 12px; }
+  .bloque-decision {
+    border: 2px solid var(--azul); border-radius: 8px; padding: 12px; background: var(--azul-claro);
+    margin-bottom: 14px;
+  }
+  .bloque-decision .opcion { display: block; margin: 6px 0; font-size: 13.5px; }
+  .bloque-decision .opcion small { color: var(--gris); display: block; margin-left: 24px; }
+  textarea#golden_text { width: 100%; min-height: 160px; font-size: 13px; padding: 8px; border: 1px solid var(--borde); border-radius: 6px; }
+  textarea#observaciones { width: 100%; min-height: 60px; font-size: 13px; padding: 8px; border: 1px solid var(--borde); border-radius: 6px; }
+  label.etiqueta { font-weight: 700; font-size: 13px; display: block; margin: 10px 0 4px 0; }
+  .acciones-pagina { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+  .aviso-vacio-golden { color: var(--amarillo); font-size: 12.5px; margin-top: 4px; }
+  footer { text-align: center; color: var(--gris); font-size: 11.5px; padding: 14px; }
+  .campo-vacio-carga { padding: 60px 20px; text-align: center; color: var(--gris); }
+  .campo-vacio-carga strong { color: var(--texto); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>F-04-B &mdash; Revisión humana de páginas (golden)</h1>
+  <div class="sub">
+    Herramienta 100% local y sin conexión a internet. No escribe en Supabase. No envía nada a ningún servidor.
+    Todo lo que hagas queda en tu computadora hasta que tú decidas exportarlo.
+  </div>
+  <div class="barra">
+    <div class="grupo">
+      <label>1&#41; Comparación de motores (obligatorio)</label>
+      <input type="file" id="input-comparacion" accept=".json">
+    </div>
+    <div class="grupo">
+      <label>2&#41; Manifest V2 (opcional, da el enlace al PDF)</label>
+      <input type="file" id="input-manifest" accept=".json">
+    </div>
+    <div class="grupo">
+      <label>3&#41; Continuar progreso guardado (opcional)</label>
+      <input type="file" id="input-progreso" accept=".json">
+    </div>
+    <div class="grupo">
+      <label>Tu nombre (para el archivo exportado)</label>
+      <input type="text" id="nombre-revisor" placeholder="Ej: María Pérez">
+    </div>
+    <div class="grupo">
+      <label>Progreso</label>
+      <span class="progreso"><span class="n" id="contador-revisadas">0</span> / <span id="contador-total">0</span> revisadas</span>
+    </div>
+    <button id="btn-exportar-json" disabled>Exportar decisiones (JSON)</button>
+    <button id="btn-exportar-csv" class="secundario" disabled>Exportar tabla (CSV, solo lectura)</button>
+  </div>
+</header>
+
+<details class="panel" id="panel-instrucciones" open>
+  <summary>📋 Instrucciones — léelas antes de empezar</summary>
+  <p><strong>Qué es esto:</strong> por cada página de la muestra, el sistema ya extrajo el texto con 4 fuentes distintas
+  (lo que ya estaba guardado, y 3 lecturas frescas: PyMuPDF, pdfplumber y Tesseract/OCR). Ninguna de esas 4 fuentes se
+  considera "la verdad" todavía. Tu trabajo es decidir, leyendo el PDF real cuando haga falta, cuál de esas 4 es
+  correcta &mdash;o si ninguna lo es, escribir tú el texto correcto&mdash; y dejar ese texto como <code>golden_text</code>: la
+  transcripción validada por un humano.</p>
+  <p><strong>Pasos por cada página:</strong></p>
+  <ol>
+    <li>En la barra lateral izquierda, haz clic en una página (las no revisadas tienen un punto gris).</li>
+    <li>Si aparece un enlace "Abrir PDF", ábrelo y ubica la página indicada (el número de página del manifest, no
+      necesariamente el número que muestra tu lector de PDF si el archivo tiene portada u otras páginas antes).</li>
+    <li>Lee las 4 cajas de texto (guardado, PyMuPDF, pdfplumber, Tesseract) y compáralas contra el PDF real.</li>
+    <li>Revisa la caja amarilla "Diagnóstico automático": te dice en qué NO coinciden los motores entre sí. Es una
+      ayuda para saber dónde mirar con más cuidado &mdash;no es una verificación.</li>
+    <li>Marca una decisión (más abajo se explica cada una) y ajusta el texto en <code>golden_text</code> hasta que sea
+      exactamente lo que dice el PDF.</li>
+    <li>Escribe cualquier observación relevante (por ejemplo: "firma ilegible", "tabla revisada celda por celda").</li>
+    <li>Haz clic en "Guardar esta página". La herramienta pasa automáticamente a la siguiente página pendiente.</li>
+  </ol>
+  <p><strong>Las 5 decisiones posibles:</strong></p>
+  <ul>
+    <li><b>CORRECTO_ALMACENADO</b>: el texto que YA estaba guardado en el sistema es correcto tal cual está.</li>
+    <li><b>CORRECTO_PYMUPDF</b>: el texto de PyMuPDF es correcto tal cual está.</li>
+    <li><b>CORRECTO_PDFPLUMBER</b>: el texto de pdfplumber es correcto tal cual está.</li>
+    <li><b>CORRECTO_TESSERACT</b>: el texto de Tesseract (OCR) es correcto tal cual está.</li>
+    <li><b>NINGUNO_TRANSCRIBIR_MANUAL</b>: ninguna de las 4 fuentes es correcta tal cual &mdash;tuviste que escribir o
+      corregir el texto tú misma/o leyendo el PDF.</li>
+  </ul>
+  <p>Cada caja de texto tiene un botón "Copiar a golden_text": solo copia el texto como punto de partida para que lo
+  edites, <u>no marca ninguna decisión por sí solo</u>. La decisión siempre la eliges tú a mano, aparte.</p>
+  <p><strong>Guardar tu trabajo &mdash; muy importante:</strong> este archivo HTML puede o no recordar tu avance si cierras
+  el navegador (depende de cómo lo hayas abierto). La única forma <u>garantizada</u> de no perder tu trabajo es hacer
+  clic en <b>"Exportar decisiones (JSON)"</b> y guardar ese archivo en tu computadora, sobre todo antes de cerrar la
+  ventana o cambiar de computadora. Si vuelves otro día, vuelve a cargar los archivos 1 y 2 igual que la primera vez,
+  y además carga en el punto <b>3) Continuar progreso guardado</b> el último JSON que exportaste: tu avance
+  reaparecerá tal como lo dejaste.</p>
+  <p><strong>Cuando termines todas las páginas (o cuando quieras entregar un avance parcial):</strong> exporta el JSON
+  y envía ese archivo &mdash;adjúntalo en tu próxima conversación con Claude, o por el medio que hayan acordado&mdash; para
+  que se puedan calcular las métricas de error contra tu revisión (golden). No hace falta que envíes el CSV: ese es
+  solo para que tú lo revises en Excel si quieres, la herramienta no lo puede volver a leer.</p>
+</details>
+
+<details class="panel" id="panel-guia-diferencias">
+  <summary>⚖️ Guía rápida: qué ignorar y qué es jurídicamente crítico</summary>
+  <table>
+    <tr><th>Diferencia</th><th>¿Qué hacer?</th></tr>
+    <tr><td>Tildes/acentos</td><td class="no-critico">Ignorar si la palabra se reconoce igual. No es crítico.</td></tr>
+    <tr><td>Espacios de más o de menos</td><td class="no-critico">Ignorar. No es crítico.</td></tr>
+    <tr><td>Saltos de línea en un lugar distinto</td><td class="no-critico">Ignorar dónde corta la línea; importa el orden de las palabras, no el layout.</td></tr>
+    <tr><td>Encabezados / pies de página</td><td>Inclúyelos tal cual aparecen en el PDF si tienes dudas &mdash;es más
+      seguro incluir de más. <span class="critico">Es CRÍTICO</span> solo si el encabezado o pie contiene un número de
+      norma o una fecha oficial que no aparece en ningún otro lugar de la página.</td></tr>
+    <tr><td>Números de artículo, numeral, inciso, literal</td><td class="critico">CRÍTICO. Un dígito distinto apunta a
+      una disposición legal distinta.</td></tr>
+    <tr><td>Fechas</td><td class="critico">CRÍTICO. Un día, mes o año distinto cambia la vigencia de la norma.</td></tr>
+    <tr><td>Porcentajes</td><td class="critico">CRÍTICO.</td></tr>
+    <tr><td>Números de norma (Ley, D.S., D.L., D.U., R.M., R.D., R.S. + número/año)</td><td class="critico">CRÍTICO. Un
+      dígito distinto es una norma completamente distinta.</td></tr>
+    <tr><td>Montos en soles (S/.) y plazos en días</td><td class="critico">CRÍTICO.</td></tr>
+    <tr><td>Dosis, concentraciones, medidas (mg, mL, %, °C)</td><td class="critico">CRÍTICO &mdash;puede ser un riesgo
+      sanitario directo, no solo documental.</td></tr>
+    <tr><td>Verbos como DEROGA / MODIFICA / SUSTITUYE / INCORPORA / SUSPENDE, y la palabra "NO" justo antes de ellos</td>
+      <td class="critico">EXTREMADAMENTE CRÍTICO. "Deróguese" y "NO deróguese" son efectos legales opuestos, aunque
+      ningún número haya cambiado. Lee esta parte con el máximo cuidado.</td></tr>
+    <tr><td>Tablas (filas y columnas)</td><td class="critico">CRÍTICO. Ningún motor automático verifica si una fila o
+      columna quedó bien ubicada &mdash;siempre léela contra el PDF real, celda por celda, antes de aceptar cualquier
+      candidato.</td></tr>
+    <tr><td>Firmas y sellos</td><td>No se pueden transcribir con certeza como texto. Anota en "observaciones" algo como
+      "firma/sello no verificable por texto" &mdash;no lo marques como un error de transcripción.</td></tr>
+  </table>
+</details>
+
+<main class="layout">
+  <div id="sidebar"></div>
+  <div id="detalle"><div class="vacio">Carga el archivo "Comparación de motores (JSON)" arriba para empezar.</div></div>
+</main>
+
+<footer>
+  F-04-B · Herramienta offline, sin llamadas de red, sin escritura en Supabase · CONCORDANCIA != VERDAD · Ante duda: NO VERIFICADO
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var ESTADOS_LABEL = {
+    CONCORDANCIA_AUTOMATICA_ALTA: "Concordancia automática alta",
+    DISCREPANCIA_ENTRE_FUENTES: "Discrepancia entre fuentes",
+    REQUIERE_REVISION_HUMANA: "Requiere revisión humana",
+    COMPARACION_INCOMPLETA: "Comparación incompleta",
+    PDF_NO_DESCARGABLE: "PDF no descargable (en la corrida automática)",
+    PAGINA_FUERA_DEL_PDF: "Página fuera de rango (en la corrida automática)"
+  };
+  var PARES_LABEL = {
+    embedded_pymupdf_vs_embedded_pdfplumber: "PyMuPDF vs pdfplumber (misma capa embebida)",
+    embedded_vs_render_tesseract: "Capa embebida vs render Tesseract",
+    stored_vs_embedded: "Guardado vs capa embebida fresca",
+    stored_vs_render_tesseract: "Guardado vs render Tesseract fresco",
+    tesseract_reproducibility: "Reproducibilidad Tesseract (mismo motor que el guardado)"
+  };
+  var DECISIONES = [
+    ["CORRECTO_ALMACENADO", "El texto YA GUARDADO es correcto tal cual."],
+    ["CORRECTO_PYMUPDF", "El texto de PyMuPDF es correcto tal cual."],
+    ["CORRECTO_PDFPLUMBER", "El texto de pdfplumber es correcto tal cual."],
+    ["CORRECTO_TESSERACT", "El texto de Tesseract (OCR) es correcto tal cual."],
+    ["NINGUNO_TRANSCRIBIR_MANUAL", "Ninguno es correcto tal cual: transcribo/corrijo yo mismo/a."]
+  ];
+  var CLAVE_LOCALSTORAGE = "f04b_revision_progreso_v1";
+
+  var paginas = [];          // arreglo de registros de F04_COMPARACION_MOTORES.json (.paginas)
+  var manifestPorClave = {}; // clave -> fila del manifest V2
+  var decisiones = {};       // clave -> {decision, golden_text, observaciones, revisado_en}
+  var claveActual = null;
+  var cambiosSinExportar = false;
+
+  function clave(docKey, pageNumber) { return docKey + "::" + pageNumber; }
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function guardarLocalStorageSeguro() {
+    try {
+      localStorage.setItem(CLAVE_LOCALSTORAGE, JSON.stringify({
+        decisiones: decisiones,
+        revisor: document.getElementById("nombre-revisor").value || ""
+      }));
+    } catch (e) {
+      // Restricciones del navegador (file://, modo privado, cuota, etc.):
+      // no es un error fatal, el respaldo real es la exportación explícita.
+      console.warn("No se pudo guardar el respaldo local:", e);
+    }
+  }
+
+  function leerLocalStorageSeguro() {
+    try {
+      var raw = localStorage.getItem(CLAVE_LOCALSTORAGE);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      console.warn("No se pudo leer el respaldo local:", e);
+      return null;
+    }
+  }
+
+  window.addEventListener("beforeunload", function (e) {
+    if (cambiosSinExportar) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+
+  function actualizarContadores() {
+    document.getElementById("contador-total").textContent = paginas.length;
+    var revisadas = 0;
+    paginas.forEach(function (p) {
+      var d = decisiones[clave(p.document_key, p.page_number)];
+      if (d && d.decision) revisadas++;
+    });
+    document.getElementById("contador-revisadas").textContent = revisadas;
+    var hayDatos = paginas.length > 0;
+    document.getElementById("btn-exportar-json").disabled = !hayDatos;
+    document.getElementById("btn-exportar-csv").disabled = !hayDatos;
+  }
+
+  function ordenarParaMostrar(lista) {
+    return lista.slice().sort(function (a, b) {
+      if (a.document_key !== b.document_key) return a.document_key < b.document_key ? -1 : 1;
+      return (a.page_number || 0) - (b.page_number || 0);
+    });
+  }
+
+  function renderSidebar() {
+    var cont = document.getElementById("sidebar");
+    cont.innerHTML = "";
+    ordenarParaMostrar(paginas).forEach(function (p) {
+      var k = clave(p.document_key, p.page_number);
+      var d = decisiones[k];
+      var fila = document.createElement("div");
+      fila.className = "fila-doc" + (k === claveActual ? " activa" : "");
+      fila.dataset.clave = k;
+      var estadoLabel = ESTADOS_LABEL[p.estado] || p.estado || "sin estado";
+      fila.innerHTML =
+        '<div class="punto' + (d && d.decision ? " revisada" : "") + '"></div>' +
+        '<div><span class="clave-doc">' + escapeHtml(p.document_key) + " · p." + escapeHtml(p.page_number) + '</span>' +
+        '<span class="badge-estado">' + escapeHtml(estadoLabel) + '</span></div>';
+      fila.addEventListener("click", function () { seleccionarPagina(k); });
+      cont.appendChild(fila);
+    });
+  }
+
+  function cajaTexto(id, titulo, texto) {
+    var tieneTexto = texto != null && String(texto).trim() !== "";
+    return (
+      '<div class="caja-texto">' +
+      '<div class="cabecera-caja"><span>' + escapeHtml(titulo) + '</span>' +
+      (tieneTexto ? '<button type="button" class="secundario copiar-golden" data-fuente="' + id + '">Copiar a golden_text</button>' : "") +
+      '</div>' +
+      (tieneTexto
+        ? '<pre>' + escapeHtml(texto) + '</pre>'
+        : '<div class="vacio-motor">&mdash; sin texto útil &mdash;</div>') +
+      '</div>'
+    );
+  }
+
+  function filaParPares(nombreCampo, cmp) {
+    if (!cmp) return "";
+    var errores = (cmp.errores || []).slice(0, 3).join(" | ");
+    return (
+      "<tr><td>" + escapeHtml(PARES_LABEL[nombreCampo] || nombreCampo) + "</td>" +
+      "<td>" + (cmp.legal_token_error_rate != null ? cmp.legal_token_error_rate : "&mdash;") + "</td>" +
+      "<td>" + (cmp.cer != null ? cmp.cer : "&mdash;") + "</td>" +
+      "<td>" + (cmp.wer != null ? cmp.wer : "&mdash;") + "</td>" +
+      '<td class="' + (cmp.hay_error_juridico ? "si-critico" : "") + '">' + (cmp.hay_error_juridico ? "SÍ" : "No") + "</td>" +
+      "<td>" + escapeHtml(errores) + "</td></tr>"
+    );
+  }
+
+  function renderDetalle(p) {
+    var k = clave(p.document_key, p.page_number);
+    var m = manifestPorClave[k];
+    var d = decisiones[k] || { decision: "", golden_text: "", observaciones: "" };
+    var textos = p.textos || {};
+
+    var pares = ["embedded_pymupdf_vs_embedded_pdfplumber", "embedded_vs_render_tesseract",
+      "stored_vs_embedded", "stored_vs_render_tesseract", "tesseract_reproducibility"];
+    var filasPares = pares.map(function (campo) { return filaParPares(campo, p[campo]); }).join("");
+
+    var html = '<div class="cabecera-pagina">';
+    html += "<h2>" + escapeHtml(p.document_key) + " &mdash; página " + escapeHtml(p.page_number) + "</h2>";
+    if (m) {
+      html += '<div class="meta-linea">Clasificación F-03: <b>' + escapeHtml(m.f03_classification || "?") + "</b>";
+      if (m.pdf_page_count) html += " · PDF completo tiene " + escapeHtml(m.pdf_page_count) + " página(s)";
+      html += "</div>";
+      if (m.pdf_url) {
+        html += '<div class="meta-linea">📄 <a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener">Abrir PDF</a> y ubicar la página ' + escapeHtml(p.page_number) + "</div>";
+      }
+    } else {
+      html += '<div class="meta-linea">No se cargó el Manifest V2: no hay enlace directo al PDF disponible. (Puedes cargarlo arriba en el punto 2.)</div>';
+    }
+    html += "</div>";
+
+    html += '<div class="badges">';
+    html += '<span class="badge estado-' + escapeHtml(p.estado || "") + '">' + escapeHtml(ESTADOS_LABEL[p.estado] || p.estado || "sin estado") + "</span>";
+    if (p.riesgo) html += '<span class="badge">Riesgo automático: ' + escapeHtml(p.riesgo) + "</span>";
+    html += '<span class="badge">same_engine_as_stored: ' + (p.same_engine_as_stored ? "SÍ" : "NO") + "</span>";
+    if (m && m.tiene_tabla === "True" || m && m.tiene_tabla === true) html += '<span class="badge">Contiene tabla</span>';
+    if (p.sha256) html += '<span class="badge mono" title="' + escapeHtml(p.sha256) + '">sha256: ' + escapeHtml(String(p.sha256).slice(0, 10)) + "&hellip;</span>";
+    html += "</div>";
+
+    html += '<div class="caja-diagnostico"><div class="titulo">Diagnóstico automático &mdash; NO es una verificación, es solo apoyo para saber dónde mirar</div>';
+    if (p.motivos && p.motivos.length) {
+      html += "<ul>" + p.motivos.map(function (m2) { return "<li>" + escapeHtml(m2) + "</li>"; }).join("") + "</ul>";
+    } else {
+      html += "<div>(sin motivos registrados)</div>";
+    }
+    html += "</div>";
+
+    if (filasPares.trim()) {
+      html += '<table class="tabla-pares"><tr><th>Comparación entre fuentes</th><th>LTER (error jurídico)</th><th>CER</th><th>WER</th><th>¿Crítico?</th><th>Primeros errores</th></tr>' + filasPares + "</table>";
+    }
+
+    html += '<div class="textos-candidatos">';
+    html += cajaTexto("guardado", "Texto guardado (histórico)", p.texto_guardado);
+    html += cajaTexto("pymupdf", "PyMuPDF", textos.pymupdf);
+    html += cajaTexto("pdfplumber", "pdfplumber", textos.pdfplumber);
+    html += cajaTexto("tesseract", "Tesseract (render 300 DPI)", textos.ocr_tesseract);
+    html += "</div>";
+
+    html += '<div class="bloque-decision"><label class="etiqueta" style="margin-top:0">Decisión</label>';
+    DECISIONES.forEach(function (par) {
+      var val = par[0], texto = par[1];
+      html += '<label class="opcion"><input type="radio" name="decision" value="' + val + '"' + (d.decision === val ? " checked" : "") + "> <b>" + val + "</b><small>" + escapeHtml(texto) + "</small></label>";
+    });
+    html += "</div>";
+
+    html += '<label class="etiqueta" for="golden_text">golden_text (transcripción validada)</label>';
+    html += '<textarea id="golden_text">' + escapeHtml(d.golden_text || "") + "</textarea>";
+    html += '<div class="aviso-vacio-golden" id="aviso-golden-vacio" style="display:none">Este campo está vacío. Si de verdad la página no tiene texto (p. ej. está en blanco), puedes guardar igual.</div>';
+
+    html += '<label class="etiqueta" for="observaciones">Observaciones (opcional)</label>';
+    html += '<textarea id="observaciones">' + escapeHtml(d.observaciones || "") + "</textarea>";
+
+    html += '<div class="acciones-pagina"><button id="btn-guardar-pagina">Guardar esta página y continuar</button>' +
+      '<button type="button" class="gris" id="btn-limpiar-pagina">Borrar decisión de esta página</button></div>';
+
+    var det = document.getElementById("detalle");
+    det.innerHTML = html;
+
+    det.querySelectorAll(".copiar-golden").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var fuente = btn.dataset.fuente;
+        var texto = fuente === "guardado" ? p.texto_guardado
+          : fuente === "pymupdf" ? textos.pymupdf
+          : fuente === "pdfplumber" ? textos.pdfplumber
+          : textos.ocr_tesseract;
+        document.getElementById("golden_text").value = texto || "";
+      });
+    });
+
+    document.getElementById("btn-guardar-pagina").addEventListener("click", function () {
+      var decisionMarcada = det.querySelector('input[name="decision"]:checked');
+      if (!decisionMarcada) {
+        alert("Elige una decisión antes de guardar (una de las 5 opciones).");
+        return;
+      }
+      var golden = document.getElementById("golden_text").value;
+      if (!golden.trim()) {
+        document.getElementById("aviso-golden-vacio").style.display = "block";
+        if (!confirm("El texto golden está vacío. ¿Seguro que quieres guardar así? (Presiona Cancelar para seguir editando.)")) {
+          return;
+        }
+      }
+      decisiones[k] = {
+        decision: decisionMarcada.value,
+        golden_text: golden,
+        observaciones: document.getElementById("observaciones").value,
+        revisado_en: new Date().toISOString()
+      };
+      cambiosSinExportar = true;
+      guardarLocalStorageSeguro();
+      renderSidebar();
+      actualizarContadores();
+      irASiguientePendiente(k);
+    });
+
+    document.getElementById("btn-limpiar-pagina").addEventListener("click", function () {
+      if (!confirm("¿Borrar la decisión guardada de esta página?")) return;
+      delete decisiones[k];
+      cambiosSinExportar = true;
+      guardarLocalStorageSeguro();
+      renderSidebar();
+      actualizarContadores();
+      seleccionarPagina(k);
+    });
+  }
+
+  function seleccionarPagina(k) {
+    claveActual = k;
+    var p = paginas.filter(function (x) { return clave(x.document_key, x.page_number) === k; })[0];
+    if (!p) return;
+    renderSidebar();
+    renderDetalle(p);
+  }
+
+  function irASiguientePendiente(claveDesde) {
+    var ordenadas = ordenarParaMostrar(paginas);
+    var idx = ordenadas.findIndex(function (p) { return clave(p.document_key, p.page_number) === claveDesde; });
+    for (var i = 1; i <= ordenadas.length; i++) {
+      var candidata = ordenadas[(idx + i) % ordenadas.length];
+      var ck = clave(candidata.document_key, candidata.page_number);
+      if (!decisiones[ck] || !decisiones[ck].decision) {
+        seleccionarPagina(ck);
+        return;
+      }
+    }
+    document.getElementById("detalle").innerHTML = '<div class="vacio">🎉 ¡Todas las páginas cargadas tienen una decisión guardada!<br>No olvides hacer clic en "Exportar decisiones (JSON)".</div>';
+    claveActual = null;
+    renderSidebar();
+  }
+
+  function cargarComparacion(datos) {
+    if (!datos || !Array.isArray(datos.paginas)) {
+      alert('El archivo no tiene el formato esperado (falta la lista "paginas"). Verifica que sea F04_COMPARACION_MOTORES.json.');
+      return;
+    }
+    paginas = datos.paginas;
+    actualizarContadores();
+    renderSidebar();
+    var previo = leerLocalStorageSeguro();
+    if (previo && previo.decisiones && Object.keys(previo.decisiones).length) {
+      if (confirm("Se encontró un progreso guardado en este navegador (" + Object.keys(previo.decisiones).length + " página(s) con decisión). ¿Quieres recuperarlo?")) {
+        decisiones = previo.decisiones;
+        if (previo.revisor) document.getElementById("nombre-revisor").value = previo.revisor;
+        actualizarContadores();
+        renderSidebar();
+      }
+    }
+    if (ordenarParaMostrar(paginas).length) {
+      seleccionarPagina(clave(ordenarParaMostrar(paginas)[0].document_key, ordenarParaMostrar(paginas)[0].page_number));
+    }
+  }
+
+  function cargarManifest(datos) {
+    var filas = Array.isArray(datos) ? datos : datos.paginas;
+    if (!Array.isArray(filas)) {
+      alert("El archivo del manifest no tiene el formato esperado.");
+      return;
+    }
+    manifestPorClave = {};
+    filas.forEach(function (fila) {
+      manifestPorClave[clave(fila.document_key, fila.page_number)] = fila;
+    });
+    if (claveActual) seleccionarPagina(claveActual);
+  }
+
+  function leerArchivoJSON(file, onOk) {
+    var lector = new FileReader();
+    lector.onload = function () {
+      try {
+        onOk(JSON.parse(lector.result));
+      } catch (e) {
+        alert("No se pudo leer el archivo como JSON válido: " + e.message);
+      }
+    };
+    lector.onerror = function () { alert("No se pudo abrir el archivo."); };
+    lector.readAsText(file, "utf-8");
+  }
+
+  document.getElementById("input-comparacion").addEventListener("change", function (e) {
+    if (e.target.files[0]) leerArchivoJSON(e.target.files[0], cargarComparacion);
+  });
+  document.getElementById("input-manifest").addEventListener("change", function (e) {
+    if (e.target.files[0]) leerArchivoJSON(e.target.files[0], cargarManifest);
+  });
+  document.getElementById("input-progreso").addEventListener("change", function (e) {
+    if (!e.target.files[0]) return;
+    leerArchivoJSON(e.target.files[0], function (datos) {
+      if (!datos || !Array.isArray(datos.decisiones)) {
+        alert("Ese archivo no parece un export de decisiones de esta herramienta.");
+        return;
+      }
+      var cargadas = 0;
+      datos.decisiones.forEach(function (d) {
+        if (!d.document_key || d.page_number == null) return;
+        decisiones[clave(d.document_key, d.page_number)] = {
+          decision: d.decision, golden_text: d.golden_text, observaciones: d.observaciones, revisado_en: d.revisado_en
+        };
+        cargadas++;
+      });
+      if (datos.revisor) document.getElementById("nombre-revisor").value = datos.revisor;
+      cambiosSinExportar = true;
+      guardarLocalStorageSeguro();
+      actualizarContadores();
+      renderSidebar();
+      if (claveActual) seleccionarPagina(claveActual);
+      alert("Se importaron " + cargadas + " decisión(es) previas.");
+    });
+  });
+
+  function descargarArchivo(nombre, contenido, tipo) {
+    var blob = new Blob([contenido], { type: tipo });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = nombre;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  }
+
+  document.getElementById("btn-exportar-json").addEventListener("click", function () {
+    var lista = Object.keys(decisiones).map(function (k) {
+      var partes = k.split("::");
+      var pageNumber = partes.pop();
+      var documentKey = partes.join("::");
+      var d = decisiones[k];
+      return {
+        document_key: documentKey,
+        page_number: Number(pageNumber),
+        decision: d.decision || null,
+        golden_text: d.golden_text || "",
+        observaciones: d.observaciones || "",
+        revisado_en: d.revisado_en || null
+      };
+    });
+    var salida = {
+      version: 1,
+      generado_en: new Date().toISOString(),
+      revisor: document.getElementById("nombre-revisor").value || "",
+      total_paginas_en_muestra: paginas.length,
+      total_decisiones: lista.length,
+      decisiones: lista
+    };
+    descargarArchivo("F04B_DECISIONES_HUMANAS.json", JSON.stringify(salida, null, 2), "application/json");
+    cambiosSinExportar = false;
+  });
+
+  function csvEscape(v) {
+    var s = v == null ? "" : String(v);
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  document.getElementById("btn-exportar-csv").addEventListener("click", function () {
+    var encabezado = ["document_key", "page_number", "decision", "golden_text", "observaciones", "revisado_en"];
+    var filas = [encabezado.join(",")];
+    Object.keys(decisiones).forEach(function (k) {
+      var partes = k.split("::");
+      var pageNumber = partes.pop();
+      var documentKey = partes.join("::");
+      var d = decisiones[k];
+      filas.push([documentKey, pageNumber, d.decision || "", d.golden_text || "", d.observaciones || "", d.revisado_en || ""]
+        .map(csvEscape).join(","));
+    });
+    descargarArchivo("F04B_DECISIONES_HUMANAS.csv", filas.join("\r\n"), "text/csv");
+  });
+
+  actualizarContadores();
+})();
+</script>
+
+</body>
+</html>

@@ -17,7 +17,7 @@ sys.path.insert(0, str(RAIZ / "agents"))
 sys.path.insert(0, str(RAIZ / "scripts"))
 
 from custodia_documental import COMPLETO, INCOMPLETO  # noqa: E402
-from fidelidad_legal import SenalesPagina, comparar_fidelidad  # noqa: E402
+from fidelidad_legal import comparar_fidelidad  # noqa: E402
 from identidad_documental import (  # noqa: E402
     PDF_CONTIENE_NORMA_EN_MULTINORMA,
     PDF_IDENTIDAD_AMBIGUA,
@@ -28,10 +28,17 @@ from identidad_documental import (  # noqa: E402
 
 from f04_seleccion_muestra import (  # noqa: E402
     COMPARACION_INCOMPLETA,
+    CONCORDANCIA_AUTOMATICA_ALTA,
+    DISCREPANCIA_ENTRE_FUENTES,
+    MOTOR_SIN_TEXTO_UTIL,
+    REQUIERE_REVISION_HUMANA,
     RIESGO_OCR_BAJA_CONFIANZA,
+    VERIFICADA_HUMANO,
     apto_para_piloto_f04,
+    comparar_fuentes,
     completitud_para_f04,
     diagnostico_ocr_pool,
+    es_mismo_motor_que_almacenado,
     estado_verificacion_f04,
     fila_manifest,
     pagina_pertenece_a_norma,
@@ -39,6 +46,7 @@ from f04_seleccion_muestra import (  # noqa: E402
     resumen_pool,
     seleccionar_muestra,
     seleccionar_muestra_estratificada,
+    tiene_texto_util,
     todas_las_comparaciones_completas,
 )
 
@@ -276,62 +284,156 @@ class TestPaginaSinComparacionCompletaNoSeVerifica(unittest.TestCase):
             {"pymupdf": "", "pdfplumber": "", "ocr_tesseract": ""}))
 
     def test_motor_faltante_nunca_produce_estado_verificada(self):
-        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0, texto="Artículo 1.- Deróguese")
-        estado, _, motivos = estado_verificacion_f04(
+        r = estado_verificacion_f04(
             {"pymupdf": "Artículo 1.- Deróguese", "pdfplumber": "Artículo 1.- Deróguese", "ocr_tesseract": None},
-            senales,
         )
-        self.assertEqual(estado, COMPARACION_INCOMPLETA)
-        self.assertNotIn("VERIFICADA", estado)
-        self.assertTrue(any("ocr_tesseract" in m for m in motivos))
+        self.assertEqual(r["estado"], COMPARACION_INCOMPLETA)
+        self.assertNotIn("VERIFICADA", r["estado"])
+        self.assertTrue(any("ocr_tesseract" in m for m in r["motivos"]))
 
-    def test_comparacion_completa_y_concordante_si_puede_verificar(self):
+    def test_comparacion_completa_y_concordante_es_concordancia_no_verificacion(self):
+        """F-04-A.2: concordancia automática nunca se llama "VERIFICADA"."""
         texto = "Artículo 1.- Deróguese la Resolución Ministerial N° 100-2020/MINSA"
-        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0, texto=texto)
-        estado, _, _ = estado_verificacion_f04(
-            {"pymupdf": texto, "pdfplumber": texto, "ocr_tesseract": texto}, senales,
-        )
-        self.assertEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
+        r = estado_verificacion_f04({"pymupdf": texto, "pdfplumber": texto, "ocr_tesseract": texto})
+        self.assertEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+        self.assertNotIn("VERIFICADA_AUTOMATICAMENTE", r["estado"])
 
-    def test_comparacion_completa_pero_discordante_en_token_juridico_no_verifica(self):
-        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0,
-                                texto="Artículo 13.- Deróguese la norma")
-        estado, _, _ = estado_verificacion_f04(
-            {"pymupdf": "Artículo 13.- Deróguese la norma",
-             "pdfplumber": "Artículo 18.- Deróguese la norma",
-             "ocr_tesseract": "Artículo 13.- Deróguese la norma"},
-            senales,
-        )
-        self.assertNotEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
-        self.assertEqual(estado, "DISCREPANCIA_ENTRE_MOTORES")
+    def test_comparacion_completa_pero_discordante_en_token_juridico_no_concuerda(self):
+        r = estado_verificacion_f04({
+            "pymupdf": "Artículo 13.- Deróguese la norma",
+            "pdfplumber": "Artículo 18.- Deróguese la norma",
+            "ocr_tesseract": "Artículo 13.- Deróguese la norma",
+        })
+        self.assertNotEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+        self.assertEqual(r["estado"], DISCREPANCIA_ENTRE_FUENTES)
 
     def test_pymupdf_y_pdfplumber_de_acuerdo_no_bastan_si_el_render_discrepa(self):
         """PyMuPDF y pdfplumber leen la MISMA capa embebida: que concuerden
         entre sí no es evidencia independiente si esa capa está mal. Solo el
         cruce contra el render (Tesseract, una fuente de lectura distinta)
-        puede verificar. Antes de esta corrección, dos lecturas de la misma
-        capa que coincidían ya bastaban para VERIFICADA_AUTOMATICAMENTE,
-        aunque el render dijera otra cosa."""
-        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0,
-                                texto="Artículo 13.- Deróguese la norma")
-        estado, _, _ = estado_verificacion_f04(
-            {"pymupdf": "Artículo 13.- Deróguese la norma",
-             "pdfplumber": "Artículo 13.- Deróguese la norma",
-             "ocr_tesseract": "Artículo 18.- Deróguese la norma"},
-            senales,
-        )
-        self.assertNotEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
-        self.assertEqual(estado, "DISCREPANCIA_ENTRE_MOTORES")
+        puede dar concordancia. Antes de esta corrección, dos lecturas de la
+        misma capa que coincidían ya bastaban para "verificar", aunque el
+        render dijera otra cosa."""
+        r = estado_verificacion_f04({
+            "pymupdf": "Artículo 13.- Deróguese la norma",
+            "pdfplumber": "Artículo 13.- Deróguese la norma",
+            "ocr_tesseract": "Artículo 18.- Deróguese la norma",
+        })
+        self.assertNotEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+        self.assertEqual(r["estado"], DISCREPANCIA_ENTRE_FUENTES)
 
     def test_verificacion_exige_acuerdo_con_el_render_no_solo_entre_parsers(self):
         """Caso positivo simétrico: los 3 motores deben concordar -no basta
         con que los dos parsers de la capa embebida concuerden entre sí-."""
         texto = "Artículo 1.- Deróguese la Resolución Ministerial N° 100-2020/MINSA"
-        senales = SenalesPagina(extraction_method="pymupdf", quality_score=1.0, texto=texto)
-        estado, _, _ = estado_verificacion_f04(
-            {"pymupdf": texto, "pdfplumber": texto, "ocr_tesseract": texto}, senales,
+        r = estado_verificacion_f04({"pymupdf": texto, "pdfplumber": texto, "ocr_tesseract": texto})
+        self.assertEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+
+
+class TestConcordanciaVsVerdadF04A2(unittest.TestCase):
+    """F-04-A.2: CONCORDANCIA != VERDAD. Cada test fija un caso concreto en
+    el que el comparador NO debía (o SÍ debía) alcanzar un estado dado, tal
+    como los pidió explícitamente la corrección epistemológica."""
+
+    TEXTO = "Artículo 1.- Deróguese la Resolución Ministerial N° 100-2020/MINSA"
+
+    def test_1_stored_ocr_y_rerun_tesseract_identico_no_es_verificada(self):
+        """Página escaneada: pymupdf y pdfplumber sin capa (""), Tesseract
+        fresco reproduce EXACTAMENTE lo mismo que ya estaba guardado (que
+        también vino de Tesseract). Sin capa embebida no hay cruce
+        independiente: el techo es REQUIERE_REVISION_HUMANA, nunca un
+        estado de concordancia ni de verificación."""
+        r = estado_verificacion_f04({"pymupdf": "", "pdfplumber": "", "ocr_tesseract": self.TEXTO})
+        self.assertEqual(r["estado"], REQUIERE_REVISION_HUMANA)
+        self.assertNotIn("VERIFICADA", r["estado"])
+        self.assertNotEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+
+    def test_2_mismo_tesseract_se_etiqueta_reproducibilidad_no_independencia(self):
+        self.assertTrue(es_mismo_motor_que_almacenado("ocr_tesseract", False))
+        self.assertTrue(es_mismo_motor_que_almacenado(None, True))
+        self.assertFalse(es_mismo_motor_que_almacenado("pymupdf", False))
+
+    def test_3_capas_vacias_mas_tesseract_con_texto_no_es_discrepancia(self):
+        """pymupdf="" + pdfplumber="" + Tesseract con texto real: los dos
+        primeros no proponen nada, así que no pueden "discrepar"."""
+        r = estado_verificacion_f04({"pymupdf": "", "pdfplumber": "", "ocr_tesseract": self.TEXTO})
+        self.assertNotEqual(r["estado"], DISCREPANCIA_ENTRE_FUENTES)
+        clasif, cmp_ = comparar_fuentes("", self.TEXTO)
+        self.assertEqual(clasif, MOTOR_SIN_TEXTO_UTIL)
+        self.assertIsNone(cmp_)
+
+    def test_4_pymupdf_vs_tesseract_con_token_juridico_distinto_si_es_discrepancia(self):
+        r = estado_verificacion_f04({
+            "pymupdf": "Artículo 13.- Deróguese la norma",
+            "pdfplumber": "Artículo 13.- Deróguese la norma",
+            "ocr_tesseract": "Artículo 18.- Deróguese la norma",
+        })
+        self.assertEqual(r["estado"], DISCREPANCIA_ENTRE_FUENTES)
+
+    def test_5_digital_embebido_vs_visual_concordante_es_concordancia_no_verificada(self):
+        r = estado_verificacion_f04(
+            {"pymupdf": self.TEXTO, "pdfplumber": self.TEXTO, "ocr_tesseract": self.TEXTO},
         )
-        self.assertEqual(estado, "VERIFICADA_AUTOMATICAMENTE")
+        self.assertEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+        self.assertNotIn("VERIFICADA", r["estado"])
+
+    def test_6_tabla_concordante_sigue_requiriendo_revision_humana(self):
+        r = estado_verificacion_f04(
+            {"pymupdf": self.TEXTO, "pdfplumber": self.TEXTO, "ocr_tesseract": self.TEXTO},
+            es_tabla=True,
+        )
+        self.assertEqual(r["estado"], REQUIERE_REVISION_HUMANA)
+        self.assertNotEqual(r["estado"], CONCORDANCIA_AUTOMATICA_ALTA)
+
+    def test_7_golden_ausente_no_calcula_metricas_vs_golden(self):
+        r = estado_verificacion_f04(
+            {"pymupdf": self.TEXTO, "pdfplumber": self.TEXTO, "ocr_tesseract": self.TEXTO},
+        )
+        self.assertFalse(r["golden_available"])
+        self.assertIsNone(r["cer_vs_golden"])
+        self.assertIsNone(r["wer_vs_golden"])
+        self.assertIsNone(r["lter_vs_golden"])
+
+    def test_8_golden_presente_y_coincidente_habilita_verificada_humano(self):
+        r = estado_verificacion_f04(
+            {"pymupdf": self.TEXTO, "pdfplumber": self.TEXTO, "ocr_tesseract": self.TEXTO},
+            texto_golden=self.TEXTO,
+        )
+        self.assertTrue(r["golden_available"])
+        self.assertEqual(r["estado"], VERIFICADA_HUMANO)
+        self.assertEqual(r["cer_vs_golden"], 0.0)
+        self.assertEqual(r["lter_vs_golden"], 0.0)
+
+    def test_8b_golden_presente_pero_discordante_no_es_verificada_humano(self):
+        r = estado_verificacion_f04(
+            {"pymupdf": "Artículo 13.- Deróguese la norma",
+             "pdfplumber": "Artículo 13.- Deróguese la norma",
+             "ocr_tesseract": "Artículo 13.- Deróguese la norma"},
+            texto_golden="Artículo 18.- Deróguese la norma",
+        )
+        self.assertTrue(r["golden_available"])
+        self.assertNotEqual(r["estado"], VERIFICADA_HUMANO)
+        self.assertEqual(r["estado"], DISCREPANCIA_ENTRE_FUENTES)
+
+    def test_9_cuota_ocr_efectiva_bajo_15_registra_limitacion_por_diversidad(self):
+        """Reproduce a escala pequeña el hallazgo real del manifest V2: 2
+        normas distintas x tope 6/norma = capacidad efectiva 12 < objetivo
+        15, aunque el pool crudo (169 en el caso real) sea mucho mayor."""
+        pool_ocr = (
+            [_fila_pool("OCR-A", i, ocr=True) for i in range(1, 10)]
+            + [_fila_pool("OCR-B", i, ocr=True) for i in range(1, 10)]
+        )
+        pool = pool_ocr + [_fila_pool(f"EX-{i}", 1) for i in range(40)]
+        _, diag = seleccionar_muestra_estratificada(pool, limite=50)
+        self.assertEqual(diag["ocr"]["normas_distintas_disponibles"], 2)
+        self.assertEqual(diag["ocr"]["capacidad_efectiva_por_diversidad"], 12)
+        self.assertLess(diag["ocr"]["seleccionado"], diag["ocr"]["objetivo_min"])
+        self.assertTrue(diag["ocr"]["limitada_por_diversidad"])
+        self.assertTrue(diag["ocr"]["cuota_no_disponible_bajo_restricciones"])
+        # El pool crudo SÍ alcanza el objetivo (18 >= 15): sin el campo nuevo
+        # esto habría quedado oculto como "cuota_no_disponible=False".
+        self.assertFalse(diag["ocr"]["cuota_no_disponible"])
+        self.assertTrue(any("ocr" in a.lower() and "diversidad" in a.lower() for a in diag["avisos"]))
 
 
 class TestSeleccionDeMuestra(unittest.TestCase):
@@ -555,6 +657,34 @@ class TestSelectorEstratificadoV2(unittest.TestCase):
         _, diag = seleccionar_muestra_estratificada(pool, limite=50, minimo_tablas=5)
         self.assertGreaterEqual(diag["tablas"]["agregado"], 5)
         self.assertFalse(diag["tablas"]["cuota_no_disponible"])
+
+    def test_10_manifest_v2_no_cambia_las_paginas_por_enriquecer_el_diagnostico(self):
+        """F-04-A.2 solo corrige el REPORTE de diagnóstico (punto 7); el
+        algoritmo de selección (qué candidatas entran, en qué orden) no
+        cambia. Esta prueba fija el conjunto exacto que produce el pool de
+        referencia, para que un cambio futuro que altere accidentalmente la
+        selección -en vez de solo el reporte- rompa aquí. El manifest V2 ya
+        generado (F04_MANIFEST_PILOTO_V2, run 32871616936) no se regenera en
+        F-04-A.2: esta prueba protege el ALGORITMO que lo produjo."""
+        pool = self._pool_mixto()  # 20 EXACTA + 20 MULTINORMA + 20 OCR + 6 TABLA
+        seleccion, _ = seleccionar_muestra_estratificada(pool, limite=50)
+        self.assertEqual(len(seleccion), 50)
+
+        por_prefijo: dict[str, int] = {}
+        for fila in seleccion:
+            prefijo = fila["document_key"].split("-")[0]
+            por_prefijo[prefijo] = por_prefijo.get(prefijo, 0) + 1
+        self.assertEqual(por_prefijo, {"EX": 20, "MU": 4, "OCR": 20, "TAB": 6})
+
+        # Determinismo total: recalcular con el pool barajado da el MISMO
+        # conjunto exacto de (document_key, page_number).
+        import random
+        barajado = pool[:]
+        random.Random(7).shuffle(barajado)
+        seleccion_2, _ = seleccionar_muestra_estratificada(barajado, limite=50)
+        claves_1 = sorted((f["document_key"], f["page_number"]) for f in seleccion)
+        claves_2 = sorted((f["document_key"], f["page_number"]) for f in seleccion_2)
+        self.assertEqual(claves_1, claves_2)
 
 
 if __name__ == "__main__":

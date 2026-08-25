@@ -40,7 +40,6 @@ duplica nada.
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,12 +52,14 @@ from custodia_documental import (  # noqa: E402
 )
 from fidelidad_legal import (  # noqa: E402
     RIESGO_ALTO,
-    SenalesPagina,
+    RIESGO_BAJO,
+    RIESGO_CRITICO,
+    REQUIERE_REVISION_HUMANA,
     UMBRAL_CALIDAD_ACEPTABLE,
     UMBRAL_OCR_ACEPTABLE,
-    discrepancia_entre_motores,
+    VERIFICADA_HUMANO,
+    comparar_fidelidad,
     es_pagina_dispositiva,
-    evaluar_pagina,
     marcas_ilegible,
     tokens_sensibles,
     verbos_normativos,
@@ -454,23 +455,49 @@ def seleccionar_muestra_estratificada(
             agregados += 1
         return agregados
 
+    def _diagnostico_cuota(pool: list[dict], objetivo_min: int, agregado: int) -> dict:
+        """F-04-A.2 · 7: `cuota_no_disponible` (comparar contra el tamaño
+        CRUDO del pool) puede dar `false` y ocultar que, bajo el tope de
+        diversidad por documento, la cuota jamás fue alcanzable: si un pool
+        de 169 páginas viene de solo 2 normas y el tope es 6/norma, la
+        capacidad EFECTIVA es 12, no 169. Se reportan ambas lecturas para
+        que el resumen no oculte la restricción real."""
+        normas_distintas = len({f["document_key"] for f in pool})
+        capacidad_efectiva = normas_distintas * tope_por_documento
+        return {
+            "disponible_en_pool": len(pool),
+            "normas_distintas_disponibles": normas_distintas,
+            "objetivo_min": objetivo_min,
+            "capacidad_efectiva_por_diversidad": capacidad_efectiva,
+            "seleccionado": agregado,
+            "agregado": agregado,  # alias retrocompatible con F-04-A.1
+            "limitada_por_diversidad": capacidad_efectiva < objetivo_min <= len(pool),
+            "cuota_no_disponible": len(pool) < objetivo_min,
+            "cuota_no_disponible_bajo_restricciones": agregado < objetivo_min,
+        }
+
     diagnostico: dict = {"avisos": []}
 
     ocr_pool = ordenar([c for c in con_riesgo if c.get("ocr_used")])
     objetivo_ocr_max = min(objetivo_ocr[1], len(ocr_pool))
     agregado_ocr = agregar(ocr_pool, objetivo_ocr_max)
-    diagnostico["ocr"] = {
-        "objetivo_min": objetivo_ocr[0], "objetivo_max": objetivo_ocr[1],
-        "disponible_en_pool": len(ocr_pool), "agregado": agregado_ocr,
-        "baja_confianza_en_pool": sum(1 for f in ocr_pool if RIESGO_OCR_BAJA_CONFIANZA in f["razon_de_riesgo"].split(";")),
-        "baja_confianza_seleccionada": sum(
-            1 for f in seleccion if RIESGO_OCR_BAJA_CONFIANZA in f["razon_de_riesgo"].split(";")),
-        "cuota_no_disponible": len(ocr_pool) < objetivo_ocr[0],
-    }
-    if diagnostico["ocr"]["cuota_no_disponible"]:
+    diagnostico["ocr"] = _diagnostico_cuota(ocr_pool, objetivo_ocr[0], agregado_ocr)
+    diagnostico["ocr"]["objetivo_max"] = objetivo_ocr[1]
+    diagnostico["ocr"]["baja_confianza_en_pool"] = sum(
+        1 for f in ocr_pool if RIESGO_OCR_BAJA_CONFIANZA in f["razon_de_riesgo"].split(";"))
+    diagnostico["ocr"]["baja_confianza_seleccionada"] = sum(
+        1 for f in seleccion if RIESGO_OCR_BAJA_CONFIANZA in f["razon_de_riesgo"].split(";"))
+    if diagnostico["ocr"]["cuota_no_disponible_bajo_restricciones"]:
+        motivo_diversidad = (
+            f" -limitada por diversidad: solo {diagnostico['ocr']['normas_distintas_disponibles']} "
+            f"norma(s) distinta(s) x tope {tope_por_documento}/norma = capacidad efectiva "
+            f"{diagnostico['ocr']['capacidad_efectiva_por_diversidad']}"
+            if diagnostico["ocr"]["limitada_por_diversidad"] else ""
+        )
         diagnostico["avisos"].append(
             f"CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO: ocr (objetivo minimo "
-            f"{objetivo_ocr[0]}, disponible en el pool {len(ocr_pool)})"
+            f"{objetivo_ocr[0]}, seleccionado {agregado_ocr}, disponible en el pool "
+            f"{len(ocr_pool)}){motivo_diversidad}"
         )
 
     # Tablas ANTES que el llenado flexible de "digital": es una cuota con
@@ -479,28 +506,24 @@ def seleccionar_muestra_estratificada(
     # aunque el pool si tuviera suficientes.
     tabla_pool = ordenar([c for c in con_riesgo if c.get("tiene_tabla")])
     agregado_tablas = agregar(tabla_pool, minimo_tablas)
-    diagnostico["tablas"] = {
-        "objetivo_minimo": minimo_tablas, "disponible_en_pool": len(tabla_pool),
-        "agregado": agregado_tablas, "cuota_no_disponible": len(tabla_pool) < minimo_tablas,
-    }
-    if diagnostico["tablas"]["cuota_no_disponible"]:
+    diagnostico["tablas"] = _diagnostico_cuota(tabla_pool, minimo_tablas, agregado_tablas)
+    diagnostico["tablas"]["objetivo_minimo"] = minimo_tablas  # alias retrocompatible
+    if diagnostico["tablas"]["cuota_no_disponible_bajo_restricciones"]:
         diagnostico["avisos"].append(
             f"CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO: tablas (objetivo minimo "
-            f"{minimo_tablas}, disponible en el pool {len(tabla_pool)})"
+            f"{minimo_tablas}, seleccionado {agregado_tablas}, disponible en el pool {len(tabla_pool)})"
         )
 
     digital_pool = ordenar([c for c in con_riesgo if not c.get("ocr_used")])
     objetivo_digital_max = min(objetivo_digital[1], len(digital_pool))
     agregado_digital = agregar(digital_pool, objetivo_digital_max)
-    diagnostico["digital"] = {
-        "objetivo_min": objetivo_digital[0], "objetivo_max": objetivo_digital[1],
-        "disponible_en_pool": len(digital_pool), "agregado": agregado_digital,
-        "cuota_no_disponible": len(digital_pool) < objetivo_digital[0],
-    }
-    if diagnostico["digital"]["cuota_no_disponible"]:
+    diagnostico["digital"] = _diagnostico_cuota(digital_pool, objetivo_digital[0], agregado_digital)
+    diagnostico["digital"]["objetivo_max"] = objetivo_digital[1]
+    if diagnostico["digital"]["cuota_no_disponible_bajo_restricciones"]:
         diagnostico["avisos"].append(
             f"CUOTA_NO_DISPONIBLE_EN_POOL_VALIDADO: digital (objetivo minimo "
-            f"{objetivo_digital[0]}, disponible en el pool {len(digital_pool)})"
+            f"{objetivo_digital[0]}, seleccionado {agregado_digital}, disponible en el pool "
+            f"{len(digital_pool)})"
         )
 
     # Balance EXACTA vs MULTINORMA para TODO el cupo que queda tras las
@@ -550,10 +573,31 @@ def seleccionar_muestra_estratificada(
 
 
 # ---------------------------------------------------------------------------
-# 4) Verificación: sin comparación COMPLETA entre motores, nunca "verificada"
+# 4) Verificación (F-04-A.2): CONCORDANCIA != VERDAD
 # ---------------------------------------------------------------------------
+# F-04-A (v1) delegaba la decisión en `fidelidad_legal.evaluar_pagina()`, que
+# puede devolver VERIFICADA_AUTOMATICAMENTE -un nombre que implica una verdad
+# comprobada que ninguna comparación automática, por sí sola, puede probar.
+# Esa función también trataba "pymupdf/pdfplumber vacíos" igual que
+# "pymupdf/pdfplumber con texto que discrepa": una página ESCANEADA sin capa
+# embebida no está proponiendo una transcripción alternativa, así que no
+# puede "discrepar" de nada.
+#
+# F-04-A.2 corrige ambas cosas con su PROPIO vocabulario, sin tocar
+# fidelidad_legal.py (F-01, ya en producción, con su propio contrato y
+# tests): ninguna comparación automática produce aquí un estado cuyo nombre
+# implique verificación comprobada. Eso queda reservado a VERIFICADA_HUMANO
+# (reexportado de fidelidad_legal, mismo concepto), y solo cuando se provee
+# `texto_golden` explícito -ausente en todo F-04-A: `golden_available`
+# siempre False-.
 MOTORES_REQUERIDOS = ("pymupdf", "pdfplumber", "ocr_tesseract")
 COMPARACION_INCOMPLETA = "COMPARACION_INCOMPLETA"
+CONCORDANCIA_AUTOMATICA_ALTA = "CONCORDANCIA_AUTOMATICA_ALTA"
+DISCREPANCIA_ENTRE_FUENTES = "DISCREPANCIA_ENTRE_FUENTES"
+
+MOTOR_SIN_TEXTO_UTIL = "MOTOR_SIN_TEXTO_UTIL"
+AMBAS_FUENTES_SIN_TEXTO = "AMBAS_FUENTES_SIN_TEXTO"
+FUENTES_COMPARABLES = "FUENTES_COMPARABLES"
 
 
 def todas_las_comparaciones_completas(textos_por_motor: dict[str, str | None]) -> bool:
@@ -565,48 +609,163 @@ def todas_las_comparaciones_completas(textos_por_motor: dict[str, str | None]) -
     return all(textos_por_motor.get(motor) is not None for motor in MOTORES_REQUERIDOS)
 
 
+def tiene_texto_util(texto: str | None) -> bool:
+    """Un motor que devuelve "" (o solo espacios) no está proponiendo una
+    transcripción alternativa: no encontró capa que leer. Confundir eso con
+    "el motor propuso un texto distinto y vacío" es lo que convertía una
+    página escaneada sin capa embebida en una falsa DISCREPANCIA_CRITICA."""
+    return bool((texto or "").strip())
+
+
+def es_mismo_motor_que_almacenado(
+    extraction_method_almacenado: str | None, ocr_used_almacenado: bool = False,
+) -> bool:
+    """True si el texto YA GUARDADO en Supabase fue producido por Tesseract
+    (`agents/pdf_extract.py::_ocr_page`, spa, ~300 DPI -el mismo motor,
+    mismo idioma, misma resolución que el render que F-04 corre de nuevo en
+    `scripts/piloto_verificacion_paginas.py::texto_render_ocr`).
+
+    Comparar ese texto guardado contra un Tesseract fresco NO es evidencia
+    cruzada independiente: es el MISMO motor leyendo la MISMA imagen dos
+    veces. Sirve para medir REPRODUCIBILIDAD, nunca para verificar -por eso
+    nunca debe ser, por sí sola, la razón para declarar concordancia con
+    otra fuente."""
+    return bool(ocr_used_almacenado) or extraction_method_almacenado == "ocr_tesseract"
+
+
+def comparar_fuentes(referencia: str | None, hipotesis: str | None):
+    """Compara dos fuentes de texto DISTINGUIENDO "no hay nada que
+    comparar" de "hay una discrepancia real" (F-04-A.2 · 3).
+
+    Devuelve (clasificacion, comparacion):
+      - AMBAS_FUENTES_SIN_TEXTO: ninguna aporta texto útil -no hay nada que
+        comparar, ni concordancia ni discrepancia-.
+      - MOTOR_SIN_TEXTO_UTIL: solo una de las dos encontró texto -la otra no
+        está proponiendo una transcripción alternativa, así que no puede
+        "discrepar" de la que sí tiene contenido-. `comparacion` es None.
+      - FUENTES_COMPARABLES: ambas aportan texto útil; `comparacion` es el
+        `ResultadoFidelidad` real de `fidelidad_legal.comparar_fidelidad()`.
+    """
+    ref_util, hip_util = tiene_texto_util(referencia), tiene_texto_util(hipotesis)
+    if not ref_util and not hip_util:
+        return AMBAS_FUENTES_SIN_TEXTO, None
+    if not ref_util or not hip_util:
+        return MOTOR_SIN_TEXTO_UTIL, None
+    return FUENTES_COMPARABLES, comparar_fidelidad(referencia, hipotesis)
+
+
 def estado_verificacion_f04(
     textos_por_motor: dict[str, str | None],
-    senales: SenalesPagina,
-) -> tuple[str, str, list[str]]:
-    """Envuelve `fidelidad_legal.evaluar_pagina()` con la regla adicional de
-    F-04: si no corrieron los tres motores requeridos, el resultado es
-    `COMPARACION_INCOMPLETA` -nunca uno de los estados VERIFICADA_*, nunca
-    por confianza declarada de un solo motor-.
+    *,
+    es_tabla: bool = False,
+    texto_golden: str | None = None,
+) -> dict:
+    """Decide el estado epistemológico de una página F-04. Regla de oro:
+    CONCORDANCIA != VERDAD -ninguna rama de esta función produce un nombre
+    que implique verificación comprobada salvo que haya golden humano.
 
-    Con comparación completa, la evidencia cruzada que de verdad cuenta es
-    contra el RENDER VISUAL (Tesseract), no entre pymupdf y pdfplumber entre
-    sí: ambos leen la MISMA capa de texto embebida, así que si esa capa está
-    mal -fuente rota, texto invisible, PDF escaneado con una capa OCR previa
-    de mala calidad- los dos "coinciden" en el mismo error, y esa
-    coincidencia no demuestra nada (es el mismo principio que ya documenta
-    scripts/piloto_verificacion_paginas.py, aplicado aquí a la verificación).
-    Dos motores que leen la misma fuente estando de acuerdo no son evidencia
-    independiente; el cruce contra una fuente de lectura distinta sí lo es.
+    Devuelve un dict (no una tupla) porque F-04-A.2 necesita transportar más
+    que (estado, riesgo, motivos): `golden_available` y las métricas
+    `*_vs_golden` viajan siempre, aunque sean None/False en esta fase.
 
-    Por eso: primero se exige que pymupdf y pdfplumber concuerden en los
-    tokens jurídicos (si NI SIQUIERA ellos concuerdan, ya hay evidencia de
-    discrepancia y no hace falta mirar más); pero la comparación que
-    realmente puede llevar a un estado VERIFICADA_* es la de la capa
-    embebida contra el render independiente.
+    Orden de evaluación:
+      1. Sin los 3 motores completos -> COMPARACION_INCOMPLETA.
+      2. Si hay `texto_golden`: compara contra el mejor candidato disponible
+         y decide con eso -es la única fuente que si puede "verificar"-.
+      3. pymupdf vs pdfplumber (misma capa embebida): si YA discrepan en un
+         token jurídico, no hace falta mirar el render -DISCREPANCIA_ENTRE_FUENTES-.
+      4. Sin ninguna capa embebida útil (página escaneada): Tesseract es la
+         ÚNICA fuente -sin cruce independiente posible, techo
+         REQUIERE_REVISION_HUMANA, nunca "concordancia" ni "discrepancia"-.
+      5. Capa embebida vs render (Tesseract): la comparación que sí cuenta
+         como evidencia cruzada. Si el render no aportó texto útil, es una
+         limitación del render, no una discrepancia. Si discrepan en un
+         token jurídico -> DISCREPANCIA_ENTRE_FUENTES. Si concuerdan pero es
+         una página con tabla, el techo es REQUIERE_REVISION_HUMANA (F-04-A.2
+         · 6: la estructura fila/columna no la verifica una comparación de
+         texto). Si concuerdan y no es tabla -> CONCORDANCIA_AUTOMATICA_ALTA.
     """
+    resultado: dict = {
+        "golden_available": texto_golden is not None,
+        "cer_vs_golden": None, "wer_vs_golden": None, "lter_vs_golden": None,
+    }
+
     if not todas_las_comparaciones_completas(textos_por_motor):
         faltantes = [m for m in MOTORES_REQUERIDOS if textos_por_motor.get(m) is None]
-        return (
-            COMPARACION_INCOMPLETA,
-            RIESGO_ALTO,
-            [f"no corrieron todos los motores requeridos: falta(n) {', '.join(faltantes)}"],
+        resultado.update(
+            estado=COMPARACION_INCOMPLETA, riesgo=RIESGO_ALTO,
+            motivos=[f"no corrieron todos los motores requeridos: falta(n) {', '.join(faltantes)}"],
         )
+        return resultado
 
-    cmp_parsers = discrepancia_entre_motores(textos_por_motor["pymupdf"], textos_por_motor["pdfplumber"])
-    if cmp_parsers.hay_error_juridico:
-        # Ni las dos lecturas de la MISMA capa embebida concuerdan: no hace
-        # falta el render para saber que hay un problema.
-        return evaluar_pagina(replace(senales, comparacion_motores=cmp_parsers))
+    pymupdf, pdfplumber, tesseract = (
+        textos_por_motor["pymupdf"], textos_por_motor["pdfplumber"], textos_por_motor["ocr_tesseract"],
+    )
 
-    referencia_embebida = textos_por_motor["pymupdf"] or textos_por_motor["pdfplumber"] or ""
-    cmp_visual = discrepancia_entre_motores(referencia_embebida, textos_por_motor["ocr_tesseract"])
-    return evaluar_pagina(replace(senales, comparacion_motores=cmp_visual))
+    if texto_golden is not None:
+        candidato = pymupdf if tiene_texto_util(pymupdf) else (
+            pdfplumber if tiene_texto_util(pdfplumber) else tesseract)
+        cmp_golden = comparar_fidelidad(texto_golden, candidato)
+        resultado.update(cer_vs_golden=cmp_golden.cer, wer_vs_golden=cmp_golden.wer,
+                         lter_vs_golden=cmp_golden.legal_token_error_rate)
+        if not cmp_golden.hay_error_juridico:
+            resultado.update(estado=VERIFICADA_HUMANO, riesgo=RIESGO_BAJO,
+                             motivos=["coincide con la transcripción humana validada (golden)"])
+        else:
+            resultado.update(estado=DISCREPANCIA_ENTRE_FUENTES, riesgo=RIESGO_CRITICO,
+                             motivos=["discrepa de la transcripción humana validada (golden) "
+                                      "en un token jurídico"])
+        return resultado
+
+    clasif_parsers, cmp_parsers = comparar_fuentes(pymupdf, pdfplumber)
+    if clasif_parsers == FUENTES_COMPARABLES and cmp_parsers.hay_error_juridico:
+        resultado.update(
+            estado=DISCREPANCIA_ENTRE_FUENTES, riesgo=RIESGO_CRITICO,
+            motivos=["pymupdf y pdfplumber (misma capa embebida) discrepan en un token jurídico"],
+        )
+        return resultado
+
+    referencia_embebida = pymupdf if tiene_texto_util(pymupdf) else (
+        pdfplumber if tiene_texto_util(pdfplumber) else None)
+
+    if referencia_embebida is None:
+        resultado.update(
+            estado=REQUIERE_REVISION_HUMANA, riesgo=RIESGO_ALTO,
+            motivos=["sin capa embebida util (pymupdf y pdfplumber sin texto): Tesseract es la "
+                     "unica fuente disponible, no hay evidencia cruzada independiente posible"],
+        )
+        return resultado
+
+    clasif_visual, cmp_visual = comparar_fuentes(referencia_embebida, tesseract)
+    if clasif_visual == MOTOR_SIN_TEXTO_UTIL:
+        resultado.update(
+            estado=REQUIERE_REVISION_HUMANA, riesgo=RIESGO_ALTO,
+            motivos=["el render (Tesseract) no produjo texto util: no hay evidencia cruzada "
+                     "independiente posible, esto NO es una discrepancia"],
+        )
+        return resultado
+
+    if cmp_visual.hay_error_juridico:
+        resultado.update(
+            estado=DISCREPANCIA_ENTRE_FUENTES, riesgo=RIESGO_CRITICO,
+            motivos=["la capa embebida y el render (Tesseract) discrepan en un token jurídico"],
+        )
+        return resultado
+
+    if es_tabla:
+        resultado.update(
+            estado=REQUIERE_REVISION_HUMANA, riesgo=RIESGO_ALTO,
+            motivos=["pagina con tabla: la concordancia de texto no verifica la estructura "
+                     "fila/columna (F-04-A.2 · 6)"],
+        )
+        return resultado
+
+    resultado.update(
+        estado=CONCORDANCIA_AUTOMATICA_ALTA, riesgo=RIESGO_BAJO,
+        motivos=[f"capa embebida y render (Tesseract) concuerdan en los tokens juridicos "
+                 f"(CER {cmp_visual.cer:.3f}); esto es concordancia automatica, NO verificacion"],
+    )
+    return resultado
 
 
 __all__ = [
@@ -621,7 +780,15 @@ __all__ = [
     "diagnostico_ocr_pool",
     "MOTORES_REQUERIDOS",
     "COMPARACION_INCOMPLETA",
+    "CONCORDANCIA_AUTOMATICA_ALTA",
+    "DISCREPANCIA_ENTRE_FUENTES",
+    "MOTOR_SIN_TEXTO_UTIL",
+    "AMBAS_FUENTES_SIN_TEXTO",
+    "FUENTES_COMPARABLES",
     "todas_las_comparaciones_completas",
+    "tiene_texto_util",
+    "es_mismo_motor_que_almacenado",
+    "comparar_fuentes",
     "estado_verificacion_f04",
     "PDF_IDENTIDAD_EXACTA",
     "PDF_CONTIENE_NORMA_EN_MULTINORMA",

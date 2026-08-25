@@ -1,4 +1,6 @@
-"""CANARY CONTROLADO de F-03B. SOLO DRY-RUN. NUNCA escribe en producción.
+"""CANARY CONTROLADO de F-03B. Dry-run por defecto. `--apply` esta PREPARADO
+pero exige F03B_PDF_WRITE_MODE=canary -que ningun workflow ni secret
+configura todavia-, asi que hoy sigue sin poder escribir.
 
 El canary NO es una excepción a la política documental: es MÁS ESTRICTO que
 producción, no menos. Todas las reglas de `agents/politica_documental.py`
@@ -12,23 +14,47 @@ Reglas propias del canary, todas obligatorias:
      prueba la ruta más simple antes de introducir segmentación-.
   3. `tipo_de_documento` debe ser DOCUMENTO_NORMA_UNICA. Nunca PROYECTO,
      ANEXO ni MULTINORMA, aunque el resolvedor ya haya dado MATCH_EXACTO.
-  4. `file_url` actual debe ser NULL, verificado DOS VECES: una al leer la
-     fila y otra, con una consulta fresca, justo antes de proponer el
-     payload. Si cambió entre medio, esa fila se ABORTA -no hay optimistic
-     assumptions-.
+  4. `file_url` actual debe ser NULL, verificado DOS VECES en el dry-run: una
+     al leer la fila y otra, con una consulta fresca, justo antes de
+     proponer el payload. Si cambió entre medio, esa fila se ABORTA -no hay
+     optimistic assumptions-.
   5. La corrida debe ser determinista: ejecutar el mismo dry-run dos veces
      (A y B) y comparar document_key, identity_expected, pdf_url propuesta,
-     SHA256, estado y page_count. Cualquier diferencia es
-     CANARY_NO_APTO para esa fila.
+     SHA256, estado y page_count. Cualquier diferencia es CANARY_NO_APTO.
 
-Esto NUNCA llama `.insert(`, `.update(`, `.upsert(`, `.delete(` ni escribe en
-Storage. El payload que se mostraria si se escribiera se CONSTRUYE con
+Sin `--apply`, esto NUNCA llama `.insert(`, `.update(`, `.upsert(`,
+`.delete(` ni escribe en Storage. El payload que se mostraria si se
+escribiera se CONSTRUYE con
 `agents.agent_normative_pdf_detector.construir_payload_actualizacion` -el
 mismo codigo que usaria `update_document()` en produccion-, pero nunca se
-pasa a `.execute()`.
+pasa a `.execute()` a menos que TODAS estas guardas de `--apply` se cumplan:
+
+  1.  F03B_PDF_WRITE_MODE == "canary" (exacto, fail-closed por defecto).
+  2.  1 a 3 document_key exactos en la allowlist.
+  3.  Todas las filas existen.
+  4.  file_url actual es NULL (verificado en el dry-run doble).
+  5.  Decision == MATCH_EXACTO.
+  6.  tipo_de_documento == DOCUMENTO_NORMA_UNICA.
+  7.  Auditoria completa.
+  8.  SHA256 estable entre dry-run A y B.
+  9.  Identidad estable entre A y B.
+  10. URL propuesta estable entre A y B.
+  11. Relectura de CADA fila inmediatamente antes de su UPDATE -no se
+      reutiliza el resultado del dry-run como si el tiempo no hubiera
+      pasado-.
+  12. Ninguna precondicion cambio en esa relectura final.
+
+Si UNA fila no supera el preflight final: NINGUNA de las filas se escribe
+-ALL OR NOTHING-. Cada escritura exitosa se verifica con un READ BACK
+inmediato contra Supabase; si no coincide con lo escrito, se detiene sin
+procesar mas filas y se reporta CANARY_FALLO_POST_WRITE. Se generan
+CANARY_F03B_BEFORE/AFTER/DIFF/ROLLBACK.json -el rollback queda preparado,
+NUNCA se ejecuta automaticamente-.
 
 Uso:
     python scripts/canary_f03b_pdf_detector.py --document-keys A,B,C --out-dir reportes
+    # Futuro, con autorizacion humana y F03B_PDF_WRITE_MODE=canary exportado:
+    python scripts/canary_f03b_pdf_detector.py --document-keys A,B,C --apply
 """
 
 from __future__ import annotations
@@ -46,8 +72,10 @@ sys.path.insert(0, str(RAIZ / "agents"))
 sys.path.insert(0, str(RAIZ / "scripts"))
 
 from agents.agent_normative_pdf_detector import (  # noqa: E402
+    WRITE_MODE_CANARY,
     NormativePdfDetectorAgent,
     construir_payload_actualizacion,
+    f03b_write_mode,
     identidad_objetivo_de_documento,
 )
 from identidad_documental import (  # noqa: E402
@@ -60,6 +88,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 MAX_CANARY = 3
+
+# --- Campos que la escritura puede tocar: los mismos que guarda el rollback
+ROLLBACK_CAMPOS = ("has_file", "file_url", "file_name", "file_ext", "mime_type",
+                   "process_status", "process_message", "raw", "updated_at")
 
 # --- Motivos de aborto, para que el reporte sea legible por un humano ------
 ABORT_FUERA_DE_ALLOWLIST = "FUERA_DE_ALLOWLIST"
@@ -109,7 +141,9 @@ def obtener_filas_allowlist(agent: NormativePdfDetectorAgent,
 
 def refrescar_file_url(agent: NormativePdfDetectorAgent, doc_id: str) -> str | None:
     """SOLO LECTURA. Relee el file_url actual de una fila puntual, para la
-    segunda comprobacion de precondicion justo antes de proponer el payload."""
+    segunda comprobacion de precondicion justo antes de proponer el payload,
+    y para la relectura final -una TERCERA vez- inmediatamente antes de
+    cualquier UPDATE en `--apply`."""
     respuesta = (
         agent.supabase
         .table(agent.table_name)
@@ -119,6 +153,58 @@ def refrescar_file_url(agent: NormativePdfDetectorAgent, doc_id: str) -> str | N
         .execute()
     )
     return (respuesta.data or {}).get("file_url")
+
+
+def leer_fila_actual(agent: NormativePdfDetectorAgent, doc_id: str) -> dict | None:
+    """SOLO LECTURA. Relee la fila COMPLETA -no solo file_url-, para el READ
+    BACK posterior a cada UPDATE de `--apply`."""
+    respuesta = (
+        agent.supabase
+        .table(agent.table_name)
+        .select("id, document_key, title, detail_url, file_url, has_file, "
+                "file_name, file_ext, mime_type, process_status, "
+                "process_message, raw, updated_at")
+        .eq("id", doc_id)
+        .single()
+        .execute()
+    )
+    return respuesta.data or None
+
+
+def construir_rollback(snapshot_before: dict) -> dict:
+    """CANARY_F03B_ROLLBACK.json: los valores BEFORE exactos de los campos
+    que la escritura puede tocar, para poder revertir SOLO esos campos con
+    autorizacion humana. No se ejecuta ningun rollback aqui."""
+    return {
+        clave: ({campo: fila.get(campo) for campo in ROLLBACK_CAMPOS} if fila else None)
+        for clave, fila in snapshot_before.items()
+    }
+
+
+def verificar_read_back(fila_leida: dict | None, payload_propuesto: dict,
+                        document_key: str, doc_id: str) -> tuple[bool, list[str]]:
+    """Compara lo que quedo REALMENTE en Supabase -leido de nuevo, no lo que
+    se penso que se escribio- contra el payload propuesto."""
+    if fila_leida is None:
+        return False, [f"{document_key}: no se pudo releer la fila tras el UPDATE"]
+
+    problemas = []
+    if fila_leida.get("id") != doc_id:
+        problemas.append(f"id: esperado {doc_id!r}, leido {fila_leida.get('id')!r}")
+    if fila_leida.get("document_key") != document_key:
+        problemas.append(
+            f"document_key: esperado {document_key!r}, leido {fila_leida.get('document_key')!r}"
+        )
+    for campo in ("file_url", "file_name", "process_status"):
+        if fila_leida.get(campo) != payload_propuesto.get(campo):
+            problemas.append(
+                f"{campo}: esperado {payload_propuesto.get(campo)!r}, "
+                f"leido {fila_leida.get(campo)!r}"
+            )
+    if not (fila_leida.get("raw") or {}).get("pdf_detection"):
+        problemas.append("raw.pdf_detection ausente tras el UPDATE")
+
+    return (len(problemas) == 0), problemas
 
 
 def snapshot_de(fila: dict) -> dict:
@@ -294,11 +380,147 @@ def comparar_corridas(a: list[dict], b: list[dict]) -> tuple[bool, list[str]]:
     return (len(diferencias) == 0), diferencias
 
 
+# --- Veredictos de --apply --------------------------------------------------
+APPLY_BLOQUEADO = "CANARY_APPLY_BLOQUEADO"
+APPLY_FALLO_ESCRITURA = "CANARY_FALLO_ESCRITURA"
+APPLY_FALLO_POST_WRITE = "CANARY_FALLO_POST_WRITE"
+APPLY_APLICADO = "CANARY_APLICADO"
+
+
+def ejecutar_apply(agent: NormativePdfDetectorAgent, document_keys: list[str],
+                   corrida_b: list[dict], deterministico: bool = True,
+                   diferencias: list[str] | None = None) -> dict:
+    """SOLO se invoca si se paso `--apply`. Repite el preflight -relectura
+    de CADA fila, inmediatamente antes de su UPDATE- en vez de confiar en el
+    resultado del dry-run, por viejo que sea de unos segundos: el tiempo
+    pasado entre el dry-run y este momento es exactamente lo que las
+    precondiciones estan hechas para detectar.
+
+    `deterministico`/`diferencias` vienen de `comparar_corridas(A, B)`: si el
+    SHA256, la identidad o la URL propuesta cambiaron entre las dos corridas
+    del dry-run -documento mutable, condicion de carrera, comportamiento no
+    determinista del servidor de origen-, NINGUNA fila se escribe, sin
+    importar que tan "aptas" hayan parecido individualmente.
+
+    ALL OR NOTHING: si UNA fila no supera este preflight final, NINGUNA de
+    las filas se escribe. Cada escritura se verifica con un READ BACK
+    inmediato; si no coincide, se detiene sin procesar las filas restantes.
+    """
+    resultado = {"veredicto": None, "modo": f03b_write_mode(), "motivo": "",
+                "escrituras": []}
+
+    modo = resultado["modo"]
+    if modo != WRITE_MODE_CANARY:
+        resultado["veredicto"] = APPLY_BLOQUEADO
+        resultado["motivo"] = (
+            f"F03B_PDF_WRITE_MODE={modo!r}: --apply exige exactamente "
+            f"{WRITE_MODE_CANARY!r}. NO WRITE."
+        )
+        return resultado
+
+    if not deterministico:
+        resultado["veredicto"] = APPLY_BLOQUEADO
+        resultado["motivo"] = (
+            "el dry-run A vs B no fue deterministico -SHA256, identidad o URL "
+            "propuesta cambiaron entre corridas-: " + "; ".join(diferencias or [])
+        )
+        return resultado
+
+    if not (1 <= len(document_keys) <= MAX_CANARY):
+        resultado["veredicto"] = APPLY_BLOQUEADO
+        resultado["motivo"] = (
+            f"allowlist fuera de rango: {len(document_keys)} document_key "
+            f"(se requiere 1-{MAX_CANARY}). NO WRITE."
+        )
+        return resultado
+
+    # --- Preflight FINAL: relectura de CADA fila, aqui y ahora -------------
+    preflight_final = []
+    for ficha in corrida_b:
+        problema = None
+        if not ficha["apto"]:
+            problema = f"no apto en el dry-run: {ficha['motivo_aborto']}"
+        else:
+            file_url_final = refrescar_file_url(agent, ficha["id"])
+            if file_url_final is not None:
+                problema = "file_url dejo de ser NULL justo antes del UPDATE"
+        preflight_final.append((ficha, problema))
+
+    problemas = [(f["document_key"], p) for f, p in preflight_final if p]
+    if problemas:
+        resultado["veredicto"] = APPLY_BLOQUEADO
+        resultado["motivo"] = (
+            "ALL OR NOTHING: al menos una fila no supero el preflight final, "
+            f"ninguna de las {len(document_keys)} se escribe. "
+            + "; ".join(f"{k}: {p}" for k, p in problemas)
+        )
+        return resultado
+
+    # --- Todas superaron el preflight final: se escribe, con read-back -----
+    for ficha, _ in preflight_final:
+        payload = ficha["payload_propuesto"]
+        resultado_deteccion = {
+            "status": "pdf_detected",
+            "pdf_url": payload["file_url"],
+            "mime_type": payload.get("mime_type", "application/pdf"),
+            "message": ficha["por_que_match_exacto"],
+            "candidatos": payload["raw"]["pdf_detection"].get("candidatos", []),
+        }
+        fila_para_update = {
+            "id": ficha["id"], "document_key": ficha["document_key"],
+            "detail_url": ficha["detail_url"], "raw": {},
+        }
+
+        try:
+            agent.update_document(fila_para_update, resultado_deteccion)
+        except Exception as error:
+            resultado["escrituras"].append({
+                "document_key": ficha["document_key"], "escrito": False,
+                "error": str(error),
+            })
+            resultado["veredicto"] = APPLY_FALLO_ESCRITURA
+            resultado["motivo"] = f"fallo el UPDATE de {ficha['document_key']}: {error}"
+            break
+
+        fila_leida = leer_fila_actual(agent, ficha["id"])
+        ok, problemas_rb = verificar_read_back(
+            fila_leida, payload, ficha["document_key"], ficha["id"]
+        )
+        resultado["escrituras"].append({
+            "document_key": ficha["document_key"], "escrito": True,
+            "read_back_ok": ok, "problemas_read_back": problemas_rb,
+            "fila_leida": fila_leida,
+        })
+        if not ok:
+            resultado["veredicto"] = APPLY_FALLO_POST_WRITE
+            resultado["motivo"] = (
+                f"read-back de {ficha['document_key']} no coincide con lo "
+                "escrito. Detenido: no se procesan mas filas."
+            )
+            break
+
+    if resultado["veredicto"] is None:
+        resultado["veredicto"] = APPLY_APLICADO
+        resultado["motivo"] = (
+            f"{len(resultado['escrituras'])} fila(s) escrita(s) y verificadas por read-back."
+        )
+
+    return resultado
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document-keys", required=True,
                         help=f"Allowlist EXACTA, separada por comas. Maximo {MAX_CANARY}.")
     parser.add_argument("--out-dir", default="reportes")
+    parser.add_argument(
+        "--apply", action="store_true",
+        help=(
+            "Ejecuta la escritura real, TRAS el preflight final y el read-back. "
+            f"Exige F03B_PDF_WRITE_MODE={WRITE_MODE_CANARY!r} exportado en el "
+            "entorno. Sin esta variable en ese valor exacto: NO WRITE."
+        ),
+    )
     args = parser.parse_args()
 
     document_keys = [k.strip() for k in args.document_keys.split(",") if k.strip()]
@@ -349,14 +571,13 @@ def main() -> int:
     todas_aptas = all(f["apto"] for f in corrida_a)
     veredicto = (
         "CANARY_LISTO_PARA_ESCRITURA"
-        if (deterministico and todas_aptas and len(corrida_a) == MAX_CANARY)
+        if (deterministico and todas_aptas and 1 <= len(corrida_a) <= MAX_CANARY)
         else "CANARY_NO_APTO"
     )
-    print(f"\nVEREDICTO: {veredicto}")
+    print(f"\nVEREDICTO DRY-RUN: {veredicto}")
     print(f"\nBEFORE:  {out / 'CANARY_F03B_BEFORE.json'}")
     print(f"DRY-RUN A: {out / 'CANARY_F03B_DRYRUN_A.json'}")
     print(f"DRY-RUN B: {out / 'CANARY_F03B_DRYRUN_B.json'}")
-    print("\nNINGUNA fila fue escrita. NINGUN UPDATE/INSERT/UPSERT/DELETE se ejecuto.")
 
     (out / "CANARY_F03B_VEREDICTO.json").write_text(
         json.dumps({
@@ -367,7 +588,58 @@ def main() -> int:
         }, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return 0
+
+    if not args.apply:
+        print("\nNINGUNA fila fue escrita. NINGUN UPDATE/INSERT/UPSERT/DELETE se ejecuto.")
+        print("(Pase --apply, con F03B_PDF_WRITE_MODE=canary, para intentar la escritura real.)")
+        return 0
+
+    # --- --apply: preflight final + escritura + read-back -------------------
+    logger.warning("=== --apply solicitado: preflight final, escritura y read-back ===")
+    resultado_apply = ejecutar_apply(
+        agent, document_keys, corrida_b,
+        deterministico=deterministico, diferencias=diferencias,
+    )
+
+    snapshot_after = {}
+    for registro in resultado_apply["escrituras"]:
+        clave = registro["document_key"]
+        snapshot_after[clave] = (
+            snapshot_de(registro["fila_leida"]) if registro.get("fila_leida") else None
+        )
+    for clave in document_keys:
+        # Lo que no llego a escribirse -bloqueo ALL OR NOTHING o corte por
+        # fallo- queda identico al BEFORE: no se le toco nada.
+        snapshot_after.setdefault(clave, snapshot_before.get(clave))
+
+    (out / "CANARY_F03B_AFTER.json").write_text(
+        json.dumps(snapshot_after, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+    diff = {
+        clave: {"before": snapshot_before.get(clave), "after": snapshot_after.get(clave)}
+        for clave in document_keys
+    }
+    (out / "CANARY_F03B_DIFF.json").write_text(
+        json.dumps(diff, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+    rollback = construir_rollback(snapshot_before)
+    (out / "CANARY_F03B_ROLLBACK.json").write_text(
+        json.dumps(rollback, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+
+    print("\n" + "=" * 74)
+    print(f"CANARY APPLY — VEREDICTO: {resultado_apply['veredicto']}")
+    print("=" * 74)
+    print(resultado_apply["motivo"])
+    print(f"\nAFTER:    {out / 'CANARY_F03B_AFTER.json'}")
+    print(f"DIFF:     {out / 'CANARY_F03B_DIFF.json'}")
+    print(f"ROLLBACK: {out / 'CANARY_F03B_ROLLBACK.json'} (preparado, NO ejecutado)")
+
+    (out / "CANARY_F03B_APPLY_VEREDICTO.json").write_text(
+        json.dumps(resultado_apply, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+    )
+
+    return 0 if resultado_apply["veredicto"] == APPLY_APLICADO else 1
 
 
 if __name__ == "__main__":

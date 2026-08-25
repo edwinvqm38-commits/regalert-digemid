@@ -85,6 +85,44 @@ def extract_file_name(file_url: str | None) -> str | None:
     return file_name or None
 
 
+# ---------------------------------------------------------------------------
+# Feature flag FAIL-CLOSED (F-03B)
+# ---------------------------------------------------------------------------
+# F03B_PDF_WRITE_MODE decide si esta clase puede llegar a ejecutar un UPDATE
+# real sobre pdf_url/file_url. El default es SIEMPRE "disabled": una
+# variable ausente, vacia, invalida o con cualquier valor no reconocido cae
+# en "disabled". Nunca se asume "enabled" -ni por variable mal escrita, ni
+# por un click accidental en workflow_dispatch sin configurar nada-.
+WRITE_MODE_DISABLED = "disabled"
+WRITE_MODE_CANARY = "canary"
+WRITE_MODE_ENABLED = "enabled"
+_WRITE_MODES_VALIDOS = frozenset({WRITE_MODE_DISABLED, WRITE_MODE_CANARY, WRITE_MODE_ENABLED})
+
+
+def f03b_write_mode() -> str:
+    """Lee F03B_PDF_WRITE_MODE del entorno. FAIL-CLOSED: cualquier valor que
+    no sea EXACTAMENTE uno de los tres modos reconocidos cae en "disabled".
+
+    - "disabled" (default absoluto): el pipeline automatico (`process()`)
+      puede descubrir, descargar candidatos, auditar y calcular decisiones,
+      pero NUNCA llega a `update_document()`.
+    - "canary": tampoco autoriza al pipeline automatico a escribir. Solo
+      habilita el camino EXPLICITO de `scripts/canary_f03b_pdf_detector.py`
+      con `--apply`, sobre una allowlist exacta de hasta 3 document_key.
+    - "enabled": modo futuro de produccion. El pipeline automatico escribe
+      normalmente. NO se activa en esta fase -ningun workflow ni secret lo
+      configura todavia-.
+
+    La comparacion es EXACTA -solo se recorta espacio en blanco sobrante,
+    que es un artefacto comun de como se exportan variables de entorno en
+    shell-. NO se normalizan mayusculas: "Enabled"/"CANARY"/"Canary " no son
+    "reconocidos", son errores de tipeo, y un typo jamas debe poder activar
+    una escritura. Mejor fallar cerrado que adivinar la intencion.
+    """
+    valor = (os.getenv("F03B_PDF_WRITE_MODE") or "").strip()
+    return valor if valor in _WRITE_MODES_VALIDOS else WRITE_MODE_DISABLED
+
+
 def construir_payload_actualizacion(row: dict, result: dict) -> dict:
     """El payload EXACTO que `update_document()` escribiria en Supabase.
 
@@ -469,6 +507,32 @@ class NormativePdfDetectorAgent:
         }
 
     def update_document(self, row: dict, result: dict) -> None:
+        """Ejecuta el UPDATE real. Acepta dos modos:
+
+        - "enabled": el pipeline automatico (`process()`) escribe. Modo
+          futuro de produccion, no activado en esta fase.
+        - "canary": el UNICO llamador legitimo en este modo es el preflight
+          final de `scripts/canary_f03b_pdf_detector.py` (`ejecutar_apply`),
+          que ya exigio -antes de llegar aqui- allowlist de 1-3, MATCH_EXACTO,
+          DOCUMENTO_NORMA_UNICA, auditoria completa, determinismo A/B y una
+          relectura de la fila inmediatamente antes de esta llamada. Este
+          metodo no vuelve a verificar esas condiciones: son
+          responsabilidad del llamador.
+
+        `process()` en modo "disabled"/"canary" nunca llega a llamar a este
+        metodo -esa es la PRIMERA barrera-. Esta comprobacion es la SEGUNDA:
+        si algo mas (un test, un script futuro, un bug en el llamador)
+        llegara a invocar `update_document()` sin que el modo lo autorice,
+        sigue sin poder escribir.
+        """
+        modo = f03b_write_mode()
+        if modo not in (WRITE_MODE_ENABLED, WRITE_MODE_CANARY):
+            raise RuntimeError(
+                f"update_document() bloqueado: F03B_PDF_WRITE_MODE={modo!r} "
+                f"(se requiere {WRITE_MODE_ENABLED!r} o {WRITE_MODE_CANARY!r}). "
+                "Esto no deberia alcanzarse nunca en modo disabled -si se "
+                "alcanzo, el llamador tiene un bug-."
+            )
         payload = construir_payload_actualizacion(row, result)
         (
             self.supabase
@@ -480,8 +544,10 @@ class NormativePdfDetectorAgent:
 
     def process(self) -> dict:
         rows = self.fetch_pending_documents()
+        modo = f03b_write_mode()
         summary = {
             "total_pending": len(rows),
+            "write_mode": modo,
             "pdf_detected": 0,
             "pdf_not_found": 0,
             # F-03B: ningun candidato prueba, por contenido, ser la norma
@@ -498,9 +564,23 @@ class NormativePdfDetectorAgent:
             "pdf_identity_unknown": 0,
             "pdf_detection_error": 0,
             "ignored_link_connection_errors": 0,
+            # F-03B: cuantas decisiones se calcularon pero NO se escribieron
+            # porque F03B_PDF_WRITE_MODE no es "enabled". El pipeline
+            # automatico (`process()`) solo escribe en modo "enabled" -ni
+            # "disabled" ni "canary" autorizan una escritura automatica; el
+            # canary escribe unicamente por su propio camino explicito,
+            # scripts/canary_f03b_pdf_detector.py, con --apply-.
+            "escrituras_omitidas_por_modo": 0,
         }
 
-        logger.info("total_pending=%s", summary["total_pending"])
+        logger.info("total_pending=%s F03B_PDF_WRITE_MODE=%s", summary["total_pending"], modo)
+        if modo != WRITE_MODE_ENABLED:
+            logger.warning(
+                "F03B_PDF_WRITE_MODE=%s: esta corrida calculara decisiones y las "
+                "registrara en los logs, pero NO escribira ningun pdf_url/file_url. "
+                "Solo \"enabled\" autoriza la escritura automatica.",
+                modo,
+            )
 
         for row in rows:
             document_key = row.get("document_key")
@@ -512,40 +592,56 @@ class NormativePdfDetectorAgent:
             try:
                 logger.info("Detectando PDF normativo: %s | %s", document_key, detail_url)
                 result = self.detect_pdf_url(detail_url, identidad_objetivo)
-                self.update_document(row, result)
                 summary[result["status"]] = summary.get(result["status"], 0) + 1
-            except Exception as error:
-                now = utc_now_iso()
-                raw = dict(row.get("raw") or {})
-                raw["pdf_detection"] = {
-                    "status": "pdf_detection_error",
-                    "detail_url": detail_url,
-                    "detected_at": now,
-                    "message": str(error)[:300],
-                }
 
-                (
-                    self.supabase
-                    .table(self.table_name)
-                    .update(
-                        {
-                            "has_file": False,
-                            "process_status": "pdf_detection_error",
-                            "process_message": str(error)[:300],
-                            "updated_at": now,
-                            "raw": raw,
-                        }
+                if modo == WRITE_MODE_ENABLED:
+                    self.update_document(row, result)
+                else:
+                    summary["escrituras_omitidas_por_modo"] += 1
+                    logger.info(
+                        "%s: decision=%s -> NO se escribe (F03B_PDF_WRITE_MODE=%s)",
+                        document_key, result["status"], modo,
                     )
-                    .eq("id", row["id"])
-                    .execute()
-                )
-
+            except Exception as error:
                 summary["pdf_detection_error"] += 1
                 logger.exception(
                     "Error detectando PDF normativo %s: %s",
                     document_key,
                     error,
                 )
+
+                if modo != WRITE_MODE_ENABLED:
+                    summary["escrituras_omitidas_por_modo"] += 1
+                    logger.info(
+                        "%s: error de deteccion -> NO se marca en la base "
+                        "(F03B_PDF_WRITE_MODE=%s)",
+                        document_key, modo,
+                    )
+                else:
+                    now = utc_now_iso()
+                    raw = dict(row.get("raw") or {})
+                    raw["pdf_detection"] = {
+                        "status": "pdf_detection_error",
+                        "detail_url": detail_url,
+                        "detected_at": now,
+                        "message": str(error)[:300],
+                    }
+
+                    (
+                        self.supabase
+                        .table(self.table_name)
+                        .update(
+                            {
+                                "has_file": False,
+                                "process_status": "pdf_detection_error",
+                                "process_message": str(error)[:300],
+                                "updated_at": now,
+                                "raw": raw,
+                            }
+                        )
+                        .eq("id", row["id"])
+                        .execute()
+                    )
 
             time.sleep(random.uniform(0.8, 1.5))
 

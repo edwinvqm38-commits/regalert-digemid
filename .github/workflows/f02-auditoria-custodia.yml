@@ -84,6 +84,16 @@ jobs:
           #
           # Se buscan escrituras contra Supabase, no cualquier metodo llamado
           # insert: sys.path.insert() es legitimo y no toca la base.
+          #
+          # scripts/canary_f03b_pdf_detector.py NO esta en esta lista a
+          # proposito: es el UNICO script de este workflow que legitimamente
+          # puede escribir, a traves de `--apply`, y su seguridad no depende
+          # de que el codigo fuente carezca de `.update(` -eso ya no es
+          # cierto- sino de las guardas en tiempo de ejecucion
+          # (F03B_PDF_WRITE_MODE=="canary" exacto, allowlist de 1-3, preflight
+          # final, ALL OR NOTHING, read-back) verificadas por
+          # tests/test_canary_f03b_pdf_detector.py. Este workflow solo lo
+          # invoca sin `--apply` -ver el paso "CANARY CONTROLADO F-03B"-.
           PATRON='(table\([^)]*\)|from_\([^)]*\))\s*\.\s*(insert|update|upsert|delete)\b'
           PATRON_STORAGE='storage\.from_\([^)]*\)\.(upload|remove|move|copy)'
           if grep -nEH "$PATRON|$PATRON_STORAGE" \
@@ -91,12 +101,16 @@ jobs:
                scripts/piloto_verificacion_paginas.py \
                scripts/generar_revision_visual.py \
                scripts/auditar_identidad_documental.py \
-               scripts/shadow_f03b_pdf_detector.py \
-               scripts/canary_f03b_pdf_detector.py; then
+               scripts/shadow_f03b_pdf_detector.py; then
             echo "ERROR: se detecto una operacion de escritura en un script de auditoria."
             exit 1
           fi
-          echo "Confirmado: los scripts de auditoria solo leen."
+          # El paso "CANARY CONTROLADO F-03B" mas abajo invoca
+          # canary_f03b_pdf_detector.py con un CMD fijo que nunca incluye
+          # --apply -no lo arma desde ningun input-, asi que un click en este
+          # workflow_dispatch no puede convertirse en una escritura aunque el
+          # input document_key contenga literalmente el texto "--apply".
+          echo "Confirmado: los scripts de solo lectura no escriben, y este workflow nunca pasa --apply."
 
       - name: Inventario de cadena de custodia
         if: ${{ inputs.tarea == 'inventario' || inputs.tarea == 'ambas' }}

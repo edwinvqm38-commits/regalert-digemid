@@ -448,7 +448,14 @@ def parse_inventory_items(html_text: str, page_url: str) -> tuple[list[dict], di
                 "categoria": infer_categoria(page_url, canonical_detail, entry.get("tipo_norma_probable")),
                 "descripcion_corta": entry.get("descripcion_corta"),
                 "read_more_url": canonical_detail,
-                "pdf_url": pdf_urls[0] if pdf_urls else None,
+                # F-03B: el inventario ya NO elige. `pdf_urls[0]` era una
+                # eleccion por posicion en el HTML disfrazada de dato, y luego
+                # `import_normativa_inventory_to_supabase` la insertaba en la
+                # base como si alguien la hubiera verificado. El inventario
+                # enumera; la identidad la resuelve quien conoce la norma
+                # objetivo (agents/politica_documental.py).
+                "pdf_url": None,
+                "pdf_url_no_resuelto": bool(pdf_urls),
                 "pdf_urls": pdf_urls,
                 "pdf_urls_count": len(pdf_urls),
                 "_fecha_sort": entry.get("_fecha_sort") or "",

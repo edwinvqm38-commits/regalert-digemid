@@ -15,6 +15,8 @@ on:
           - inventario          # SHA-256 + page_count + completitud de todo el corpus
           - piloto              # 50 paginas de alto riesgo, 3 motores
           - identidad_documental  # ¿cada norma esta asociada al PDF correcto? (F-03)
+          - shadow_f03b          # SHADOW VALIDATION: F-03B contra digemid_documentos real, sin escribir
+          - canary_f03b          # CANARY CONTROLADO: dry-run doble sobre una allowlist de hasta 3 document_key, sin escribir
           - revision_visual     # HTML con imagen del PDF + transcripcion editable
           - ambas               # inventario + piloto
       limite:
@@ -23,7 +25,10 @@ on:
         default: "50"
         type: string
       document_key:
-        description: "Solo esta norma (opcional, para el piloto)"
+        description: >-
+          Solo esta norma (opcional, para el piloto/F-03). Para canary_f03b:
+          allowlist EXACTA de document_key separados por coma, maximo 3
+          (obligatorio para esa tarea).
         required: false
         default: ""
         type: string
@@ -79,17 +84,33 @@ jobs:
           #
           # Se buscan escrituras contra Supabase, no cualquier metodo llamado
           # insert: sys.path.insert() es legitimo y no toca la base.
+          #
+          # scripts/canary_f03b_pdf_detector.py NO esta en esta lista a
+          # proposito: es el UNICO script de este workflow que legitimamente
+          # puede escribir, a traves de `--apply`, y su seguridad no depende
+          # de que el codigo fuente carezca de `.update(` -eso ya no es
+          # cierto- sino de las guardas en tiempo de ejecucion
+          # (F03B_PDF_WRITE_MODE=="canary" exacto, allowlist de 1-3, preflight
+          # final, ALL OR NOTHING, read-back) verificadas por
+          # tests/test_canary_f03b_pdf_detector.py. Este workflow solo lo
+          # invoca sin `--apply` -ver el paso "CANARY CONTROLADO F-03B"-.
           PATRON='(table\([^)]*\)|from_\([^)]*\))\s*\.\s*(insert|update|upsert|delete)\b'
           PATRON_STORAGE='storage\.from_\([^)]*\)\.(upload|remove|move|copy)'
           if grep -nEH "$PATRON|$PATRON_STORAGE" \
                scripts/auditar_custodia_documental.py \
                scripts/piloto_verificacion_paginas.py \
                scripts/generar_revision_visual.py \
-               scripts/auditar_identidad_documental.py; then
+               scripts/auditar_identidad_documental.py \
+               scripts/shadow_f03b_pdf_detector.py; then
             echo "ERROR: se detecto una operacion de escritura en un script de auditoria."
             exit 1
           fi
-          echo "Confirmado: los scripts de auditoria solo leen."
+          # El paso "CANARY CONTROLADO F-03B" mas abajo invoca
+          # canary_f03b_pdf_detector.py con un CMD fijo que nunca incluye
+          # --apply -no lo arma desde ningun input-, asi que un click en este
+          # workflow_dispatch no puede convertirse en una escritura aunque el
+          # input document_key contenga literalmente el texto "--apply".
+          echo "Confirmado: los scripts de solo lectura no escriben, y este workflow nunca pasa --apply."
 
       - name: Inventario de cadena de custodia
         if: ${{ inputs.tarea == 'inventario' || inputs.tarea == 'ambas' }}
@@ -125,6 +146,32 @@ jobs:
             CMD+=(--limite "${{ inputs.limite }}")
           fi
           "${CMD[@]}"
+
+      - name: SHADOW VALIDATION F-03B (solo lectura, no escribe pdf_url/file_url)
+        if: ${{ inputs.tarea == 'shadow_f03b' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CMD=(python scripts/shadow_f03b_pdf_detector.py --out-dir reportes)
+          if [[ -n "${{ inputs.document_key }}" ]]; then
+            CMD+=(--document-key "${{ inputs.document_key }}")
+          elif [[ -n "${{ inputs.limite }}" && "${{ inputs.limite }}" != "0" ]]; then
+            CMD+=(--limite "${{ inputs.limite }}")
+          fi
+          "${CMD[@]}"
+
+      - name: CANARY CONTROLADO F-03B (dry-run doble, cero escrituras)
+        if: ${{ inputs.tarea == 'canary_f03b' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ inputs.document_key }}" ]]; then
+            echo "canary_f03b necesita document_key: allowlist EXACTA separada por coma, maximo 3."
+            exit 1
+          fi
+          python scripts/canary_f03b_pdf_detector.py \
+            --document-keys "${{ inputs.document_key }}" \
+            --out-dir reportes
 
       - name: Reporte visual para revision humana
         if: ${{ inputs.tarea == 'revision_visual' }}

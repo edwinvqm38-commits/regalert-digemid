@@ -18,49 +18,51 @@
     --texto: #111827;
     --amarillo-claro: #fffbeb;
     --amarillo: #92400e;
+    --fuente-cajas: 12px;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
   body {
-    margin: 0;
+    display: flex; flex-direction: column; overflow: hidden;
     font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     color: var(--texto);
     background: #f9fafb;
   }
   pre, textarea, code, .mono { font-family: Consolas, "Courier New", monospace; }
-  header {
-    position: sticky; top: 0; z-index: 20;
-    background: white; border-bottom: 2px solid var(--borde);
-    padding: 10px 16px;
-  }
-  header h1 { margin: 0 0 2px 0; font-size: 18px; }
-  header .sub { color: var(--gris); font-size: 13px; margin-bottom: 8px; }
-  .barra {
-    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
-    padding-top: 6px; border-top: 1px solid var(--gris-claro);
-  }
-  .barra .grupo {
-    display: flex; flex-direction: column; gap: 2px;
-    border: 1px solid var(--borde); border-radius: 6px; padding: 6px 10px;
-    background: var(--gris-claro);
-  }
-  .barra label { font-size: 11px; font-weight: 600; color: var(--gris); }
-  .barra input[type=file] { font-size: 12px; max-width: 220px; }
-  .barra input[type=text] { font-size: 13px; padding: 3px 5px; }
   button {
     cursor: pointer; border: 1px solid var(--azul); background: var(--azul);
     color: white; padding: 7px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    white-space: nowrap;
   }
   button.secundario { background: white; color: var(--azul); }
   button.gris { background: white; color: var(--texto); border-color: var(--borde); }
   button:disabled { opacity: 0.45; cursor: not-allowed; }
   button:hover:not(:disabled) { filter: brightness(1.08); }
-  .progreso { font-size: 13px; font-weight: 600; }
-  .progreso .n { color: var(--azul); }
-  details.panel {
-    background: white; border: 1px solid var(--borde); border-radius: 8px;
-    margin: 10px 16px; padding: 10px 14px;
+
+  /* ---------- Barra superior compacta (siempre visible) ---------- */
+  header {
+    flex: 0 0 auto; background: white; border-bottom: 2px solid var(--borde);
+    padding: 6px 12px;
   }
-  details.panel > summary { cursor: pointer; font-weight: 700; font-size: 14px; padding: 4px 0; }
+  header .fila-titulo { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  header .fila-titulo .titulo-app { font-weight: 800; font-size: 14px; }
+  header .fila-titulo .sub-app { color: var(--gris); font-size: 11px; }
+  header .fila-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  header .fila-nav .nav-doc-info { font-size: 13px; font-weight: 700; min-width: 160px; }
+  header .fila-nav .separador-nav { flex: 1 1 auto; }
+  header .fila-nav .progreso { font-size: 12.5px; font-weight: 600; }
+  header .fila-nav .progreso .n { color: var(--azul); }
+  header .fila-nav .estado-imagenes { font-size: 11.5px; color: var(--gris); }
+  #btn-toggle-sidebar { padding: 6px 10px; }
+
+  /* ---------- Paneles plegables (informacion secundaria) ---------- */
+  details.panel {
+    flex: 0 0 auto;
+    background: white; border-bottom: 1px solid var(--borde);
+    padding: 6px 16px;
+    max-height: 40vh; overflow-y: auto;
+  }
+  details.panel > summary { cursor: pointer; font-weight: 700; font-size: 13px; padding: 4px 0; }
   details.panel table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
   details.panel table th, details.panel table td {
     border: 1px solid var(--borde); padding: 6px 8px; text-align: left; vertical-align: top;
@@ -68,14 +70,24 @@
   details.panel table th { background: var(--gris-claro); }
   .critico { color: var(--rojo); font-weight: 700; }
   .no-critico { color: var(--verde); }
-  main.layout {
-    display: flex; align-items: flex-start; gap: 0;
-    height: calc(100vh - 190px); min-height: 400px;
+  .barra-carga { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 6px 0; }
+  .barra-carga .grupo {
+    display: flex; flex-direction: column; gap: 2px;
+    border: 1px solid var(--borde); border-radius: 6px; padding: 6px 10px;
+    background: var(--gris-claro);
   }
+  .barra-carga label { font-size: 11px; font-weight: 600; color: var(--gris); }
+  .barra-carga input[type=file] { font-size: 12px; max-width: 220px; }
+  .barra-carga input[type=text] { font-size: 13px; padding: 3px 5px; }
+
+  /* ---------- Layout principal: sidebar | imagen | panel derecho ---------- */
+  main.layout { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+
   #sidebar {
-    width: 300px; flex: 0 0 300px; overflow-y: auto; height: 100%;
+    flex: 0 0 240px; width: 240px; overflow-y: auto;
     border-right: 1px solid var(--borde); background: white;
   }
+  #sidebar.colapsado { flex: 0 0 0; width: 0; overflow: hidden; border: none; }
   #sidebar .fila-doc {
     padding: 8px 10px; border-bottom: 1px solid var(--gris-claro); cursor: pointer;
     font-size: 12.5px; display: flex; gap: 8px; align-items: flex-start;
@@ -89,10 +101,30 @@
   #sidebar .punto.revisada { background: var(--verde); }
   #sidebar .clave-doc { font-weight: 600; word-break: break-all; }
   #sidebar .badge-estado { font-size: 10.5px; color: var(--gris); display: block; margin-top: 2px; }
-  #detalle { flex: 1 1 auto; overflow-y: auto; height: 100%; padding: 16px 20px; background: #f9fafb; }
-  #detalle .vacio { color: var(--gris); font-style: italic; padding: 40px; text-align: center; }
-  .cabecera-pagina h2 { margin: 0 0 4px 0; font-size: 17px; }
-  .meta-linea { font-size: 13px; color: var(--gris); margin-bottom: 4px; }
+
+  #panel-imagen {
+    flex: 0 0 50%; max-width: 52%; min-width: 30%; height: 100%;
+    display: flex; flex-direction: column; background: white; border-right: 1px solid var(--borde);
+  }
+  #panel-imagen .controles-imagen {
+    flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    background: var(--azul-claro); padding: 6px 10px; font-size: 12.5px;
+  }
+  #panel-imagen .controles-imagen button { padding: 4px 10px; font-size: 12px; }
+  #panel-imagen .nivel-zoom { font-weight: 700; min-width: 42px; text-align: center; }
+  #panel-imagen .contenedor-scroll-imagen {
+    flex: 1 1 auto; overflow: auto; background: #52525b; text-align: center; padding: 10px;
+  }
+  #panel-imagen .contenedor-scroll-imagen img { display: inline-block; max-width: none; }
+  .sin-imagen-aviso {
+    border: 1px dashed var(--gris); border-radius: 8px; padding: 14px; margin: 14px;
+    color: var(--gris); font-size: 13px; background: var(--gris-claro);
+  }
+
+  #panel-derecho { flex: 1 1 50%; min-width: 30%; height: 100%; overflow-y: auto; padding: 14px 16px 0 16px; }
+  #panel-derecho .vacio { color: var(--gris); font-style: italic; padding: 40px; text-align: center; }
+  .cabecera-pagina h2 { margin: 0 0 4px 0; font-size: 16px; }
+  .meta-linea { font-size: 12.5px; color: var(--gris); margin-bottom: 4px; }
   .meta-linea a { color: var(--azul); }
   .badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px 0; }
   .badge {
@@ -105,74 +137,105 @@
   .badge.estado-COMPARACION_INCOMPLETA,
   .badge.estado-PDF_NO_DESCARGABLE,
   .badge.estado-PAGINA_FUERA_DEL_PDF { background: var(--gris-claro); color: var(--gris); }
-  .caja-diagnostico {
-    border: 1px solid var(--borde); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px;
+
+  details.panel-interno {
+    border: 1px solid var(--borde); border-radius: 8px; padding: 6px 10px; margin-bottom: 10px;
     background: #fffef7; font-size: 13px;
   }
-  .caja-diagnostico .titulo { font-weight: 700; margin-bottom: 4px; }
-  .caja-diagnostico ul { margin: 4px 0 0 18px; padding: 0; }
-  .tabla-pares { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 14px; }
+  details.panel-interno > summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+  details.panel-interno ul { margin: 4px 0 0 18px; padding: 0; }
+  .tabla-pares { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
   .tabla-pares th, .tabla-pares td { border: 1px solid var(--borde); padding: 5px 7px; text-align: left; }
   .tabla-pares th { background: var(--gris-claro); }
   .si-critico { color: var(--rojo); font-weight: 700; }
-  .visor-imagen {
-    border: 2px solid var(--azul); border-radius: 8px; overflow: hidden; margin-bottom: 14px; background: white;
+
+  #bloque-diferencias {
+    border: 2px solid var(--rojo); background: var(--rojo-claro); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 14px;
   }
-  .visor-imagen .controles-imagen {
-    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-    background: var(--azul-claro); padding: 6px 10px; font-size: 12.5px;
+  .titulo-diferencias { font-weight: 800; color: var(--rojo); margin-bottom: 6px; font-size: 13px; }
+  .titulo-diferencias small { font-weight: 500; color: var(--texto); }
+  .grupo-diferencia { margin: 4px 0; font-size: 12.5px; }
+  .etiqueta-categoria { font-weight: 700; margin-right: 6px; }
+  .chip-diferencia {
+    background: white; color: var(--rojo); border: 1px solid var(--rojo); border-radius: 6px;
+    padding: 2px 8px; font-size: 12px; font-weight: 600; display: inline-block; margin: 2px 4px 2px 0;
   }
-  .visor-imagen .controles-imagen button { padding: 4px 10px; font-size: 12px; }
-  .visor-imagen .nivel-zoom { font-weight: 700; min-width: 46px; text-align: center; }
-  .visor-imagen .contenedor-scroll-imagen {
-    overflow: auto; max-height: 640px; background: #52525b; text-align: center; padding: 10px;
+  .sin-diferencias {
+    border: 1px solid var(--verde); background: var(--verde-claro); color: var(--verde);
+    border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 13px;
   }
-  .visor-imagen .contenedor-scroll-imagen img { display: inline-block; max-width: none; }
-  .sin-imagen-aviso {
-    border: 1px dashed var(--gris); border-radius: 8px; padding: 14px; margin-bottom: 14px;
-    color: var(--gris); font-size: 13px; background: var(--gris-claro);
-  }
-  .estado-imagenes { font-size: 12px; color: var(--gris); }
-  .textos-candidatos { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
-  @media (max-width: 900px) { .textos-candidatos { grid-template-columns: 1fr; } }
-  .caja-texto {
-    border: 1px solid var(--borde); border-radius: 8px; overflow: hidden; background: white;
-  }
+
+  .fila-fuentes-titulo { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .fila-fuentes-titulo label.etiqueta { margin: 0; }
+  .ajuste-fuente { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+  .ajuste-fuente button { padding: 2px 9px; font-size: 12px; }
+  .grid-fuentes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+  @media (max-width: 900px) { .grid-fuentes { grid-template-columns: 1fr; } }
+  .caja-texto { border: 1px solid var(--borde); border-radius: 8px; overflow: hidden; background: white; }
   .caja-texto .cabecera-caja {
     display: flex; justify-content: space-between; align-items: center;
     background: var(--gris-claro); padding: 5px 9px; font-size: 12.5px; font-weight: 700;
   }
   .caja-texto .cabecera-caja button { padding: 3px 8px; font-size: 11px; }
   .caja-texto pre {
-    margin: 0; padding: 8px 9px; max-height: 220px; overflow: auto; font-size: 12px;
+    margin: 0; padding: 8px 9px; max-height: 260px; overflow: auto; font-size: var(--fuente-cajas);
     white-space: pre-wrap; word-break: break-word;
   }
   .caja-texto .vacio-motor { color: var(--gris); font-style: italic; padding: 8px 9px; font-size: 12px; }
+
   .bloque-decision {
     border: 2px solid var(--azul); border-radius: 8px; padding: 12px; background: var(--azul-claro);
     margin-bottom: 14px;
   }
   .bloque-decision .opcion { display: block; margin: 6px 0; font-size: 13.5px; }
   .bloque-decision .opcion small { color: var(--gris); display: block; margin-left: 24px; }
-  textarea#golden_text { width: 100%; min-height: 160px; font-size: 13px; padding: 8px; border: 1px solid var(--borde); border-radius: 6px; }
-  textarea#observaciones { width: 100%; min-height: 60px; font-size: 13px; padding: 8px; border: 1px solid var(--borde); border-radius: 6px; }
+  textarea#golden_text { width: 100%; min-height: 140px; font-size: 13px; padding: 8px; border: 1px solid var(--borde); border-radius: 6px; }
+  textarea#observaciones { width: 100%; min-height: 50px; font-size: 13px; padding: 8px; border: 1px solid var(--borde); border-radius: 6px; }
   label.etiqueta { font-weight: 700; font-size: 13px; display: block; margin: 10px 0 4px 0; }
-  .acciones-pagina { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
   .aviso-vacio-golden { color: var(--amarillo); font-size: 12.5px; margin-top: 4px; }
-  footer { text-align: center; color: var(--gris); font-size: 11.5px; padding: 14px; }
-  .campo-vacio-carga { padding: 60px 20px; text-align: center; color: var(--gris); }
-  .campo-vacio-carga strong { color: var(--texto); }
+
+  #barra-pie-derecho {
+    position: sticky; bottom: 0; left: 0; right: 0;
+    background: white; border-top: 2px solid var(--azul);
+    margin: 14px -16px 0 -16px; padding: 10px 16px;
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+
+  footer { flex: 0 0 auto; text-align: center; color: var(--gris); font-size: 11px; padding: 4px; background: white; border-top: 1px solid var(--gris-claro); }
+
+  @media (max-width: 1200px) {
+    body { overflow: auto; height: auto; }
+    main.layout { flex-direction: column; height: auto; overflow: visible; }
+    #sidebar { flex: 0 0 auto; width: auto; height: 180px; }
+    #sidebar.colapsado { height: 0; }
+    #panel-imagen { flex: 0 0 auto; max-width: 100%; height: 60vh; border-right: none; border-bottom: 1px solid var(--borde); }
+    #panel-derecho { flex: 1 1 auto; height: auto; overflow-y: visible; }
+  }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>F-04-B &mdash; Revisión humana de páginas (golden)</h1>
-  <div class="sub">
-    Herramienta 100% local y sin conexión a internet. No escribe en Supabase. No envía nada a ningún servidor.
-    Todo lo que hagas queda en tu computadora hasta que tú decidas exportarlo.
+  <div class="fila-titulo">
+    <span class="titulo-app">F-04-B — Revisión humana</span>
+    <span class="sub-app">100% local · sin internet · no escribe en Supabase · CONCORDANCIA != VERDAD</span>
   </div>
-  <div class="barra">
+  <div class="fila-nav">
+    <button id="btn-toggle-sidebar" class="gris" title="Mostrar/ocultar lista de documentos">☰ Documentos</button>
+    <button id="btn-anterior" class="secundario" disabled>◀ Anterior</button>
+    <span class="nav-doc-info" id="nav-doc-info">Carga los datos para empezar</span>
+    <button id="btn-siguiente" class="secundario" disabled>Siguiente ▶</button>
+    <span class="separador-nav"></span>
+    <span class="progreso">Revisadas: <span class="n" id="contador-revisadas">0</span>/<span id="contador-total">0</span></span>
+    <span class="estado-imagenes" id="estado-imagenes"></span>
+    <button id="btn-guardar-nav" disabled>Guardar y siguiente</button>
+  </div>
+</header>
+
+<details class="panel" id="panel-carga" open>
+  <summary>📂 Cargar archivos y progreso</summary>
+  <div class="barra-carga">
     <div class="grupo">
       <label>1&#41; Comparación de motores (obligatorio)</label>
       <input type="file" id="input-comparacion" accept=".json">
@@ -193,38 +256,29 @@
       <label>Tu nombre (para el archivo exportado)</label>
       <input type="text" id="nombre-revisor" placeholder="Ej: María Pérez">
     </div>
-    <div class="grupo">
-      <label>Progreso</label>
-      <span class="progreso"><span class="n" id="contador-revisadas">0</span> / <span id="contador-total">0</span> revisadas</span>
-      <span class="estado-imagenes" id="estado-imagenes"></span>
-    </div>
     <button id="btn-exportar-json" disabled>Exportar decisiones (JSON)</button>
     <button id="btn-exportar-csv" class="secundario" disabled>Exportar tabla (CSV, solo lectura)</button>
   </div>
-</header>
+</details>
 
-<details class="panel" id="panel-instrucciones" open>
+<details class="panel" id="panel-instrucciones">
   <summary>📋 Instrucciones — léelas antes de empezar</summary>
   <p><strong>Qué es esto:</strong> por cada página de la muestra, el sistema ya extrajo el texto con 4 fuentes distintas
   (lo que ya estaba guardado, y 3 lecturas frescas: PyMuPDF, pdfplumber y Tesseract/OCR). Ninguna de esas 4 fuentes se
-  considera "la verdad" todavía. Tu trabajo es decidir, leyendo el PDF real cuando haga falta, cuál de esas 4 es
+  considera "la verdad" todavía. Tu trabajo es decidir, mirando la imagen de la página a la izquierda, cuál de esas 4 es
   correcta &mdash;o si ninguna lo es, escribir tú el texto correcto&mdash; y dejar ese texto como <code>golden_text</code>: la
   transcripción validada por un humano.</p>
   <p><strong>Pasos por cada página:</strong></p>
   <ol>
-    <li>En la barra lateral izquierda, haz clic en una página (las no revisadas tienen un punto gris).</li>
-    <li>La imagen de esa página exacta aparece arriba, dentro de la misma herramienta &mdash;no hace falta abrir el PDF
-      por separado ni buscar la página a mano. Usa los botones "+"/"−" para acercar o alejar, o "Abrir imagen a
-      tamaño completo" para verla al máximo detalle en una pestaña nueva (útil para números, artículos, porcentajes,
-      tablas y letra pequeña). El enlace al PDF completo queda solo como respaldo, por si necesitas ver páginas
-      vecinas.</li>
+    <li>La imagen de la página permanece siempre visible a la izquierda mientras trabajas a la derecha &mdash;no hace
+      falta desplazarte para volver a verla. Usa "+"/"−" para acercar o alejar, "Ajustar ancho"/"100%" para cambiar el
+      encuadre, o "Abrir imagen a tamaño completo" para verla al máximo detalle en una pestaña nueva.</li>
     <li>Lee las 4 cajas de texto (guardado, PyMuPDF, pdfplumber, Tesseract) y compáralas contra la imagen.</li>
-    <li>Revisa la caja amarilla "Diagnóstico automático": te dice en qué NO coinciden los motores entre sí. Es una
-      ayuda para saber dónde mirar con más cuidado &mdash;no es una verificación.</li>
-    <li>Marca una decisión (más abajo se explica cada una) y ajusta el texto en <code>golden_text</code> hasta que sea
-      exactamente lo que dice el PDF.</li>
-    <li>Escribe cualquier observación relevante (por ejemplo: "firma ilegible", "tabla revisada celda por celda").</li>
-    <li>Haz clic en "Guardar esta página". La herramienta pasa automáticamente a la siguiente página pendiente.</li>
+    <li>Revisa el bloque rojo "DIFERENCIAS A REVISAR": marca en qué NO coinciden los motores en los puntos jurídicamente
+      más sensibles. Es una ayuda para saber dónde mirar con más cuidado &mdash;no es una verificación.</li>
+    <li>Marca una decisión y ajusta el texto en <code>golden_text</code> hasta que sea exactamente lo que dice la imagen.</li>
+    <li>Haz clic en "Guardar y siguiente" (arriba o al pie del panel derecho). Avanza automáticamente a la página
+      siguiente.</li>
   </ol>
   <p><strong>Las 5 decisiones posibles:</strong></p>
   <ul>
@@ -233,20 +287,17 @@
     <li><b>CORRECTO_PDFPLUMBER</b>: el texto de pdfplumber es correcto tal cual está.</li>
     <li><b>CORRECTO_TESSERACT</b>: el texto de Tesseract (OCR) es correcto tal cual está.</li>
     <li><b>NINGUNO_TRANSCRIBIR_MANUAL</b>: ninguna de las 4 fuentes es correcta tal cual &mdash;tuviste que escribir o
-      corregir el texto tú misma/o leyendo el PDF.</li>
+      corregir el texto tú misma/o.</li>
   </ul>
-  <p>Cada caja de texto tiene un botón "Copiar a golden_text": solo copia el texto como punto de partida para que lo
+  <p>Cada caja de texto tiene un botón "Usar como golden": solo copia el texto como punto de partida para que lo
   edites, <u>no marca ninguna decisión por sí solo</u>. La decisión siempre la eliges tú a mano, aparte.</p>
   <p><strong>Guardar tu trabajo &mdash; muy importante:</strong> este archivo HTML puede o no recordar tu avance si cierras
-  el navegador (depende de cómo lo hayas abierto). La única forma <u>garantizada</u> de no perder tu trabajo es hacer
-  clic en <b>"Exportar decisiones (JSON)"</b> y guardar ese archivo en tu computadora, sobre todo antes de cerrar la
-  ventana o cambiar de computadora. Si vuelves otro día, vuelve a cargar los archivos 1 y 2 igual que la primera vez,
-  y además carga en el punto <b>3) Continuar progreso guardado</b> el último JSON que exportaste: tu avance
-  reaparecerá tal como lo dejaste.</p>
-  <p><strong>Cuando termines todas las páginas (o cuando quieras entregar un avance parcial):</strong> exporta el JSON
-  y envía ese archivo &mdash;adjúntalo en tu próxima conversación con Claude, o por el medio que hayan acordado&mdash; para
-  que se puedan calcular las métricas de error contra tu revisión (golden). No hace falta que envíes el CSV: ese es
-  solo para que tú lo revises en Excel si quieres, la herramienta no lo puede volver a leer.</p>
+  el navegador. La única forma <u>garantizada</u> de no perder tu trabajo es hacer clic en <b>"Exportar decisiones
+  (JSON)"</b> y guardar ese archivo. Si vuelves otro día, vuelve a cargar los archivos 1-3 igual que la primera vez, y
+  además carga en el punto <b>4) Continuar progreso guardado</b> el último JSON que exportaste.</p>
+  <p><strong>Cuando termines (o para entregar un avance parcial):</strong> exporta el JSON y envíalo &mdash;adjúntalo en tu
+  próxima conversación con Claude, o por el medio que hayan acordado&mdash; para calcular las métricas de error contra tu
+  revisión (golden).</p>
 </details>
 
 <details class="panel" id="panel-guia-diferencias">
@@ -268,11 +319,11 @@
     <tr><td>Montos en soles (S/.) y plazos en días</td><td class="critico">CRÍTICO.</td></tr>
     <tr><td>Dosis, concentraciones, medidas (mg, mL, %, °C)</td><td class="critico">CRÍTICO &mdash;puede ser un riesgo
       sanitario directo, no solo documental.</td></tr>
-    <tr><td>Verbos como DEROGA / MODIFICA / SUSTITUYE / INCORPORA / SUSPENDE, y la palabra "NO" justo antes de ellos</td>
+    <tr><td>Verbos como DEROGA / MODIFICA / SUSTITUYE / INCORPORA / EXONERA / SUSPENDE, y la palabra "NO" justo antes de ellos</td>
       <td class="critico">EXTREMADAMENTE CRÍTICO. "Deróguese" y "NO deróguese" son efectos legales opuestos, aunque
       ningún número haya cambiado. Lee esta parte con el máximo cuidado.</td></tr>
     <tr><td>Tablas (filas y columnas)</td><td class="critico">CRÍTICO. Ningún motor automático verifica si una fila o
-      columna quedó bien ubicada &mdash;siempre léela contra el PDF real, celda por celda, antes de aceptar cualquier
+      columna quedó bien ubicada &mdash;siempre léela contra la imagen, celda por celda, antes de aceptar cualquier
       candidato.</td></tr>
     <tr><td>Firmas y sellos</td><td>No se pueden transcribir con certeza como texto. Anota en "observaciones" algo como
       "firma/sello no verificable por texto" &mdash;no lo marques como un error de transcripción.</td></tr>
@@ -281,11 +332,16 @@
 
 <main class="layout">
   <div id="sidebar"></div>
-  <div id="detalle"><div class="vacio">Carga el archivo "Comparación de motores (JSON)" arriba para empezar.</div></div>
+
+  <div id="panel-imagen">
+    <div class="sin-imagen-aviso" id="aviso-sin-imagen-inicial">Carga los archivos de datos arriba para ver la imagen de cada página aquí.</div>
+  </div>
+
+  <div id="panel-derecho"><div class="vacio">Carga el archivo "Comparación de motores (JSON)" arriba para empezar.</div></div>
 </main>
 
 <footer>
-  F-04-B · Herramienta offline, sin llamadas de red, sin escritura en Supabase · CONCORDANCIA != VERDAD · Ante duda: NO VERIFICADO
+  F-04-B · Herramienta offline, sin llamadas de red, sin escritura en Supabase · Ante duda: NO VERIFICADO
 </footer>
 
 <script>
@@ -307,6 +363,8 @@
     stored_vs_render_tesseract: "Guardado vs render Tesseract fresco",
     tesseract_reproducibility: "Reproducibilidad Tesseract (mismo motor que el guardado)"
   };
+  var CAMPOS_PARES = ["embedded_pymupdf_vs_embedded_pdfplumber", "embedded_vs_render_tesseract",
+    "stored_vs_embedded", "stored_vs_render_tesseract", "tesseract_reproducibility"];
   var DECISIONES = [
     ["CORRECTO_ALMACENADO", "El texto YA GUARDADO es correcto tal cual."],
     ["CORRECTO_PYMUPDF", "El texto de PyMuPDF es correcto tal cual."],
@@ -318,6 +376,23 @@
 
   var NIVELES_ZOOM = [0.5, 0.75, 1, 1.5, 2, 3, 4];
   var ANCHO_BASE_IMAGEN_PX = 800;
+  var TAMANOS_FUENTE = [11, 12, 13, 14, 16, 18];
+
+  var CATEGORIA_LABEL = {
+    verbo_normativo: "Verbo normativo (DEROGA/MODIFICA/SUSTITUYE/INCORPORA/EXONERA/NO)",
+    referencia_normativa: "Número de norma",
+    articulo: "Artículo",
+    numeral: "Numeral / inciso",
+    fecha: "Fecha",
+    anio: "Año",
+    porcentaje: "Porcentaje",
+    monto: "Monto (S/.)",
+    plazo: "Plazo (días)",
+    medida: "Dosis / medida"
+  };
+  var ORDEN_CATEGORIAS = ["verbo_normativo", "referencia_normativa", "articulo", "numeral",
+    "fecha", "anio", "porcentaje", "monto", "plazo", "medida"];
+  var RE_ERROR_TOKEN = /^(\w+):\s*(.*?)\s*->\s*(.*)$/;
 
   var paginas = [];          // arreglo de registros de F04_COMPARACION_MOTORES.json (.paginas)
   var manifestPorClave = {}; // clave -> fila del manifest V2
@@ -326,6 +401,8 @@
   var claveActual = null;
   var cambiosSinExportar = false;
   var zoomActualIdx = NIVELES_ZOOM.indexOf(1);
+  var anchoAjustado = false; // true = "ajustar ancho" (100% del contenedor) en vez de ancho fijo por zoom
+  var tamanoFuenteIdx = TAMANOS_FUENTE.indexOf(12);
 
   function clave(docKey, pageNumber) { return docKey + "::" + pageNumber; }
   function escapeHtml(s) {
@@ -364,6 +441,13 @@
     }
   });
 
+  function ordenarParaMostrar(lista) {
+    return lista.slice().sort(function (a, b) {
+      if (a.document_key !== b.document_key) return a.document_key < b.document_key ? -1 : 1;
+      return (a.page_number || 0) - (b.page_number || 0);
+    });
+  }
+
   function actualizarContadores() {
     document.getElementById("contador-total").textContent = paginas.length;
     var revisadas = 0;
@@ -375,13 +459,23 @@
     var hayDatos = paginas.length > 0;
     document.getElementById("btn-exportar-json").disabled = !hayDatos;
     document.getElementById("btn-exportar-csv").disabled = !hayDatos;
+    actualizarBotonesNav();
   }
 
-  function ordenarParaMostrar(lista) {
-    return lista.slice().sort(function (a, b) {
-      if (a.document_key !== b.document_key) return a.document_key < b.document_key ? -1 : 1;
-      return (a.page_number || 0) - (b.page_number || 0);
-    });
+  function actualizarBotonesNav() {
+    var ordenadas = ordenarParaMostrar(paginas);
+    var total = ordenadas.length;
+    var idx = claveActual ? ordenadas.findIndex(function (p) { return clave(p.document_key, p.page_number) === claveActual; }) : -1;
+    document.getElementById("btn-anterior").disabled = idx <= 0;
+    document.getElementById("btn-siguiente").disabled = idx === -1 || idx >= total - 1;
+    document.getElementById("btn-guardar-nav").disabled = idx === -1;
+    var etiquetaNav = document.getElementById("nav-doc-info");
+    if (idx !== -1) {
+      var p = ordenadas[idx];
+      etiquetaNav.textContent = p.document_key + " · página " + p.page_number + "  (" + (idx + 1) + "/" + total + ")";
+    } else {
+      etiquetaNav.textContent = total ? "Elige una página en la lista" : "Carga los datos para empezar";
+    }
   }
 
   function renderSidebar() {
@@ -408,7 +502,7 @@
     return (
       '<div class="caja-texto">' +
       '<div class="cabecera-caja"><span>' + escapeHtml(titulo) + '</span>' +
-      (tieneTexto ? '<button type="button" class="secundario copiar-golden" data-fuente="' + id + '">Copiar a golden_text</button>' : "") +
+      (tieneTexto ? '<button type="button" class="secundario copiar-golden" data-fuente="' + id + '">Usar como golden</button>' : "") +
       '</div>' +
       (tieneTexto
         ? '<pre>' + escapeHtml(texto) + '</pre>'
@@ -430,18 +524,135 @@
     );
   }
 
+  function parsearErrorToken(s) {
+    var m = RE_ERROR_TOKEN.exec(s);
+    if (!m) return null;
+    function limpiar(v) {
+      v = (v || "").trim();
+      if (v === "None") return null;
+      if (v.length >= 2 && v[0] === "'" && v[v.length - 1] === "'") return v.slice(1, -1);
+      return v;
+    }
+    return { categoria: m[1], esperado: limpiar(m[2]), obtenido: limpiar(m[3]) };
+  }
+
+  function extraerDiferenciasPriorizadas(p) {
+    var vistos = {};
+    var porCategoria = {};
+    CAMPOS_PARES.forEach(function (campo) {
+      var cmp = p[campo];
+      if (!cmp || !cmp.errores) return;
+      cmp.errores.forEach(function (s) {
+        var e = parsearErrorToken(s);
+        if (!e) return;
+        var dedupeKey = e.categoria + "|" + e.esperado + "|" + e.obtenido;
+        if (vistos[dedupeKey]) return;
+        vistos[dedupeKey] = true;
+        (porCategoria[e.categoria] = porCategoria[e.categoria] || []).push(e);
+      });
+    });
+    return ORDEN_CATEGORIAS
+      .filter(function (c) { return porCategoria[c] && porCategoria[c].length; })
+      .map(function (c) { return { categoria: c, etiqueta: CATEGORIA_LABEL[c] || c, items: porCategoria[c] }; });
+  }
+
+  function renderBloqueDiferencias(p) {
+    var grupos = extraerDiferenciasPriorizadas(p);
+    if (!grupos.length) {
+      return '<div class="sin-diferencias">✔ Sin diferencias de tokens jurídicos detectadas entre las fuentes ' +
+        'disponibles para esta página. (Ayuda visual automática &mdash; no es una verificación.)</div>';
+    }
+    var html = '<div id="bloque-diferencias"><div class="titulo-diferencias">⚠ DIFERENCIAS A REVISAR ' +
+      '<small>(ayuda visual, NO es una verificación)</small></div>';
+    grupos.forEach(function (g) {
+      html += '<div class="grupo-diferencia"><span class="etiqueta-categoria">' + escapeHtml(g.etiqueta) + ':</span>';
+      g.items.forEach(function (it) {
+        html += ' <span class="chip-diferencia">' + escapeHtml(it.esperado == null ? "∅" : it.esperado) +
+          " &rarr; " + escapeHtml(it.obtenido == null ? "∅" : it.obtenido) + "</span>";
+      });
+      html += "</div>";
+    });
+    html += "</div>";
+    return html;
+  }
+
+  function renderPanelImagen(p, k) {
+    var m = manifestPorClave[k];
+    var indiceImg = indicePorClave[k];
+    var tieneImagen = indiceImg && indiceImg.estado === "RENDERIZADO_OK" && indiceImg.archivo_imagen;
+    var cont = document.getElementById("panel-imagen");
+
+    if (!tieneImagen) {
+      cont.innerHTML = '<div class="sin-imagen-aviso">⚠ No hay imagen disponible para esta página' +
+        (indiceImg && indiceImg.estado ? " (motivo: " + escapeHtml(indiceImg.estado) + ")" : " (carga el archivo del punto 3, \"Índice de imágenes\", si aún no lo hiciste)") +
+        (m && m.pdf_url ? '. Usa el enlace de respaldo: <a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener">Abrir PDF</a> y ubica la página ' + escapeHtml(p.page_number) + "." : ".") +
+        "</div>";
+      return;
+    }
+
+    cont.innerHTML =
+      '<div class="controles-imagen">' +
+      '<button type="button" class="secundario" id="btn-zoom-menos" title="Alejar">&minus;</button>' +
+      '<span class="nivel-zoom" id="nivel-zoom-actual"></span>' +
+      '<button type="button" class="secundario" id="btn-zoom-mas" title="Acercar">+</button>' +
+      '<button type="button" class="gris" id="btn-ajustar-ancho">Ajustar ancho</button>' +
+      '<button type="button" class="gris" id="btn-zoom-100">100%</button>' +
+      '<a class="secundario" style="text-decoration:none;padding:4px 10px;border-radius:6px;border:1px solid var(--azul);color:var(--azul);" href="' + escapeHtml(indiceImg.archivo_imagen) + '" target="_blank" rel="noopener">Abrir imagen a tamaño completo ⤢</a>' +
+      (m && m.pdf_url ? '<a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px;">(Respaldo) Abrir PDF completo, página ' + escapeHtml(p.page_number) + "</a>" : "") +
+      "</div>" +
+      '<div class="contenedor-scroll-imagen"><img id="imagen-pagina-actual" src="' + escapeHtml(indiceImg.archivo_imagen) + '" alt="Página ' + escapeHtml(p.page_number) + " de " + escapeHtml(p.document_key) + '"></div>';
+
+    anchoAjustado = false;
+    zoomActualIdx = NIVELES_ZOOM.indexOf(1);
+    aplicarZoom();
+    document.getElementById("btn-zoom-mas").addEventListener("click", function () {
+      anchoAjustado = false;
+      zoomActualIdx = Math.min(zoomActualIdx + 1, NIVELES_ZOOM.length - 1);
+      aplicarZoom();
+    });
+    document.getElementById("btn-zoom-menos").addEventListener("click", function () {
+      anchoAjustado = false;
+      zoomActualIdx = Math.max(zoomActualIdx - 1, 0);
+      aplicarZoom();
+    });
+    document.getElementById("btn-zoom-100").addEventListener("click", function () {
+      anchoAjustado = false;
+      zoomActualIdx = NIVELES_ZOOM.indexOf(1);
+      aplicarZoom();
+    });
+    document.getElementById("btn-ajustar-ancho").addEventListener("click", function () {
+      anchoAjustado = true;
+      aplicarZoom();
+    });
+  }
+
+  function aplicarZoom() {
+    var img = document.getElementById("imagen-pagina-actual");
+    var etiqueta = document.getElementById("nivel-zoom-actual");
+    if (!img || !etiqueta) return;
+    if (anchoAjustado) {
+      img.style.width = "100%";
+      etiqueta.textContent = "ancho";
+      return;
+    }
+    var factor = NIVELES_ZOOM[zoomActualIdx];
+    img.style.width = Math.round(ANCHO_BASE_IMAGEN_PX * factor) + "px";
+    etiqueta.textContent = Math.round(factor * 100) + "%";
+  }
+
+  function aplicarTamanoFuente() {
+    document.documentElement.style.setProperty("--fuente-cajas", TAMANOS_FUENTE[tamanoFuenteIdx] + "px");
+  }
+
   function renderDetalle(p) {
     var k = clave(p.document_key, p.page_number);
     var m = manifestPorClave[k];
     var d = decisiones[k] || { decision: "", golden_text: "", observaciones: "" };
     var textos = p.textos || {};
 
-    var pares = ["embedded_pymupdf_vs_embedded_pdfplumber", "embedded_vs_render_tesseract",
-      "stored_vs_embedded", "stored_vs_render_tesseract", "tesseract_reproducibility"];
-    var filasPares = pares.map(function (campo) { return filaParPares(campo, p[campo]); }).join("");
+    renderPanelImagen(p, k);
 
-    var indiceImg = indicePorClave[k];
-    var tieneImagen = indiceImg && indiceImg.estado === "RENDERIZADO_OK" && indiceImg.archivo_imagen;
+    var filasPares = CAMPOS_PARES.map(function (campo) { return filaParPares(campo, p[campo]); }).join("");
 
     var html = '<div class="cabecera-pagina">';
     html += "<h2>" + escapeHtml(p.document_key) + " &mdash; página " + escapeHtml(p.page_number) + "</h2>";
@@ -449,62 +660,46 @@
       html += '<div class="meta-linea">Clasificación F-03: <b>' + escapeHtml(m.f03_classification || "?") + "</b>";
       if (m.pdf_page_count) html += " · PDF completo tiene " + escapeHtml(m.pdf_page_count) + " página(s)";
       html += "</div>";
-    } else if (!tieneImagen) {
-      html += '<div class="meta-linea">No se cargó el Manifest V2: no hay enlace directo al PDF disponible. (Puedes cargarlo arriba en el punto 2.)</div>';
     }
     html += "</div>";
-
-    if (tieneImagen) {
-      html += '<div class="visor-imagen">' +
-        '<div class="controles-imagen">' +
-        '<button type="button" class="secundario" id="btn-zoom-menos">&minus;</button>' +
-        '<span class="nivel-zoom" id="nivel-zoom-actual"></span>' +
-        '<button type="button" class="secundario" id="btn-zoom-mas">+</button>' +
-        '<button type="button" class="gris" id="btn-zoom-reset">Restablecer</button>' +
-        '<a class="secundario" style="text-decoration:none;padding:4px 10px;border-radius:6px;border:1px solid var(--azul);color:var(--azul);" href="' + escapeHtml(indiceImg.archivo_imagen) + '" target="_blank" rel="noopener">Abrir imagen a tamaño completo ⤢</a>' +
-        (m && m.pdf_url ? '<a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener" style="margin-left:auto;font-size:12px;">(Respaldo) Abrir PDF completo, página ' + escapeHtml(p.page_number) + "</a>" : "") +
-        "</div>" +
-        '<div class="contenedor-scroll-imagen"><img id="imagen-pagina-actual" src="' + escapeHtml(indiceImg.archivo_imagen) + '" alt="Página ' + escapeHtml(p.page_number) + " de " + escapeHtml(p.document_key) + '"></div>' +
-        "</div>";
-    } else {
-      html += '<div class="sin-imagen-aviso">⚠ No hay imagen disponible para esta página en el paquete cargado' +
-        (indiceImg && indiceImg.estado ? " (motivo: " + escapeHtml(indiceImg.estado) + ")" : " (carga el archivo del punto 3, \"Índice de imágenes\", si aún no lo hiciste)") +
-        (m && m.pdf_url ? '. Usa el enlace de respaldo: <a href="' + escapeHtml(m.pdf_url) + '" target="_blank" rel="noopener">Abrir PDF</a> y ubica la página ' + escapeHtml(p.page_number) + "." : ".") +
-        "</div>";
-    }
 
     html += '<div class="badges">';
     html += '<span class="badge estado-' + escapeHtml(p.estado || "") + '">' + escapeHtml(ESTADOS_LABEL[p.estado] || p.estado || "sin estado") + "</span>";
     if (p.riesgo) html += '<span class="badge">Riesgo automático: ' + escapeHtml(p.riesgo) + "</span>";
     html += '<span class="badge">same_engine_as_stored: ' + (p.same_engine_as_stored ? "SÍ" : "NO") + "</span>";
-    if (m && m.tiene_tabla === "True" || m && m.tiene_tabla === true) html += '<span class="badge">Contiene tabla</span>';
-    if (p.sha256) html += '<span class="badge mono" title="' + escapeHtml(p.sha256) + '">sha256: ' + escapeHtml(String(p.sha256).slice(0, 10)) + "&hellip;</span>";
+    if (m && (m.tiene_tabla === "True" || m.tiene_tabla === true)) html += '<span class="badge">Contiene tabla</span>';
     html += "</div>";
 
-    html += '<div class="caja-diagnostico"><div class="titulo">Diagnóstico automático &mdash; NO es una verificación, es solo apoyo para saber dónde mirar</div>';
+    html += '<details class="panel-interno" id="panel-diagnostico"><summary>🔎 Diagnóstico automático (no es verificación)</summary>';
     if (p.motivos && p.motivos.length) {
       html += "<ul>" + p.motivos.map(function (m2) { return "<li>" + escapeHtml(m2) + "</li>"; }).join("") + "</ul>";
     } else {
       html += "<div>(sin motivos registrados)</div>";
     }
-    html += "</div>";
+    html += "</details>";
 
     if (filasPares.trim()) {
-      html += '<table class="tabla-pares"><tr><th>Comparación entre fuentes</th><th>LTER (error jurídico)</th><th>CER</th><th>WER</th><th>¿Crítico?</th><th>Primeros errores</th></tr>' + filasPares + "</table>";
+      html += '<details class="panel-interno" id="panel-cer-wer-lter"><summary>📊 CER / WER / LTER por par de fuentes</summary>' +
+        '<table class="tabla-pares"><tr><th>Comparación entre fuentes</th><th>LTER</th><th>CER</th><th>WER</th><th>¿Crítico?</th><th>Primeros errores</th></tr>' + filasPares + "</table></details>";
     }
 
-    html += '<div class="textos-candidatos">';
+    if (p.sha256) {
+      html += '<details class="panel-interno" id="panel-sha"><summary>🔐 Detalles SHA256</summary>' +
+        '<div class="mono" style="word-break:break-all;font-size:12px;">' + escapeHtml(p.sha256) + "</div></details>";
+    }
+
+    html += renderBloqueDiferencias(p);
+
+    html += '<div class="fila-fuentes-titulo"><label class="etiqueta" style="margin:0">Cuatro fuentes</label>' +
+      '<div class="ajuste-fuente"><span style="font-size:11px;color:var(--gris)">Tamaño de letra</span>' +
+      '<button type="button" class="gris" id="btn-fuente-menos">Aa&minus;</button>' +
+      '<button type="button" class="gris" id="btn-fuente-mas">Aa+</button></div></div>';
+
+    html += '<div class="grid-fuentes">';
     html += cajaTexto("guardado", "Texto guardado (histórico)", p.texto_guardado);
     html += cajaTexto("pymupdf", "PyMuPDF", textos.pymupdf);
     html += cajaTexto("pdfplumber", "pdfplumber", textos.pdfplumber);
     html += cajaTexto("tesseract", "Tesseract (render 300 DPI)", textos.ocr_tesseract);
-    html += "</div>";
-
-    html += '<div class="bloque-decision"><label class="etiqueta" style="margin-top:0">Decisión</label>';
-    DECISIONES.forEach(function (par) {
-      var val = par[0], texto = par[1];
-      html += '<label class="opcion"><input type="radio" name="decision" value="' + val + '"' + (d.decision === val ? " checked" : "") + "> <b>" + val + "</b><small>" + escapeHtml(texto) + "</small></label>";
-    });
     html += "</div>";
 
     html += '<label class="etiqueta" for="golden_text">golden_text (transcripción validada)</label>';
@@ -514,28 +709,34 @@
     html += '<label class="etiqueta" for="observaciones">Observaciones (opcional)</label>';
     html += '<textarea id="observaciones">' + escapeHtml(d.observaciones || "") + "</textarea>";
 
-    html += '<div class="acciones-pagina"><button id="btn-guardar-pagina">Guardar esta página y continuar</button>' +
-      '<button type="button" class="gris" id="btn-limpiar-pagina">Borrar decisión de esta página</button></div>';
+    html += '<div class="bloque-decision"><label class="etiqueta" style="margin-top:0">Decisión</label>';
+    DECISIONES.forEach(function (par) {
+      var val = par[0], texto = par[1];
+      html += '<label class="opcion"><input type="radio" name="decision" value="' + val + '"' + (d.decision === val ? " checked" : "") + "> <b>" + val + "</b><small>" + escapeHtml(texto) + "</small></label>";
+    });
+    html += '<button type="button" class="gris" id="btn-limpiar-pagina" style="margin-top:8px">Borrar decisión de esta página</button>';
+    html += "</div>";
 
-    var det = document.getElementById("detalle");
+    html += '<div id="barra-pie-derecho">' +
+      '<button type="button" class="secundario" id="btn-anterior-pie">Anterior</button>' +
+      '<button type="button" id="btn-guardar-pagina">Guardar y siguiente</button>' +
+      '<button type="button" class="secundario" id="btn-exportar-json-pie">Exportar JSON</button>' +
+      "</div>";
+
+    var det = document.getElementById("panel-derecho");
     det.innerHTML = html;
+    det.scrollTop = 0;
 
-    if (tieneImagen) {
-      zoomActualIdx = NIVELES_ZOOM.indexOf(1);
-      aplicarZoom();
-      document.getElementById("btn-zoom-mas").addEventListener("click", function () {
-        zoomActualIdx = Math.min(zoomActualIdx + 1, NIVELES_ZOOM.length - 1);
-        aplicarZoom();
-      });
-      document.getElementById("btn-zoom-menos").addEventListener("click", function () {
-        zoomActualIdx = Math.max(zoomActualIdx - 1, 0);
-        aplicarZoom();
-      });
-      document.getElementById("btn-zoom-reset").addEventListener("click", function () {
-        zoomActualIdx = NIVELES_ZOOM.indexOf(1);
-        aplicarZoom();
-      });
-    }
+    aplicarTamanoFuente();
+
+    document.getElementById("btn-fuente-mas").addEventListener("click", function () {
+      tamanoFuenteIdx = Math.min(tamanoFuenteIdx + 1, TAMANOS_FUENTE.length - 1);
+      aplicarTamanoFuente();
+    });
+    document.getElementById("btn-fuente-menos").addEventListener("click", function () {
+      tamanoFuenteIdx = Math.max(tamanoFuenteIdx - 1, 0);
+      aplicarTamanoFuente();
+    });
 
     det.querySelectorAll(".copiar-golden").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -544,11 +745,13 @@
           : fuente === "pymupdf" ? textos.pymupdf
           : fuente === "pdfplumber" ? textos.pdfplumber
           : textos.ocr_tesseract;
-        document.getElementById("golden_text").value = texto || "";
+        var campo = document.getElementById("golden_text");
+        campo.value = texto || "";
+        campo.focus();
       });
     });
 
-    document.getElementById("btn-guardar-pagina").addEventListener("click", function () {
+    function guardarPaginaActual(avanzar) {
       var decisionMarcada = det.querySelector('input[name="decision"]:checked');
       if (!decisionMarcada) {
         alert("Elige una decisión antes de guardar (una de las 5 opciones).");
@@ -571,8 +774,10 @@
       guardarLocalStorageSeguro();
       renderSidebar();
       actualizarContadores();
-      irASiguientePendiente(k);
-    });
+      if (avanzar) irAAdyacente(1, true);
+    }
+
+    document.getElementById("btn-guardar-pagina").addEventListener("click", function () { guardarPaginaActual(true); });
 
     document.getElementById("btn-limpiar-pagina").addEventListener("click", function () {
       if (!confirm("¿Borrar la decisión guardada de esta página?")) return;
@@ -581,42 +786,77 @@
       guardarLocalStorageSeguro();
       renderSidebar();
       actualizarContadores();
-      seleccionarPagina(k);
+      seleccionarPagina(k, true);
     });
+
+    document.getElementById("btn-anterior-pie").addEventListener("click", function () { irAAdyacente(-1, false); });
+    document.getElementById("btn-exportar-json-pie").addEventListener("click", exportarDecisionesJSON);
+
+    // Se expone para que la barra superior (fuera de este render) pueda invocar guardar.
+    window.__f04b_guardarPaginaActual = guardarPaginaActual;
   }
 
-  function aplicarZoom() {
-    var img = document.getElementById("imagen-pagina-actual");
-    var etiqueta = document.getElementById("nivel-zoom-actual");
-    if (!img || !etiqueta) return;
-    var factor = NIVELES_ZOOM[zoomActualIdx];
-    img.style.width = Math.round(ANCHO_BASE_IMAGEN_PX * factor) + "px";
-    etiqueta.textContent = Math.round(factor * 100) + "%";
+  function capturarCamposDePagina(k) {
+    if (!k) return;
+    var radios = document.getElementsByName("decision");
+    var decisionMarcada = null;
+    for (var i = 0; i < radios.length; i++) { if (radios[i].checked) decisionMarcada = radios[i].value; }
+    var campoGolden = document.getElementById("golden_text");
+    var campoObs = document.getElementById("observaciones");
+    if (!campoGolden && !campoObs && !decisionMarcada) return; // nada renderizado todavia
+    var golden = campoGolden ? campoGolden.value : (decisiones[k] || {}).golden_text || "";
+    var obs = campoObs ? campoObs.value : (decisiones[k] || {}).observaciones || "";
+    if (!decisionMarcada && !golden.trim() && !obs.trim() && !decisiones[k]) return; // nada que preservar
+    var previo = decisiones[k] || {};
+    decisiones[k] = {
+      decision: decisionMarcada || previo.decision || null,
+      golden_text: golden,
+      observaciones: obs,
+      revisado_en: previo.revisado_en || null
+    };
+    guardarLocalStorageSeguro();
   }
 
-  function seleccionarPagina(k) {
+  function seleccionarPagina(k, saltarCaptura) {
+    if (!saltarCaptura && claveActual && claveActual !== k) capturarCamposDePagina(claveActual);
     claveActual = k;
     var p = paginas.filter(function (x) { return clave(x.document_key, x.page_number) === k; })[0];
     if (!p) return;
     renderSidebar();
     renderDetalle(p);
-  }
-
-  function irASiguientePendiente(claveDesde) {
-    var ordenadas = ordenarParaMostrar(paginas);
-    var idx = ordenadas.findIndex(function (p) { return clave(p.document_key, p.page_number) === claveDesde; });
-    for (var i = 1; i <= ordenadas.length; i++) {
-      var candidata = ordenadas[(idx + i) % ordenadas.length];
-      var ck = clave(candidata.document_key, candidata.page_number);
-      if (!decisiones[ck] || !decisiones[ck].decision) {
-        seleccionarPagina(ck);
-        return;
-      }
-    }
-    document.getElementById("detalle").innerHTML = '<div class="vacio">🎉 ¡Todas las páginas cargadas tienen una decisión guardada!<br>No olvides hacer clic en "Exportar decisiones (JSON)".</div>';
-    claveActual = null;
+    actualizarBotonesNav();
     renderSidebar();
   }
+
+  function irAAdyacente(offset, saltarCaptura) {
+    if (!saltarCaptura && claveActual) capturarCamposDePagina(claveActual);
+    var ordenadas = ordenarParaMostrar(paginas);
+    if (!ordenadas.length) return;
+    var idx = ordenadas.findIndex(function (p) { return clave(p.document_key, p.page_number) === claveActual; });
+    var nuevoIdx = idx === -1 ? 0 : idx + offset;
+    if (nuevoIdx < 0) return;
+    if (nuevoIdx >= ordenadas.length) {
+      document.getElementById("panel-derecho").innerHTML =
+        '<div class="vacio">🎉 ¡Llegaste al final de la lista!<br>No olvides exportar tus decisiones.</div>' +
+        '<div style="text-align:center"><button type="button" id="btn-exportar-json-fin">Exportar decisiones (JSON)</button></div>';
+      document.getElementById("btn-exportar-json-fin").addEventListener("click", exportarDecisionesJSON);
+      claveActual = null;
+      renderSidebar();
+      actualizarBotonesNav();
+      return;
+    }
+    var siguiente = ordenadas[nuevoIdx];
+    seleccionarPagina(clave(siguiente.document_key, siguiente.page_number), true);
+  }
+
+  document.getElementById("btn-anterior").addEventListener("click", function () { irAAdyacente(-1, false); });
+  document.getElementById("btn-siguiente").addEventListener("click", function () { irAAdyacente(1, false); });
+  document.getElementById("btn-guardar-nav").addEventListener("click", function () {
+    if (window.__f04b_guardarPaginaActual) window.__f04b_guardarPaginaActual(true);
+  });
+  document.getElementById("btn-toggle-sidebar").addEventListener("click", function () {
+    document.getElementById("sidebar").classList.toggle("colapsado");
+  });
 
   function cargarComparacion(datos) {
     if (!datos || !Array.isArray(datos.paginas)) {
@@ -635,8 +875,10 @@
         renderSidebar();
       }
     }
+    var panelCarga = document.getElementById("panel-carga");
+    if (panelCarga.hasAttribute("open")) panelCarga.removeAttribute("open");
     if (ordenarParaMostrar(paginas).length) {
-      seleccionarPagina(clave(ordenarParaMostrar(paginas)[0].document_key, ordenarParaMostrar(paginas)[0].page_number));
+      seleccionarPagina(clave(ordenarParaMostrar(paginas)[0].document_key, ordenarParaMostrar(paginas)[0].page_number), true);
     }
   }
 
@@ -650,7 +892,7 @@
     filas.forEach(function (fila) {
       manifestPorClave[clave(fila.document_key, fila.page_number)] = fila;
     });
-    if (claveActual) seleccionarPagina(claveActual);
+    if (claveActual) seleccionarPagina(claveActual, true);
   }
 
   function cargarIndiceImagenes(datos) {
@@ -664,7 +906,7 @@
       indicePorClave[clave(fila.document_key, fila.page_number)] = fila;
     });
     actualizarEstadoImagenes();
-    if (claveActual) seleccionarPagina(claveActual);
+    if (claveActual) seleccionarPagina(claveActual, true);
   }
 
   function actualizarEstadoImagenes() {
@@ -674,7 +916,7 @@
     var conImagen = Object.keys(indicePorClave).filter(function (k) {
       return indicePorClave[k].estado === "RENDERIZADO_OK";
     }).length;
-    el.textContent = "Imágenes: " + conImagen + "/" + total + (conImagen < total ? " (algunas páginas no tienen imagen disponible)" : "");
+    el.textContent = "Imágenes: " + conImagen + "/" + total + (conImagen < total ? " (algunas sin imagen)" : "");
   }
 
   function leerArchivoJSON(file, onOk) {
@@ -719,7 +961,7 @@
       guardarLocalStorageSeguro();
       actualizarContadores();
       renderSidebar();
-      if (claveActual) seleccionarPagina(claveActual);
+      if (claveActual) seleccionarPagina(claveActual, true);
       alert("Se importaron " + cargadas + " decisión(es) previas.");
     });
   });
@@ -733,7 +975,8 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
   }
 
-  document.getElementById("btn-exportar-json").addEventListener("click", function () {
+  function exportarDecisionesJSON() {
+    if (claveActual) capturarCamposDePagina(claveActual);
     var lista = Object.keys(decisiones).map(function (k) {
       var partes = k.split("::");
       var pageNumber = partes.pop();
@@ -758,7 +1001,8 @@
     };
     descargarArchivo("F04B_DECISIONES_HUMANAS.json", JSON.stringify(salida, null, 2), "application/json");
     cambiosSinExportar = false;
-  });
+  }
+  document.getElementById("btn-exportar-json").addEventListener("click", exportarDecisionesJSON);
 
   function csvEscape(v) {
     var s = v == null ? "" : String(v);

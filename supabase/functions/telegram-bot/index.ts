@@ -2348,16 +2348,47 @@ async function enviarPdfsAlertas(chatId: string, rows: any[]): Promise<void> {
   }
 }
 
+// document_key/alert_number tiene forma "99-2026": ordenar esa columna como
+// texto rompe el orden numerico apenas hay numeros de distinta cantidad de
+// digitos (ej. "100-2026" queda antes que "93-2026" porque "1" < "9"). Esta
+// funcion extrae el numero inicial para poder ordenar/desempatar de forma
+// numerica real.
+function numeroAlertaOrdenable(valor: string | null | undefined): number {
+  if (!valor) return -1;
+  const match = valor.match(/^(\d+)/);
+  return match ? parseInt(match[1], 10) : -1;
+}
+
+// DIGEMID suele publicar varias alertas con la misma published_date (y el
+// pipeline las inserta en un unico upsert, con el mismo created_at hasta el
+// microsegundo). Ordenar solo por published_date deja esos empates sin
+// desempate: Postgres puede devolver cualquier subconjunto de ese grupo al
+// aplicar LIMIT, por lo que alertas reales (ej. la 99-2026) pueden quedar
+// arbitrariamente afuera de "Ultimas alertas" aunque esten bien registradas.
+// Se sobre-consulta y se ordena en memoria por (published_date, numero de
+// alerta) para que el corte final sea determinista y muestre siempre las de
+// numero mas alto dentro de cada fecha empatada.
+function ordenarPorFechaYNumero(rows: any[]): any[] {
+  return [...rows].sort((a, b) => {
+    if (a.published_date !== b.published_date) {
+      return a.published_date < b.published_date ? 1 : -1;
+    }
+    return numeroAlertaOrdenable(b.alert_number) - numeroAlertaOrdenable(a.alert_number);
+  });
+}
+
 async function getLatestAlerts(limit = 5) {
+  const fetchLimit = Math.max(limit * 6, 30);
+
   const { data, error } = await supabase
     .from("digemid_alertas_v")
     .select(ALERT_SELECT)
     .order("published_date", { ascending: false })
-    .limit(limit);
+    .limit(fetchLimit);
 
   if (error) throw error;
 
-  return data ?? [];
+  return ordenarPorFechaYNumero(data ?? []).slice(0, limit);
 }
 
 async function getTodayAlerts() {
@@ -2366,12 +2397,11 @@ async function getTodayAlerts() {
   const { data, error } = await supabase
     .from("digemid_alertas_v")
     .select(ALERT_SELECT)
-    .eq("published_date", today)
-    .order("alert_number", { ascending: false });
+    .eq("published_date", today);
 
   if (error) throw error;
 
-  return data ?? [];
+  return ordenarPorFechaYNumero(data ?? []);
 }
 
 async function getMonthAlerts() {
@@ -2439,17 +2469,19 @@ async function getRecentAlerts(limit = 10) {
 
 async function searchAlerts(query: string) {
   const cleanQuery = query.trim();
+  const limit = 10;
+  const fetchLimit = Math.max(limit * 4, 40);
 
   const { data, error } = await supabase
     .from("digemid_alertas_v")
     .select(ALERT_SELECT)
     .ilike("alert_title", `%${cleanQuery}%`)
     .order("published_date", { ascending: false })
-    .limit(10);
+    .limit(fetchLimit);
 
   if (error) throw error;
 
-  return data ?? [];
+  return ordenarPorFechaYNumero(data ?? []).slice(0, limit);
 }
 
 async function searchConsultaChunks(query: string, limit = 4) {

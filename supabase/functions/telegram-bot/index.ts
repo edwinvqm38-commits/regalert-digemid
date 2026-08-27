@@ -188,6 +188,7 @@ const COMANDOS_USUARIO: { command: string; description: string }[] = [
   { command: "semana", description: "Alertas publicadas esta semana" },
   { command: "mes", description: "Alertas publicadas este mes" },
   { command: "recientes", description: "Alertas registradas recientemente" },
+  { command: "normas", description: "Últimas leyes, reglamentos y decretos" },
   { command: "buscar", description: "Buscar alertas por palabra clave" },
   { command: "consulta", description: "Preguntar con IA citando la norma/alerta fuente" },
   { command: "suscribirme", description: "Solicitar activar un plan pagado" },
@@ -277,6 +278,7 @@ function mainMenu(incluirDemo = false) {
       { text: "🗓️ Este mes", callback_data: "alertas:mes" },
       { text: "🔎 Buscar", callback_data: "alertas:buscar_info" },
     ],
+    [{ text: "📜 Últimas normativas", callback_data: "normativa:ultimas" }],
     [{ text: "💳 Ver planes", callback_data: "menu:planes" }],
     [
       { text: "🪪 Mi perfil", callback_data: "cuenta:miperfil" },
@@ -2305,6 +2307,8 @@ const WEEK_ALERT_SELECT =
   "id, document_key, title, published_date, published_date_display, source_section, file_url, detail_url, telegram_file_id, process_status";
 const RECENT_ALERT_SELECT =
   "id, document_key, title, published_date, published_date_display, created_at, source_section, file_url, detail_url, telegram_file_id, process_status";
+const NORMATIVE_SELECT =
+  "id, document_key, title, source_section, published_date, published_date_display, detail_url, file_url, process_status, created_at";
 
 // document_key/alert_number tiene forma "99-2026": ordenar esa columna como
 // texto rompe el orden numerico apenas hay numeros de distinta cantidad de
@@ -2440,6 +2444,111 @@ async function searchAlerts(query: string) {
   if (error) throw error;
 
   return ordenarPorFechaYNumero(data ?? []).slice(0, limit);
+}
+
+// document_key de normativa es "PREFIJO-numero[-anio]" (RM-793-2025,
+// DS-13-2022, LEY-31091, ...) y documento_tipo/documento_subtipo solo viven
+// dentro de "raw" (no llegan como columna): el prefijo del document_key es
+// la forma confiable de mostrar Ley/Decreto/Resolucion en la lista.
+const NORMATIVA_TIPO_POR_PREFIJO: Record<string, string> = {
+  LEY: "Ley",
+  DS: "Decreto Supremo",
+  DL: "Decreto Legislativo",
+  DU: "Decreto de Urgencia",
+  RM: "Resolución Ministerial",
+  RD: "Resolución Directoral",
+  RS: "Resolución Suprema",
+};
+
+const NORMATIVA_TIPO_POR_SECCION: Record<string, string> = {
+  "normas-legales": "Norma Legal",
+  "resolucion-ministerial": "Resolución Ministerial",
+  "decreto-supremo": "Decreto Supremo",
+};
+
+function tipoNormativa(row: any): string {
+  const prefijo = String(row.document_key ?? "").split("-")[0]?.toUpperCase();
+  if (prefijo && NORMATIVA_TIPO_POR_PREFIJO[prefijo]) {
+    return NORMATIVA_TIPO_POR_PREFIJO[prefijo];
+  }
+  return NORMATIVA_TIPO_POR_SECCION[row.source_section] ?? "Documento normativo";
+}
+
+// id es uuid (no correlaciona con el orden de insercion) y un mismo lote
+// diario se registra en un unico upsert, con created_at identico entre si:
+// se ordena por fecha de publicacion y se desempata por created_at y, como
+// ultimo recurso para que el corte sea siempre el mismo, por id. Ver
+// ordenarPorFechaYNumero: mismo problema de fondo (LIMIT sobre un empate sin
+// desempate deja el resultado a criterio arbitrario de Postgres), pero aqui
+// no hay un numero comparable entre tipos (una Ley y un Decreto Supremo del
+// mismo dia no tienen un orden natural entre si).
+async function getLatestNormativa(limit = 8) {
+  const fetchLimit = Math.max(limit * 6, 40);
+
+  const { data, error } = await supabase
+    .from("digemid_documentos")
+    .select(NORMATIVE_SELECT)
+    .eq("source_type", "normativa")
+    .order("published_date", { ascending: false })
+    .limit(fetchLimit);
+
+  if (error) throw error;
+
+  const rows = [...(data ?? [])].sort((a, b) => {
+    if (a.published_date !== b.published_date) {
+      return a.published_date < b.published_date ? 1 : -1;
+    }
+    if (a.created_at !== b.created_at) {
+      return a.created_at < b.created_at ? 1 : -1;
+    }
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
+
+  // DIGEMID a veces lista la misma norma bajo dos secciones (ej.
+  // normas-legales y resolucion-ministerial); como el document_key de
+  // respaldo se arma por seccion, quedan como dos filas para el mismo
+  // documento real. Se colapsan por detail_url para no listarla dos veces.
+  const detallesVistos = new Set<string>();
+  const filasUnicas = rows.filter((row) => {
+    const detalle = row.detail_url;
+    if (detalle) {
+      if (detallesVistos.has(detalle)) return false;
+      detallesVistos.add(detalle);
+    }
+    return true;
+  });
+
+  return filasUnicas.slice(0, limit);
+}
+
+function formatNormativaList(title: string, rows: any[]) {
+  if (!rows.length) {
+    return `${title}\n\n📭 No encontré normativa para esta consulta.`;
+  }
+
+  const lines = [title, ""];
+
+  for (const row of rows) {
+    lines.push(`📜 <b>${escapeHtml(tipoNormativa(row))} ${escapeHtml(row.document_key)}</b>`);
+    if (row.title) {
+      lines.push(escapeHtml(row.title));
+    }
+    lines.push(
+      `📅 ${escapeHtml(row.published_date_display ?? row.published_date ?? "Sin fecha")}`,
+    );
+    lines.push(`🔗 ${escapeHtml(row.detail_url)}`);
+    if (row.file_url) {
+      lines.push(`📄 PDF: ${escapeHtml(row.file_url)}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(`✅ Total mostrado: ${rows.length}`);
+  lines.push(
+    "ℹ️ Detección automática por título/metadata; el contenido aún no pasa por el proceso de verificación de fidelidad.",
+  );
+
+  return lines.join("\n");
 }
 
 async function searchConsultaChunks(query: string, limit = 4) {
@@ -3603,6 +3712,24 @@ async function handleCommand(
       chatId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
+    );
+    return;
+  }
+
+  if (trimmed === "/normas") {
+    const rows = await getLatestNormativa(8);
+    await logConsulta({
+      chatId,
+      userId,
+      command: "/normas",
+      resultCount: rows.length,
+      status: "ok",
+    });
+
+    await sendMessage(
+      chatId,
+      formatNormativaList("📜 <b>Últimas leyes, reglamentos y decretos</b>", rows),
+      mainMenu(),
     );
     return;
   }
@@ -4987,6 +5114,17 @@ async function handleCallback(update: TelegramUpdate) {
       chatId,
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
+    );
+    return;
+  }
+
+  if (data === "normativa:ultimas") {
+    const rows = await getLatestNormativa(8);
+
+    await sendMessage(
+      chatId,
+      formatNormativaList("📜 <b>Últimas leyes, reglamentos y decretos</b>", rows),
+      mainMenu(),
     );
     return;
   }

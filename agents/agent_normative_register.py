@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timezone
 
 from supabase import Client, create_client
 
@@ -133,3 +134,35 @@ class NormativeRegisterAgent:
             "updated": updated_count,
             "saved": len(saved_rows),
         }
+
+    def get_pending_notification_docs(self, limit: int = 50) -> list[dict]:
+        """Normativa ya guardada en Supabase que aun no fue notificada.
+
+        Mismo patron que RegisterAgent.get_pending_notification_docs (alertas):
+        cubre tanto lo recien registrado como lo que quedo pendiente por un
+        envio anterior fallido, ya que solo se marca notified_at si Telegram
+        confirmo el envio.
+        """
+        response = (
+            self.supabase
+            .table(self.table_name)
+            .select("*")
+            .eq("source_type", "normativa")
+            .is_("notified_at", "null")
+            .order("published_date", desc=False)
+            .limit(limit)
+            .execute()
+        )
+
+        return response.data or []
+
+    def mark_notified(self, document_keys: list[str]) -> None:
+        """Marca normativa como notificada para que no se reintente."""
+        if not document_keys:
+            return
+
+        self.supabase.table(self.table_name).update(
+            {"notified_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("source_type", "normativa").in_("document_key", document_keys).execute()
+
+        logger.info("Documentos normativos marcados como notificados: %s", len(document_keys))

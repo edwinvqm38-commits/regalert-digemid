@@ -16,6 +16,34 @@ NIVEL_PRECIOS = {"basico": 29, "consultoria": 79, "empresarial": 199}
 
 PERU_TZ = timezone(timedelta(hours=-5))
 
+# Prefijo del document_key (ver TYPE_PATTERNS en agent_normative_monitor.py)
+# a etiqueta legible. documento_tipo/documento_subtipo solo viven dentro de
+# "raw" y no llegan a digemid_documentos como columna, asi que el prefijo es
+# la forma confiable de distinguir Ley/Decreto/Resolucion en el mensaje.
+NORMATIVA_TIPO_POR_PREFIJO = {
+    "LEY": "Ley",
+    "DS": "Decreto Supremo",
+    "DL": "Decreto Legislativo",
+    "DU": "Decreto de Urgencia",
+    "RM": "Resolución Ministerial",
+    "RD": "Resolución Directoral",
+    "RS": "Resolución Suprema",
+}
+
+NORMATIVA_TIPO_POR_SECCION = {
+    "normas-legales": "Norma Legal",
+    "resolucion-ministerial": "Resolución Ministerial",
+    "decreto-supremo": "Decreto Supremo",
+}
+
+
+def _tipo_normativa(doc: dict) -> str:
+    prefijo = str(doc.get("document_key", "")).split("-", 1)[0].upper()
+    if prefijo in NORMATIVA_TIPO_POR_PREFIJO:
+        return NORMATIVA_TIPO_POR_PREFIJO[prefijo]
+
+    return NORMATIVA_TIPO_POR_SECCION.get(doc.get("source_section"), "Documento normativo")
+
 
 def _hora_aproximada_deteccion(doc: dict) -> str | None:
     """DIGEMID no publica la hora exacta en que sube una alerta (solo un
@@ -129,6 +157,80 @@ class NotifyAgent:
             return False
 
         logger.info("Notificación enviada a Telegram.")
+        return True
+
+    def build_normativa_message(self, new_docs: list[dict]) -> str:
+        """Construye el mensaje HTML para normativa nueva (Ley/Decreto/RM/...).
+
+        Solo referencia metadata y los links oficiales (detalle en DIGEMID, y
+        el PDF si ya se confirmo): la fase que extrae y verifica el texto de
+        cada norma es independiente y hoy no corre sobre lo recien detectado,
+        asi que este mensaje nunca debe insinuar que el contenido ya fue
+        revisado o transcrito.
+        """
+        lines = [
+            "📜 <b>Nueva normativa DIGEMID detectada</b>",
+            "",
+        ]
+
+        for doc in new_docs[:10]:
+            key = html.escape(str(doc.get("document_key", "")))
+            tipo = html.escape(_tipo_normativa(doc))
+            title = html.escape(str(doc.get("title", "")))[:250]
+            detail_url = html.escape(str(doc.get("detail_url", "")))
+            fecha_publicacion = doc.get("published_date_display")
+
+            lines.append(f"📁 <b>{tipo} {key}</b>")
+            if title:
+                lines.append(title)
+            if fecha_publicacion:
+                lines.append(f"🗓️ Fecha: {html.escape(str(fecha_publicacion))}")
+            lines.append(f"🔗 {detail_url}")
+
+            file_url = doc.get("file_url")
+            if file_url:
+                lines.append(f"📄 PDF: {html.escape(str(file_url))}")
+
+            lines.append("")
+
+        if len(new_docs) > 10:
+            lines.append(f"➕ Y {len(new_docs) - 10} documentos más.")
+
+        lines.append(
+            "ℹ️ Detección automática por título/metadata. El contenido aún no "
+            "pasó por el proceso de verificación de fidelidad: para citar el "
+            "texto, revisa el PDF oficial en el enlace."
+        )
+
+        return "\n".join(lines)
+
+    def send_normativa_summary(self, new_docs: list[dict]) -> bool:
+        """Envía resumen de normativa nueva. Nunca lanza excepción (ver send_summary)."""
+        if not new_docs:
+            logger.info("No hay normativa nueva para notificar.")
+            return True
+
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+
+        payload = {
+            "chat_id": self.chat_id,
+            "text": self.build_normativa_message(new_docs),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+
+        try:
+            response = requests.post(url, json=payload, timeout=20)
+
+            if not response.ok:
+                logger.error("Respuesta de Telegram (normativa): %s", response.text)
+
+            response.raise_for_status()
+        except Exception:
+            logger.exception("No se pudo enviar el resumen de normativa a Telegram.")
+            return False
+
+        logger.info("Notificación de normativa enviada a Telegram.")
         return True
 
     def send_pipeline_failure_alert(self, failed_steps: list[str]) -> None:
@@ -256,4 +358,30 @@ class NotifyAgent:
             len(pagados),
             len(en_prueba),
             sum(1 for cid, prev in en_prueba.items() if prev + len(new_docs) >= PRUEBA_LIMITE_ALERTAS),
+        )
+
+    def send_normativa_individual(self, new_docs: list[dict]) -> None:
+        """DM de normativa nueva a los mismos suscriptores que las alertas.
+
+        A diferencia de send_individual_alerts, no toca prueba_alertas_enviadas
+        ni el cierre de la prueba gratuita: ese limite es del producto de
+        alertas de producto, y la normativa es un contenido distinto que no
+        debe consumir ni terminar esa prueba.
+        """
+        if not new_docs or self.supabase is None:
+            return
+
+        texto = self.build_normativa_message(new_docs)
+        pagados, en_prueba = self._usuarios_elegibles_dm()
+
+        for chat_id in pagados:
+            self._send_to_chat(chat_id, texto)
+
+        for chat_id in en_prueba:
+            self._send_to_chat(chat_id, texto)
+
+        logger.info(
+            "DM de normativa enviados: %s pagados, %s en prueba.",
+            len(pagados),
+            len(en_prueba),
         )

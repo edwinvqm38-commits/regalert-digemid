@@ -1,0 +1,45 @@
+name: DIGEMID - Vincular identidad normativa
+
+on:
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "reportar: solo muestra que haria (default, no escribe nada). aplicar: crea en digemid_normas las normas genuinamente nuevas."
+        required: true
+        default: "reportar"
+        type: choice
+        options:
+          - reportar
+          - aplicar
+
+jobs:
+  vincular-identidad:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Vincular identidad normativa
+        run: |
+          if [ "${{ inputs.modo }}" = "aplicar" ]; then
+            python scripts/vincular_normativa_identidad.py --apply
+          else
+            python scripts/vincular_normativa_identidad.py
+          fi

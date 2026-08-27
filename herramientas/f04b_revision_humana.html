@@ -212,6 +212,84 @@
     #panel-imagen { flex: 0 0 auto; max-width: 100%; height: 60vh; border-right: none; border-bottom: 1px solid var(--borde); }
     #panel-derecho { flex: 1 1 auto; height: auto; overflow-y: visible; }
   }
+
+  /* ---------- F-04-B.3: delimitación de norma / segmentación / tablas / normas / consolidada ---------- */
+  .panel-seccion {
+    border: 1px solid var(--borde); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; background: white;
+  }
+  .panel-seccion > .titulo-seccion { font-weight: 800; font-size: 13.5px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .panel-seccion .ayuda { font-weight: 500; color: var(--gris); font-size: 11.5px; }
+  select.select-clasificacion, select.select-tabla, input.input-corto {
+    font-size: 13px; padding: 4px 6px; border: 1px solid var(--borde); border-radius: 6px;
+  }
+  .fila-campo { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 6px 0; }
+  .fila-campo > label { font-size: 12.5px; font-weight: 600; color: var(--gris); display: flex; flex-direction: column; gap: 3px; }
+  .badge-clasificacion {
+    display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+    border: 1px solid var(--azul); background: var(--azul-claro); color: var(--azul);
+  }
+  .badge-multinorma { border-color: var(--amarillo); background: var(--amarillo-claro); color: var(--amarillo); }
+  .badge-sin-contenido { border-color: var(--gris); background: var(--gris-claro); color: var(--gris); }
+  .aviso-multinorma {
+    border: 1px solid var(--amarillo); background: var(--amarillo-claro); color: var(--amarillo);
+    border-radius: 8px; padding: 8px 10px; margin: 8px 0; font-size: 12.5px;
+  }
+  textarea.excluido { border-color: var(--gris); background: #fafafa; }
+  textarea.campo-chico { width: 100%; min-height: 44px; font-size: 12.5px; padding: 6px; border: 1px solid var(--borde); border-radius: 6px; }
+  .grid-segmentacion { display: grid; grid-template-columns: 1fr; gap: 8px; }
+  .cabecera-caja .fila-botones-caja { display: flex; gap: 4px; }
+  .cabecera-caja .fila-botones-caja button { padding: 3px 7px; font-size: 10.5px; }
+  label.chk-linea { font-weight: 600; font-size: 12.5px; display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+
+  /* tablas */
+  .contenedor-tabla { border: 1px solid var(--borde); border-radius: 8px; padding: 8px; margin-bottom: 12px; background: #fcfcfd; }
+  .cabecera-tabla-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .cabecera-tabla-meta input, .cabecera-tabla-meta select { font-size: 12px; padding: 3px 5px; border: 1px solid var(--borde); border-radius: 5px; }
+  .cabecera-tabla-meta input.input-table-id { width: 110px; }
+  .cabecera-tabla-meta input.input-parte { width: 55px; }
+  .barra-herramientas-tabla { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 8px 0; }
+  .barra-herramientas-tabla button { padding: 4px 8px; font-size: 11.5px; }
+  .scroll-tabla-editable { overflow: auto; max-width: 100%; }
+  table.tabla-editable { border-collapse: collapse; font-size: 12.5px; }
+  table.tabla-editable td.celda-editable, table.tabla-editable th.celda-editable {
+    border: 1px solid var(--borde); padding: 2px; vertical-align: top; position: relative; min-width: 90px;
+  }
+  table.tabla-editable th.celda-editable, table.tabla-editable td.celda-editable.es-encabezado { background: var(--azul-claro); }
+  table.tabla-editable .celda-hueco { border: 1px dashed var(--rojo); background: var(--rojo-claro); min-width: 40px; }
+  .entrada-celda {
+    width: 100%; min-width: 88px; min-height: 30px; border: none; resize: vertical; font-size: 12.5px;
+    font-family: inherit; padding: 14px 4px 3px 18px; background: transparent;
+  }
+  .entrada-celda:focus { outline: 2px solid var(--azul); background: white; }
+  .chk-celda { position: absolute; top: 2px; left: 2px; z-index: 2; }
+  .fila-notas-tabla { margin-top: 6px; }
+  .fila-notas-tabla textarea { width: 100%; min-height: 34px; font-size: 12px; padding: 5px; border: 1px solid var(--borde); border-radius: 6px; }
+  .sin-tablas-pagina { color: var(--gris); font-style: italic; font-size: 12.5px; padding: 6px 0; }
+
+  /* vistas de pantalla completa (Normas / Consolidada) */
+  .vista-overlay { flex: 1 1 auto; min-height: 0; overflow-y: auto; background: white; padding: 14px 18px; }
+  .barra-vista { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .barra-vista h2 { margin: 0; font-size: 16px; flex: 1 1 auto; }
+  table.tabla-normas { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.tabla-normas th, table.tabla-normas td { border: 1px solid var(--borde); padding: 6px 7px; text-align: left; vertical-align: top; }
+  table.tabla-normas th { background: var(--gris-claro); position: sticky; top: 0; }
+  table.tabla-normas input, table.tabla-normas select, table.tabla-normas textarea {
+    width: 100%; font-size: 12px; padding: 3px 4px; border: 1px solid var(--borde); border-radius: 4px; font-family: inherit;
+  }
+  table.tabla-normas tr.fila-norma:hover { background: var(--azul-claro); }
+  .barra-progreso-norma { background: var(--gris-claro); border-radius: 999px; overflow: hidden; height: 8px; width: 100px; }
+  .barra-progreso-norma > div { background: var(--verde); height: 100%; }
+  .estado-select.PENDIENTE { color: var(--gris); }
+  .estado-select.EN_PROCESO { color: var(--azul); }
+  .estado-select.REQUIERE_REVISION { color: var(--amarillo); }
+  .estado-select.VALIDADO, .estado-select.FINALIZADO { color: var(--verde); }
+  .caja-consolidada {
+    border: 1px solid var(--borde); border-radius: 8px; padding: 10px; background: #fdfdfd; white-space: pre-wrap;
+    font-family: Consolas, "Courier New", monospace; font-size: 12.5px; max-height: 60vh; overflow: auto;
+  }
+  .aviso-copiado { color: var(--verde); font-weight: 700; font-size: 12px; margin-left: 8px; }
+  .selector-norma { font-size: 13px; padding: 4px 8px; border: 1px solid var(--borde); border-radius: 6px; }
+  .tabla-reconstruida-parte { border: 1px dashed var(--borde); border-radius: 6px; padding: 6px; margin: 6px 0; }
 </style>
 </head>
 <body>
@@ -230,6 +308,8 @@
     <span class="progreso">Revisadas: <span class="n" id="contador-revisadas">0</span>/<span id="contador-total">0</span></span>
     <span class="estado-imagenes" id="estado-imagenes"></span>
     <button id="btn-guardar-nav" disabled>Guardar y siguiente</button>
+    <button id="btn-ver-normas" class="gris" disabled title="Administrar el listado de normas">📑 Normas</button>
+    <button id="btn-ver-consolidada" class="gris" disabled title="Ver el golden consolidado de una norma">📄 Consolidada</button>
   </div>
 </header>
 
@@ -253,11 +333,16 @@
       <input type="file" id="input-progreso" accept=".json">
     </div>
     <div class="grupo">
+      <label>5&#41; Registro de normas (opcional, metadatos del listado)</label>
+      <input type="file" id="input-normas" accept=".json">
+    </div>
+    <div class="grupo">
       <label>Tu nombre (para el archivo exportado)</label>
       <input type="text" id="nombre-revisor" placeholder="Ej: María Pérez">
     </div>
     <button id="btn-exportar-json" disabled>Exportar decisiones (JSON)</button>
     <button id="btn-exportar-csv" class="secundario" disabled>Exportar tabla (CSV, solo lectura)</button>
+    <button id="btn-exportar-normas" class="secundario" disabled>Exportar registro de normas (JSON)</button>
   </div>
 </details>
 
@@ -330,6 +415,36 @@
   </table>
 </details>
 
+<details class="panel" id="panel-instrucciones-golden">
+  <summary>🧭 Nuevo: delimitación de la norma objetivo, tablas y normas consolidadas</summary>
+  <p><strong>Norma objetivo vs. página física:</strong> una página puede traer el final de una norma anterior, el
+  inicio/fin de la norma objetivo y el inicio de otra norma, todo junto. El <code>golden_text</code> debe contener
+  <u>exclusivamente</u> lo que pertenece a la norma objetivo. Usa el bloque "Clasificación de la página y delimitación
+  de la norma" para: (1) elegir la clasificación de la página, (2) si es MULTINORMA o tiene contenido ajeno, copiar a
+  <code>excluded_text</code> lo que NO pertenece (queda como evidencia, nunca se borra), y (3) anotar opcionalmente el
+  texto exacto donde empieza/termina la norma objetivo en esa página.</p>
+  <p><strong>Tablas:</strong> si la página tiene tablas, ábrelas en el bloque "Tablas de la página" y usa el editor
+  visual (agregar/eliminar filas y columnas, unir/separar celdas marcando sus casillas, marcar encabezado/dato) &mdash;
+  nunca necesitas escribir JSON a mano, la estructura se genera sola. Marca cada tabla como
+  <code>TABLA_NORMA_OBJETIVO</code> o <code>TABLA_NORMA_AJENA</code>. Si una tabla continúa en otra página, ponle el
+  mismo <code>table_id</code> (por ejemplo <code>TAB_003</code>) y numera <code>parte</code> 1, 2, 3&hellip;</p>
+  <p><strong>ERROR_ORDEN_COLUMNAS:</strong> si el motor mezcló el orden de columnas del periódico (leyó
+  izquierda-derecha-izquierda-derecha línea por línea en vez de columna izquierda completa y luego columna derecha),
+  marca la casilla correspondiente y corrige el orden manualmente en <code>golden_text</code>.</p>
+  <p><strong>Listado de normas (botón "📑 Normas"):</strong> agrupa automáticamente las páginas cargadas por norma
+  (<code>document_key</code>) y te deja completar los datos que el sistema no puede inferir solo (tipo de norma,
+  número, año, sector, título, estado, observaciones). Ahí ves de un vistazo cuántas páginas están revisadas,
+  pendientes o marcadas como multinorma, y cuántas tablas hay detectadas/validadas por norma.</p>
+  <p><strong>Norma consolidada (botón "📄 Consolidada"):</strong> une, en el orden correcto de páginas, únicamente los
+  <code>golden_text</code> que pertenecen a la norma objetivo elegida &mdash;nunca normas anteriores/posteriores,
+  encabezados editoriales ni firma digital de Editora Perú&mdash; y reconstruye ahí mismo las tablas que compartan un
+  mismo <code>table_id</code> en el orden de sus partes.</p>
+  <p><strong>Copiar contexto para ChatGPT:</strong> dentro de cada página, el botón "📋 Copiar contexto para ChatGPT"
+  arma automáticamente un texto con la norma objetivo, el PDF, la página, la clasificación, la extracción
+  correspondiente, la advertencia de multinorma si aplica, las tablas detectadas y la instrucción de validación, listo
+  para pegar en una conversación con ChatGPT como segunda opinión.</p>
+</details>
+
 <main class="layout">
   <div id="sidebar"></div>
 
@@ -339,6 +454,9 @@
 
   <div id="panel-derecho"><div class="vacio">Carga el archivo "Comparación de motores (JSON)" arriba para empezar.</div></div>
 </main>
+
+<div id="vista-normas" class="vista-overlay" style="display:none"></div>
+<div id="vista-consolidada" class="vista-overlay" style="display:none"></div>
 
 <footer>
   F-04-B · Herramienta offline, sin llamadas de red, sin escritura en Supabase · Ante duda: NO VERIFICADO
@@ -394,21 +512,241 @@
     "fecha", "anio", "porcentaje", "monto", "plazo", "medida"];
   var RE_ERROR_TOKEN = /^(\w+):\s*(.*?)\s*->\s*(.*)$/;
 
+  // ---------- F-04-B.3: clasificación de página / segmentación / tablas / normas ----------
+  var CLASIFICACION_PAGINA = [
+    ["", "(sin clasificar todavía)"],
+    ["NORMA_OBJETIVO_COMPLETA", "La norma objetivo ocupa toda la página"],
+    ["CONTINUACION_NORMA_OBJETIVO", "Continuación de la norma objetivo (viene de una página anterior)"],
+    ["PDF_CONTIENE_NORMA_EN_MULTINORMA", "MULTINORMA: la página mezcla la norma objetivo con otra(s) norma(s)"],
+    ["SIN_CONTENIDO_NORMA_OBJETIVO", "Esta página NO tiene contenido de la norma objetivo"],
+    ["ANEXO_NORMA_OBJETIVO", "Anexo de la norma objetivo"],
+    ["TABLA_NORMA_OBJETIVO", "Página compuesta principalmente por tabla(s) de la norma objetivo"],
+    ["OTRO", "Otro (explicar en observaciones)"]
+  ];
+  var CLASIFICACION_LABEL = {};
+  CLASIFICACION_PAGINA.forEach(function (par) { CLASIFICACION_LABEL[par[0]] = par[1]; });
+  var CLASIFICACIONES_SIN_GOLDEN = { SIN_CONTENIDO_NORMA_OBJETIVO: true, OTRO: true };
+  var CLASIFICACIONES_MULTINORMA = { PDF_CONTIENE_NORMA_EN_MULTINORMA: true };
+
+  var TABLA_PERTENECE = [
+    ["TABLA_NORMA_OBJETIVO", "Pertenece a la norma objetivo"],
+    ["TABLA_NORMA_AJENA", "Pertenece a otra norma (ajena) — no va en el golden"]
+  ];
+  var TABLA_PERTENECE_LABEL = { TABLA_NORMA_OBJETIVO: "Tabla de la norma objetivo", TABLA_NORMA_AJENA: "Tabla ajena (excluida)" };
+
+  var ESTADOS_NORMA = ["PENDIENTE", "EN_PROCESO", "REQUIERE_REVISION", "VALIDADO", "FINALIZADO"];
+
+  var FUENTE_LABEL = { guardado: "Texto guardado (histórico)", pymupdf: "PyMuPDF", pdfplumber: "pdfplumber", tesseract: "Tesseract (OCR)", manual: "Transcripción manual" };
+
+  var INSTRUCCION_CHATGPT = "Compara la transcripción contra el PDF. Identifica exclusivamente el contenido " +
+    "perteneciente a la norma objetivo. No corrijas la redacción jurídica. Conserva palabras, nombres, números, " +
+    "signos y referencias exactamente como aparecen. Si la página contiene otra norma, exclúyela. Si existen tablas " +
+    "de la norma objetivo, reconstruye también su estructura. Si pertenecen a otra norma, exclúyelas.";
+
+  var RE_TABLE_ID = /^TAB_(\d+)$/;
+
   var paginas = [];          // arreglo de registros de F04_COMPARACION_MOTORES.json (.paginas)
   var manifestPorClave = {}; // clave -> fila del manifest V2
   var indicePorClave = {};   // clave -> {archivo_imagen, estado} de F04B_INDICE_IMAGENES.json
-  var decisiones = {};       // clave -> {decision, golden_text, observaciones, revisado_en}
+  var decisiones = {};       // clave -> {decision, golden_text, observaciones, revisado_en, clasificacion_pagina, ...}
+  var normasMeta = {};       // document_key -> {tipo_norma, numero, anio, sector, titulo, estado, observaciones, ...}
   var claveActual = null;
   var cambiosSinExportar = false;
   var zoomActualIdx = NIVELES_ZOOM.indexOf(1);
   var anchoAjustado = false; // true = "ajustar ancho" (100% del contenedor) en vez de ancho fijo por zoom
   var tamanoFuenteIdx = TAMANOS_FUENTE.indexOf(12);
+  var vistaActual = "revision"; // "revision" | "normas" | "consolidada"
+  var celdaEnfocada = null;    // {k, tablaIdx, row, col} — última celda de tabla enfocada, para que la barra de herramientas sepa sobre cuál actuar
+  var CLAVE_LOCALSTORAGE_NORMAS = "f04b_normas_meta_v1";
 
   function clave(docKey, pageNumber) { return docKey + "::" + pageNumber; }
   function escapeHtml(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
+  }
+
+  // ---------- F-04-B.3: registro por página (con compatibilidad hacia atrás) ----------
+  function registroVacioPagina() {
+    return {
+      decision: null, golden_text: "", observaciones: "", revisado_en: null, revisor: null, version: 0, historial: [],
+      clasificacion_pagina: "", fuente_base: "",
+      excluded_text: "", seg_anterior_excluido: "", seg_posterior_excluido: "",
+      marcador_inicio_norma: "", marcador_fin_norma: "",
+      error_orden_columnas: false,
+      tablas: []
+    };
+  }
+
+  function normalizarRegistroPagina(d) {
+    // Un progreso exportado antes de F-04-B.3 no trae los campos nuevos: se completan con su valor
+    // vacío por defecto, sin tocar los campos legados (decision/golden_text/observaciones/revisado_en).
+    var out = Object.assign(registroVacioPagina(), d || {});
+    out.tablas = Array.isArray(out.tablas) ? out.tablas : [];
+    out.historial = Array.isArray(out.historial) ? out.historial : [];
+    return out;
+  }
+
+  function obtenerRegistroPagina(k) {
+    // A diferencia de normalizarRegistroPagina (usada al importar progreso), esta función NUNCA reemplaza
+    // el objeto ya guardado en decisiones[k] por uno nuevo -solo completa los campos que falten, en el mismo
+    // objeto- para que una referencia tomada antes (por ejemplo "var d = obtenerRegistroPagina(k)" en
+    // renderDetalle) siga apuntando al registro real incluso si el editor de tablas lo consulta después.
+    var actual = decisiones[k];
+    if (!actual) { decisiones[k] = registroVacioPagina(); return decisiones[k]; }
+    var base = registroVacioPagina();
+    Object.keys(base).forEach(function (campo) {
+      if (!(campo in actual)) actual[campo] = base[campo];
+    });
+    actual.tablas = Array.isArray(actual.tablas) ? actual.tablas : [];
+    actual.historial = Array.isArray(actual.historial) ? actual.historial : [];
+    return actual;
+  }
+
+  function siguienteTableIdSugerido() {
+    var maxN = 0;
+    Object.keys(decisiones).forEach(function (k) {
+      (decisiones[k].tablas || []).forEach(function (t) {
+        var m = RE_TABLE_ID.exec(t.table_id || "");
+        if (m) maxN = Math.max(maxN, parseInt(m[1], 10));
+      });
+    });
+    return "TAB_" + String(maxN + 1).padStart(3, "0");
+  }
+
+  function tableIdsExistentes() {
+    var vistos = {};
+    Object.keys(decisiones).forEach(function (k) {
+      (decisiones[k].tablas || []).forEach(function (t) {
+        if (t.table_id) vistos[t.table_id] = true;
+      });
+    });
+    return Object.keys(vistos).sort();
+  }
+
+  // ---------- F-04-B.3: modelo de tabla editable (celdas con row/col/rowspan/colspan) ----------
+  function celdaVacia(row, col, role) {
+    return { row: row, col: col, rowspan: 1, colspan: 1, text: "", role: role || "data", bbox: null, confidence: null };
+  }
+
+  function nuevaTablaVacia(filasN, columnasN) {
+    var celdas = [];
+    for (var r = 0; r < filasN; r++) {
+      for (var c = 0; c < columnasN; c++) celdas.push(celdaVacia(r, c, r === 0 ? "header" : "data"));
+    }
+    return { table_id: siguienteTableIdSugerido(), parte: 1, pertenece: "TABLA_NORMA_OBJETIVO", titulo: "", notas: "", celdas: celdas };
+  }
+
+  function dimensionesTabla(tabla) {
+    var filas = 0, columnas = 0;
+    (tabla.celdas || []).forEach(function (c) {
+      filas = Math.max(filas, c.row + c.rowspan);
+      columnas = Math.max(columnas, c.col + c.colspan);
+    });
+    return { filas: filas || 1, columnas: columnas || 1 };
+  }
+
+  function mapaOcupacion(tabla) {
+    var mapa = {};
+    (tabla.celdas || []).forEach(function (c) {
+      for (var r = c.row; r < c.row + c.rowspan; r++) {
+        for (var cc = c.col; cc < c.col + c.colspan; cc++) mapa[r + "," + cc] = c;
+      }
+    });
+    return mapa;
+  }
+
+  function agregarFilaTabla(tabla, idx) {
+    var dim = dimensionesTabla(tabla);
+    idx = Math.max(0, Math.min(idx, dim.filas));
+    tabla.celdas.forEach(function (c) {
+      if (c.row < idx && c.row + c.rowspan > idx) { c.rowspan += 1; }
+      else if (c.row >= idx) { c.row += 1; }
+    });
+    var ocupacion = mapaOcupacion(tabla);
+    for (var col = 0; col < dim.columnas; col++) {
+      if (!ocupacion[idx + "," + col]) tabla.celdas.push(celdaVacia(idx, col, "data"));
+    }
+  }
+
+  function eliminarFilaTabla(tabla, idx) {
+    var dim = dimensionesTabla(tabla);
+    if (dim.filas <= 1) return false;
+    tabla.celdas = tabla.celdas.reduce(function (acc, c) {
+      if (c.row < idx && c.row + c.rowspan > idx) { acc.push(Object.assign({}, c, { rowspan: c.rowspan - 1 })); }
+      else if (c.row === idx) { if (c.rowspan > 1) acc.push(Object.assign({}, c, { rowspan: c.rowspan - 1 })); }
+      else if (c.row > idx) { acc.push(Object.assign({}, c, { row: c.row - 1 })); }
+      else { acc.push(c); }
+      return acc;
+    }, []);
+    return true;
+  }
+
+  function agregarColumnaTabla(tabla, idx) {
+    var dim = dimensionesTabla(tabla);
+    idx = Math.max(0, Math.min(idx, dim.columnas));
+    tabla.celdas.forEach(function (c) {
+      if (c.col < idx && c.col + c.colspan > idx) { c.colspan += 1; }
+      else if (c.col >= idx) { c.col += 1; }
+    });
+    var ocupacion = mapaOcupacion(tabla);
+    for (var row = 0; row < dim.filas; row++) {
+      if (!ocupacion[row + "," + idx]) tabla.celdas.push(celdaVacia(row, idx, "data"));
+    }
+  }
+
+  function eliminarColumnaTabla(tabla, idx) {
+    var dim = dimensionesTabla(tabla);
+    if (dim.columnas <= 1) return false;
+    tabla.celdas = tabla.celdas.reduce(function (acc, c) {
+      if (c.col < idx && c.col + c.colspan > idx) { acc.push(Object.assign({}, c, { colspan: c.colspan - 1 })); }
+      else if (c.col === idx) { if (c.colspan > 1) acc.push(Object.assign({}, c, { colspan: c.colspan - 1 })); }
+      else if (c.col > idx) { acc.push(Object.assign({}, c, { col: c.col - 1 })); }
+      else { acc.push(c); }
+      return acc;
+    }, []);
+    return true;
+  }
+
+  function unirCeldasTabla(tabla, celdasElegidas) {
+    if (celdasElegidas.length < 2) return "Elige al menos 2 celdas para unir.";
+    var minRow = Math.min.apply(null, celdasElegidas.map(function (c) { return c.row; }));
+    var minCol = Math.min.apply(null, celdasElegidas.map(function (c) { return c.col; }));
+    var maxRow = Math.max.apply(null, celdasElegidas.map(function (c) { return c.row + c.rowspan; }));
+    var maxCol = Math.max.apply(null, celdasElegidas.map(function (c) { return c.col + c.colspan; }));
+    var ocupacion = mapaOcupacion(tabla);
+    var origenesEnRect = {};
+    for (var r = minRow; r < maxRow; r++) {
+      for (var c = minCol; c < maxCol; c++) {
+        var origen = ocupacion[r + "," + c];
+        if (!origen) return "La selección deja huecos: elige un rango rectangular completo.";
+        if (origen.row < minRow || origen.col < minCol || origen.row + origen.rowspan > maxRow || origen.col + origen.colspan > maxCol) {
+          return "La selección corta una celda ya combinada: agranda la selección para incluirla completa.";
+        }
+        origenesEnRect[origen.row + "," + origen.col] = origen;
+      }
+    }
+    var origenes = Object.keys(origenesEnRect).map(function (kk) { return origenesEnRect[kk]; });
+    var textoUnido = origenes
+      .slice().sort(function (a, b) { return a.row - b.row || a.col - b.col; })
+      .map(function (c) { return c.text || ""; }).filter(function (t) { return t.trim() !== ""; }).join(" ");
+    var todosHeader = origenes.every(function (c) { return c.role === "header"; });
+    var nueva = { row: minRow, col: minCol, rowspan: maxRow - minRow, colspan: maxCol - minCol, text: textoUnido, role: todosHeader ? "header" : "data", bbox: null, confidence: null };
+    tabla.celdas = tabla.celdas.filter(function (c) { return origenes.indexOf(c) === -1; });
+    tabla.celdas.push(nueva);
+    return null;
+  }
+
+  function separarCeldaTabla(tabla, celda) {
+    if (celda.rowspan <= 1 && celda.colspan <= 1) return "Esta celda ya es simple (1x1): no hay nada que separar.";
+    for (var r = celda.row; r < celda.row + celda.rowspan; r++) {
+      for (var c = celda.col; c < celda.col + celda.colspan; c++) {
+        if (r === celda.row && c === celda.col) continue;
+        tabla.celdas.push(celdaVacia(r, c, celda.role));
+      }
+    }
+    celda.rowspan = 1; celda.colspan = 1;
+    return null;
   }
 
   function guardarLocalStorageSeguro() {
@@ -432,6 +770,31 @@
       console.warn("No se pudo leer el respaldo local:", e);
       return null;
     }
+  }
+
+  function guardarNormasLocalStorageSeguro() {
+    try {
+      localStorage.setItem(CLAVE_LOCALSTORAGE_NORMAS, JSON.stringify(normasMeta));
+    } catch (e) {
+      console.warn("No se pudo guardar el respaldo local del registro de normas:", e);
+    }
+  }
+
+  function leerNormasLocalStorageSeguro() {
+    try {
+      var raw = localStorage.getItem(CLAVE_LOCALSTORAGE_NORMAS);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      console.warn("No se pudo leer el respaldo local del registro de normas:", e);
+      return null;
+    }
+  }
+
+  function metaNorma(documentKey) {
+    if (!normasMeta[documentKey]) {
+      normasMeta[documentKey] = { tipo_norma: "", numero: "", anio: "", sector: "", titulo: "", estado: "PENDIENTE", observaciones: "", paginas_totales_manual: null };
+    }
+    return normasMeta[documentKey];
   }
 
   window.addEventListener("beforeunload", function (e) {
@@ -459,6 +822,10 @@
     var hayDatos = paginas.length > 0;
     document.getElementById("btn-exportar-json").disabled = !hayDatos;
     document.getElementById("btn-exportar-csv").disabled = !hayDatos;
+    document.getElementById("btn-exportar-normas").disabled = !hayDatos;
+    document.getElementById("btn-ver-normas").disabled = !hayDatos;
+    document.getElementById("btn-ver-consolidada").disabled = !hayDatos;
+    if (vistaActual === "normas" && hayDatos) renderVistaNormas();
     actualizarBotonesNav();
   }
 
@@ -502,7 +869,12 @@
     return (
       '<div class="caja-texto">' +
       '<div class="cabecera-caja"><span>' + escapeHtml(titulo) + '</span>' +
-      (tieneTexto ? '<button type="button" class="secundario copiar-golden" data-fuente="' + id + '">Usar como golden</button>' : "") +
+      (tieneTexto
+        ? '<span class="fila-botones-caja">' +
+          '<button type="button" class="secundario copiar-a-campo" data-fuente="' + id + '" data-destino="golden_text">Usar como golden</button>' +
+          '<button type="button" class="gris copiar-a-campo" data-fuente="' + id + '" data-destino="excluded_text">Usar como excluido</button>' +
+          '</span>'
+        : "") +
       '</div>' +
       (tieneTexto
         ? '<pre>' + escapeHtml(texto) + '</pre>'
@@ -644,10 +1016,354 @@
     document.documentElement.style.setProperty("--fuente-cajas", TAMANOS_FUENTE[tamanoFuenteIdx] + "px");
   }
 
+  // ---------- F-04-B.3: panel de clasificación de página + delimitación de norma (multinorma) ----------
+  function renderPanelClasificacionSegmentacion(d) {
+    var esMultinorma = !!CLASIFICACIONES_MULTINORMA[d.clasificacion_pagina];
+    var sinGolden = !!CLASIFICACIONES_SIN_GOLDEN[d.clasificacion_pagina];
+    var html = '<div class="panel-seccion" id="panel-clasificacion">';
+    html += '<div class="titulo-seccion">🧩 Clasificación de la página y delimitación de la norma objetivo';
+    if (d.clasificacion_pagina) {
+      html += ' <span class="badge-clasificacion' + (esMultinorma ? " badge-multinorma" : (sinGolden ? " badge-sin-contenido" : "")) + '">' +
+        escapeHtml(CLASIFICACION_LABEL[d.clasificacion_pagina] || d.clasificacion_pagina) + "</span>";
+    }
+    html += "</div>";
+
+    html += '<div class="fila-campo"><label>Clasificación de esta página' +
+      '<select class="select-clasificacion" id="select-clasificacion-pagina">' +
+      CLASIFICACION_PAGINA.map(function (par) {
+        return '<option value="' + par[0] + '"' + (d.clasificacion_pagina === par[0] ? " selected" : "") + '>' + escapeHtml(par[1]) + "</option>";
+      }).join("") +
+      "</select></label></div>";
+
+    if (esMultinorma) {
+      html += '<div class="aviso-multinorma">⚠ MULTINORMA: separa lo que pertenece a la norma objetivo (queda en golden_text) de lo ' +
+        "que no (excluded_text abajo). El contenido excluido se conserva siempre como evidencia; nunca se borra ni se incorpora al golden.</div>";
+    }
+    if (sinGolden) {
+      html += '<div class="aviso-multinorma">Esta página no aporta contenido de la norma objetivo: normalmente golden_text queda vacío ' +
+        "y lo que sí aparece en la página se registra como excluded_text.</div>";
+    }
+
+    html += '<label class="etiqueta" for="excluded_text">excluded_text (presente en la página, pero NO pertenece a la norma objetivo)</label>';
+    html += '<textarea class="excluido" id="excluded_text" style="width:100%;min-height:80px;font-size:13px;padding:8px;border:1px solid var(--borde);border-radius:6px;" ' +
+      'placeholder="Contenido de una norma anterior/posterior u otro contenido ajeno visible en esta página">' + escapeHtml(d.excluded_text || "") + "</textarea>";
+
+    html += '<details class="panel-interno"><summary>🔎 Delimitación fina (opcional): inicio/fin exacto y bloques anterior/posterior</summary>';
+    html += '<label class="etiqueta" for="seg_anterior_excluido">Contenido ANTERIOR excluido (si la página empieza con el final de otra norma)</label>' +
+      '<textarea class="campo-chico excluido" id="seg_anterior_excluido">' + escapeHtml(d.seg_anterior_excluido || "") + "</textarea>";
+    html += '<div class="fila-campo"><label>Inicio EXACTO de la norma objetivo<input type="text" class="input-corto" id="marcador_inicio_norma" style="min-width:260px" value="' +
+      escapeHtml(d.marcador_inicio_norma || "") + '" placeholder="Ej: DECRETO SUPREMO Nº 015-2025-SA"></label></div>';
+    html += '<div class="fila-campo"><label>Fin EXACTO de la norma objetivo<input type="text" class="input-corto" id="marcador_fin_norma" style="min-width:260px" value="' +
+      escapeHtml(d.marcador_fin_norma || "") + '"></label></div>';
+    html += '<label class="etiqueta" for="seg_posterior_excluido">Contenido POSTERIOR excluido (si la página termina con el inicio de otra norma)</label>' +
+      '<textarea class="campo-chico excluido" id="seg_posterior_excluido">' + escapeHtml(d.seg_posterior_excluido || "") + "</textarea>";
+    html += "</details>";
+
+    html += '<label class="chk-linea"><input type="checkbox" id="chk_error_orden_columnas"' + (d.error_orden_columnas ? " checked" : "") +
+      "> ERROR_ORDEN_COLUMNAS — el motor mezcló columna izquierda/derecha (corrígelo a mano en golden_text)</label>";
+    html += "</div>";
+    return html;
+  }
+
+  // ---------- F-04-B.3: editor visual de tablas ----------
+  function renderizarTablaEditable(tabla, tablaIdx) {
+    var ocupacion = mapaOcupacion(tabla);
+    var dim = dimensionesTabla(tabla);
+    var html = '<table class="tabla-editable">';
+    for (var r = 0; r < dim.filas; r++) {
+      html += "<tr>";
+      for (var c = 0; c < dim.columnas; c++) {
+        var origen = ocupacion[r + "," + c];
+        if (!origen) { html += '<td class="celda-hueco" title="Hueco inesperado en la tabla importada"></td>'; continue; }
+        if (origen.row !== r || origen.col !== c) continue;
+        var tag = origen.role === "header" ? "th" : "td";
+        html += "<" + tag + ' class="celda-editable' + (origen.role === "header" ? " es-encabezado" : "") + '"' +
+          (origen.rowspan > 1 ? ' rowspan="' + origen.rowspan + '"' : "") +
+          (origen.colspan > 1 ? ' colspan="' + origen.colspan + '"' : "") +
+          ' data-row="' + origen.row + '" data-col="' + origen.col + '">' +
+          '<input type="checkbox" class="chk-celda" data-tabla-idx="' + tablaIdx + '" data-row="' + origen.row + '" data-col="' + origen.col +
+          '" title="Marcar esta celda (para unir, separar o cambiar su rol)">' +
+          '<textarea class="entrada-celda" data-tabla-idx="' + tablaIdx + '" data-row="' + origen.row + '" data-col="' + origen.col + '" rows="1">' +
+          escapeHtml(origen.text || "") + "</textarea>" +
+          "</" + tag + ">";
+      }
+      html += "</tr>";
+    }
+    html += "</table>";
+    return html;
+  }
+
+  function renderContenedorTabla(t, idx) {
+    var html = '<div class="contenedor-tabla" data-tabla-idx="' + idx + '">';
+    html += '<div class="cabecera-tabla-meta">' +
+      '<label>table_id<br><input type="text" class="input-table-id campo-tabla" data-campo="table_id" data-tabla-idx="' + idx +
+      '" list="lista-table-ids" value="' + escapeHtml(t.table_id || "") + '"></label>' +
+      '<label>parte<br><input type="number" min="1" class="input-parte campo-tabla" data-campo="parte" data-tabla-idx="' + idx +
+      '" value="' + (t.parte || 1) + '"></label>' +
+      '<label>Pertenece a<br><select class="select-tabla campo-tabla" data-campo="pertenece" data-tabla-idx="' + idx + '">' +
+      TABLA_PERTENECE.map(function (par) { return '<option value="' + par[0] + '"' + (t.pertenece === par[0] ? " selected" : "") + '>' + escapeHtml(par[1]) + "</option>"; }).join("") +
+      "</select></label>" +
+      '<label>Título<br><input type="text" class="campo-tabla" data-campo="titulo" data-tabla-idx="' + idx + '" value="' +
+      escapeHtml(t.titulo || "") + '" style="min-width:160px"></label>' +
+      '<button type="button" class="gris btn-eliminar-tabla" data-tabla-idx="' + idx + '" style="margin-left:auto">🗑 Eliminar esta tabla</button>' +
+      "</div>";
+    html += '<div class="barra-herramientas-tabla">' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="fila-arriba" data-tabla-idx="' + idx + '">+ Fila arriba</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="fila-abajo" data-tabla-idx="' + idx + '">+ Fila abajo</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="eliminar-fila" data-tabla-idx="' + idx + '">Eliminar fila marcada</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="col-izq" data-tabla-idx="' + idx + '">+ Columna izq.</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="col-der" data-tabla-idx="' + idx + '">+ Columna der.</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="eliminar-columna" data-tabla-idx="' + idx + '">Eliminar columna marcada</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="unir" data-tabla-idx="' + idx + '">Unir celdas marcadas</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="separar" data-tabla-idx="' + idx + '">Separar celda marcada</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="marcar-encabezado" data-tabla-idx="' + idx + '">Marcar encabezado</button>' +
+      '<button type="button" class="gris btn-tabla-accion" data-accion="marcar-dato" data-tabla-idx="' + idx + '">Marcar dato</button>' +
+      "</div>";
+    html += '<div class="ayuda">Marca una o más celdas con su casilla ☐ (esquina superior izquierda) antes de unir, separar o cambiar su rol. ' +
+      "Para agregar/eliminar una fila o columna sola, marca cualquier celda de esa fila/columna. Compara siempre contra la imagen de la página, a la izquierda.</div>";
+    html += '<div class="scroll-tabla-editable">' + renderizarTablaEditable(t, idx) + "</div>";
+    html += '<div class="fila-notas-tabla"><label class="etiqueta" style="margin:4px 0">Notas de la tabla (subtítulos, unidades, UIT, NA, etc.)</label>' +
+      '<textarea class="campo-tabla" data-campo="notas" data-tabla-idx="' + idx + '">' + escapeHtml(t.notas || "") + "</textarea></div>";
+    html += "</div>";
+    return html;
+  }
+
+  function renderPanelTablas(d) {
+    var html = '<div class="panel-seccion" id="panel-tablas">';
+    html += '<div class="titulo-seccion">📊 Tablas de la página <span class="ayuda">(editor visual — la estructura JSON se genera sola, nunca se escribe a mano)</span></div>';
+    html += '<div id="lista-tablas">';
+    html += d.tablas.length
+      ? d.tablas.map(function (t, idx) { return renderContenedorTabla(t, idx); }).join("")
+      : '<div class="sin-tablas-pagina">Esta página no tiene tablas registradas todavía.</div>';
+    html += "</div>";
+    html += '<button type="button" class="secundario" id="btn-agregar-tabla">+ Agregar tabla</button>';
+    html += '<datalist id="lista-table-ids">' + tableIdsExistentes().map(function (id) { return '<option value="' + escapeHtml(id) + '">'; }).join("") + "</datalist>";
+    html += "</div>";
+    return html;
+  }
+
+  function wirePanelTablas(det, k) {
+    var panel = det.querySelector("#panel-tablas");
+    if (!panel) return;
+
+    function tablas() { return obtenerRegistroPagina(k).tablas; }
+    function marcarCambio() { cambiosSinExportar = true; guardarLocalStorageSeguro(); }
+
+    function rerenderTabla(idx) {
+      var cont = panel.querySelector('.contenedor-tabla[data-tabla-idx="' + idx + '"]');
+      if (cont) cont.outerHTML = renderContenedorTabla(tablas()[idx], idx);
+    }
+
+    function rerenderLista() {
+      var lista = panel.querySelector("#lista-tablas");
+      var ts = tablas();
+      lista.innerHTML = ts.length
+        ? ts.map(function (t, i) { return renderContenedorTabla(t, i); }).join("")
+        : '<div class="sin-tablas-pagina">Esta página no tiene tablas registradas todavía.</div>';
+    }
+
+    var btnAgregar = panel.querySelector("#btn-agregar-tabla");
+    if (btnAgregar) {
+      btnAgregar.addEventListener("click", function () {
+        tablas().push(nuevaTablaVacia(2, 2));
+        marcarCambio();
+        rerenderLista();
+      });
+    }
+
+    panel.addEventListener("click", function (e) {
+      var btnElim = e.target.closest(".btn-eliminar-tabla");
+      if (btnElim) {
+        if (!confirm("¿Eliminar esta tabla completa? Esta acción no se puede deshacer.")) return;
+        tablas().splice(Number(btnElim.dataset.tablaIdx), 1);
+        marcarCambio();
+        rerenderLista();
+        return;
+      }
+
+      var chk = e.target.closest(".chk-celda");
+      if (chk) {
+        celdaEnfocada = { tablaIdx: Number(chk.dataset.tablaIdx), row: Number(chk.dataset.row), col: Number(chk.dataset.col) };
+        return;
+      }
+
+      var btnAccion = e.target.closest(".btn-tabla-accion");
+      if (btnAccion) {
+        var tIdx = Number(btnAccion.dataset.tablaIdx);
+        var tabla = tablas()[tIdx];
+        var cont = panel.querySelector('.contenedor-tabla[data-tabla-idx="' + tIdx + '"]');
+        var ocupacion = mapaOcupacion(tabla);
+        var marcadas = Array.prototype.slice.call(cont.querySelectorAll(".chk-celda:checked")).map(function (chkEl) {
+          return ocupacion[chkEl.dataset.row + "," + chkEl.dataset.col];
+        }).filter(Boolean);
+        var enfocada = (celdaEnfocada && celdaEnfocada.tablaIdx === tIdx) ? ocupacion[celdaEnfocada.row + "," + celdaEnfocada.col] : null;
+        var refCelda = marcadas[0] || enfocada;
+        var accion = btnAccion.dataset.accion;
+        var error = null;
+        var dim = dimensionesTabla(tabla);
+
+        if (accion === "fila-arriba") agregarFilaTabla(tabla, refCelda ? refCelda.row : 0);
+        else if (accion === "fila-abajo") agregarFilaTabla(tabla, refCelda ? refCelda.row + refCelda.rowspan : dim.filas);
+        else if (accion === "eliminar-fila") {
+          if (!refCelda) { alert("Marca (con la casilla ☐) una celda de la fila que quieres eliminar."); return; }
+          if (!eliminarFilaTabla(tabla, refCelda.row)) { alert("La tabla debe conservar al menos una fila."); return; }
+        } else if (accion === "col-izq") agregarColumnaTabla(tabla, refCelda ? refCelda.col : 0);
+        else if (accion === "col-der") agregarColumnaTabla(tabla, refCelda ? refCelda.col + refCelda.colspan : dim.columnas);
+        else if (accion === "eliminar-columna") {
+          if (!refCelda) { alert("Marca (con la casilla ☐) una celda de la columna que quieres eliminar."); return; }
+          if (!eliminarColumnaTabla(tabla, refCelda.col)) { alert("La tabla debe conservar al menos una columna."); return; }
+        } else if (accion === "unir") {
+          if (marcadas.length < 2) { alert("Marca (con la casilla ☐) al menos 2 celdas para unir."); return; }
+          error = unirCeldasTabla(tabla, marcadas);
+          if (error) { alert(error); return; }
+        } else if (accion === "separar") {
+          if (!refCelda) { alert("Marca (con la casilla ☐) la celda combinada que quieres separar."); return; }
+          error = separarCeldaTabla(tabla, refCelda);
+          if (error) { alert(error); return; }
+        } else if (accion === "marcar-encabezado" || accion === "marcar-dato") {
+          var objetivo = marcadas.length ? marcadas : (refCelda ? [refCelda] : []);
+          if (!objetivo.length) { alert("Marca (con la casilla ☐) al menos una celda, o haz clic dentro de una para enfocarla."); return; }
+          objetivo.forEach(function (c) { c.role = accion === "marcar-encabezado" ? "header" : "data"; });
+        }
+
+        celdaEnfocada = null;
+        marcarCambio();
+        rerenderTabla(tIdx);
+        return;
+      }
+    });
+
+    panel.addEventListener("input", function (e) {
+      var campoTabla = e.target.closest(".campo-tabla");
+      if (campoTabla) {
+        var idx = Number(campoTabla.dataset.tablaIdx);
+        var t = tablas()[idx];
+        if (!t) return;
+        var campo = campoTabla.dataset.campo;
+        t[campo] = campo === "parte" ? (parseInt(campoTabla.value, 10) || 1) : campoTabla.value;
+        marcarCambio();
+        return;
+      }
+      var entradaCelda = e.target.closest(".entrada-celda");
+      if (entradaCelda) {
+        var tabla2 = tablas()[Number(entradaCelda.dataset.tablaIdx)];
+        var origen2 = tabla2 && mapaOcupacion(tabla2)[entradaCelda.dataset.row + "," + entradaCelda.dataset.col];
+        if (origen2) origen2.text = entradaCelda.value;
+        marcarCambio();
+      }
+    });
+
+    panel.addEventListener("focusin", function (e) {
+      var entradaCelda = e.target.closest(".entrada-celda");
+      if (entradaCelda) {
+        celdaEnfocada = { tablaIdx: Number(entradaCelda.dataset.tablaIdx), row: Number(entradaCelda.dataset.row), col: Number(entradaCelda.dataset.col) };
+      }
+    });
+  }
+
+  // ---------- F-04-B.3: contexto para ChatGPT + copiado al portapapeles con respaldo offline ----------
+  function tablaATextoPlano(tabla) {
+    var ocupacion = mapaOcupacion(tabla);
+    var dim = dimensionesTabla(tabla);
+    var lineas = [];
+    for (var r = 0; r < dim.filas; r++) {
+      var celdasFila = [];
+      for (var c = 0; c < dim.columnas; c++) {
+        var origen = ocupacion[r + "," + c];
+        if (!origen || origen.row !== r || origen.col !== c) continue;
+        celdasFila.push((origen.role === "header" ? "[H] " : "") + String(origen.text || "").replace(/\s+/g, " ").trim());
+      }
+      lineas.push(celdasFila.join(" | "));
+    }
+    return lineas.join("\n");
+  }
+
+  function construirContextoChatGPT(p, k, d) {
+    var meta = normasMeta[p.document_key];
+    var m = manifestPorClave[k];
+    var lineas = ["=== CONTEXTO PARA VALIDACIÓN (F-04-B) ===", ""];
+
+    lineas.push("Norma objetivo (document_key): " + p.document_key);
+    if (meta && (meta.tipo_norma || meta.numero || meta.anio || meta.titulo)) {
+      lineas.push("Identificación: " + [meta.tipo_norma, meta.numero, meta.anio].filter(Boolean).join(" ") + (meta.titulo ? " — " + meta.titulo : ""));
+    }
+    if (m && (m.pdf_url || m.storage_path)) lineas.push("PDF: " + (m.pdf_url || m.storage_path));
+    lineas.push("Página: " + p.page_number + (m && m.pdf_page_count ? " (de " + m.pdf_page_count + ")" : ""));
+    lineas.push("Clasificación de la página: " + (CLASIFICACION_LABEL[d.clasificacion_pagina] || "(sin clasificar)") +
+      (m && m.f03_classification ? " · F-03: " + m.f03_classification : ""));
+    lineas.push("");
+
+    if (CLASIFICACIONES_MULTINORMA[d.clasificacion_pagina]) {
+      lineas.push("⚠ ADVERTENCIA MULTINORMA: esta página mezcla la norma objetivo con otra(s) norma(s).");
+      if (d.seg_anterior_excluido) lineas.push("Contenido ANTERIOR excluido:\n" + d.seg_anterior_excluido);
+      if (d.marcador_inicio_norma) lineas.push("Inicio exacto de la norma objetivo: " + d.marcador_inicio_norma);
+      if (d.marcador_fin_norma) lineas.push("Fin exacto de la norma objetivo: " + d.marcador_fin_norma);
+      if (d.seg_posterior_excluido) lineas.push("Contenido POSTERIOR excluido:\n" + d.seg_posterior_excluido);
+      if (d.excluded_text) lineas.push("excluded_text registrado:\n" + d.excluded_text);
+      lineas.push("");
+    } else if (d.excluded_text) {
+      lineas.push("Contenido excluido registrado (no pertenece a la norma objetivo):\n" + d.excluded_text);
+      lineas.push("");
+    }
+
+    lineas.push("--- Extracción correspondiente ---");
+    if (d.golden_text && d.golden_text.trim()) {
+      lineas.push("golden_text actual (decisión: " + (d.decision || "sin decidir") + "):\n" + d.golden_text);
+    } else {
+      var textos = p.textos || {};
+      lineas.push("Texto guardado (histórico):\n" + (p.texto_guardado || "(vacío)"));
+      lineas.push("\nPyMuPDF:\n" + (textos.pymupdf || "(vacío)"));
+      lineas.push("\npdfplumber:\n" + (textos.pdfplumber || "(vacío)"));
+      lineas.push("\nTesseract (OCR):\n" + (textos.ocr_tesseract || "(vacío)"));
+    }
+    lineas.push("");
+
+    if (d.tablas && d.tablas.length) {
+      lineas.push("--- Tablas detectadas en esta página ---");
+      d.tablas.forEach(function (t, idx) {
+        lineas.push("Tabla " + (idx + 1) + " · table_id=" + (t.table_id || "(sin id)") + " · parte=" + (t.parte || 1) +
+          " · " + (TABLA_PERTENECE_LABEL[t.pertenece] || t.pertenece));
+        if (t.titulo) lineas.push("Título: " + t.titulo);
+        lineas.push(tablaATextoPlano(t));
+        if (t.notas) lineas.push("Notas: " + t.notas);
+        lineas.push("");
+      });
+    }
+
+    lineas.push("--- Instrucción de validación ---");
+    lineas.push(INSTRUCCION_CHATGPT);
+    return lineas.join("\n");
+  }
+
+  function copiarConTextareaTemporal(texto, callbackExito) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = texto;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok && callbackExito) callbackExito();
+    } catch (e) {
+      console.warn("No se pudo copiar automáticamente:", e);
+    }
+  }
+
+  function copiarAlPortapapeles(texto, callbackExito) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(texto).then(callbackExito, function () { copiarConTextareaTemporal(texto, callbackExito); });
+    } else {
+      copiarConTextareaTemporal(texto, callbackExito);
+    }
+  }
+
   function renderDetalle(p) {
     var k = clave(p.document_key, p.page_number);
     var m = manifestPorClave[k];
-    var d = decisiones[k] || { decision: "", golden_text: "", observaciones: "" };
+    var d = obtenerRegistroPagina(k);
     var textos = p.textos || {};
 
     renderPanelImagen(p, k);
@@ -669,6 +1385,8 @@
     html += '<span class="badge">same_engine_as_stored: ' + (p.same_engine_as_stored ? "SÍ" : "NO") + "</span>";
     if (m && (m.tiene_tabla === "True" || m.tiene_tabla === true)) html += '<span class="badge">Contiene tabla</span>';
     html += "</div>";
+
+    html += renderPanelClasificacionSegmentacion(d);
 
     html += '<details class="panel-interno" id="panel-diagnostico"><summary>🔎 Diagnóstico automático (no es verificación)</summary>';
     if (p.motivos && p.motivos.length) {
@@ -709,6 +1427,17 @@
     html += '<label class="etiqueta" for="observaciones">Observaciones (opcional)</label>';
     html += '<textarea id="observaciones">' + escapeHtml(d.observaciones || "") + "</textarea>";
 
+    html += renderPanelTablas(d);
+
+    if (d.historial && d.historial.length) {
+      html += '<details class="panel-interno" id="panel-historial"><summary>🕓 Historial de versiones anteriores de esta página (' + d.historial.length + ')</summary><ul>';
+      d.historial.slice().reverse().forEach(function (h) {
+        html += "<li><b>v" + (h.version || "?") + "</b> · " + escapeHtml(h.revisado_en || "") + " · " + escapeHtml(h.revisor || "(sin nombre)") +
+          " · decisión: " + escapeHtml(h.decision || "-") + " · clasificación: " + escapeHtml(CLASIFICACION_LABEL[h.clasificacion_pagina] || h.clasificacion_pagina || "-") + "</li>";
+      });
+      html += "</ul></details>";
+    }
+
     html += '<div class="bloque-decision"><label class="etiqueta" style="margin-top:0">Decisión</label>';
     DECISIONES.forEach(function (par) {
       var val = par[0], texto = par[1];
@@ -717,10 +1446,17 @@
     html += '<button type="button" class="gris" id="btn-limpiar-pagina" style="margin-top:8px">Borrar decisión de esta página</button>';
     html += "</div>";
 
+    html += '<div class="panel-seccion" id="bloque-chatgpt" style="display:none">' +
+      '<div class="titulo-seccion">📋 Contexto para ChatGPT <span class="aviso-copiado" id="aviso-copiado-chatgpt" style="display:none">✔ Copiado al portapapeles</span></div>' +
+      '<textarea id="texto-contexto-chatgpt" readonly style="width:100%;min-height:220px;font-size:12px;font-family:Consolas,\'Courier New\',monospace;padding:8px;border:1px solid var(--borde);border-radius:6px;"></textarea>' +
+      '<div class="ayuda" style="margin-top:6px">Si el copiado automático no funcionó en tu navegador, haz clic dentro del cuadro, selecciona todo ' +
+      "(Ctrl/Cmd+A) y copia manualmente (Ctrl/Cmd+C).</div></div>";
+
     html += '<div id="barra-pie-derecho">' +
       '<button type="button" class="secundario" id="btn-anterior-pie">Anterior</button>' +
       '<button type="button" id="btn-guardar-pagina">Guardar y siguiente</button>' +
       '<button type="button" class="secundario" id="btn-exportar-json-pie">Exportar JSON</button>' +
+      '<button type="button" class="secundario" id="btn-copiar-chatgpt">📋 Copiar contexto para ChatGPT</button>' +
       "</div>";
 
     var det = document.getElementById("panel-derecho");
@@ -728,6 +1464,35 @@
     det.scrollTop = 0;
 
     aplicarTamanoFuente();
+    wirePanelTablas(det, k);
+
+    function capturarCamposClasificacion() {
+      var elExcl = document.getElementById("excluded_text");
+      var elAnt = document.getElementById("seg_anterior_excluido");
+      var elPos = document.getElementById("seg_posterior_excluido");
+      var elIni = document.getElementById("marcador_inicio_norma");
+      var elFin = document.getElementById("marcador_fin_norma");
+      var elErr = document.getElementById("chk_error_orden_columnas");
+      if (elExcl) d.excluded_text = elExcl.value;
+      if (elAnt) d.seg_anterior_excluido = elAnt.value;
+      if (elPos) d.seg_posterior_excluido = elPos.value;
+      if (elIni) d.marcador_inicio_norma = elIni.value;
+      if (elFin) d.marcador_fin_norma = elFin.value;
+      if (elErr) d.error_orden_columnas = elErr.checked;
+    }
+
+    function bindSelectClasificacion() {
+      var sel = document.getElementById("select-clasificacion-pagina");
+      sel.addEventListener("change", function () {
+        // Recalcula solo el bloque de clasificación (badge/aviso multinorma) al vuelo, sin perder lo ya
+        // escrito en excluded_text/segmentación ni esperar a "Guardar" para que se note el cambio.
+        capturarCamposClasificacion();
+        d.clasificacion_pagina = sel.value;
+        document.getElementById("panel-clasificacion").outerHTML = renderPanelClasificacionSegmentacion(d);
+        bindSelectClasificacion();
+      });
+    }
+    bindSelectClasificacion();
 
     document.getElementById("btn-fuente-mas").addEventListener("click", function () {
       tamanoFuenteIdx = Math.min(tamanoFuenteIdx + 1, TAMANOS_FUENTE.length - 1);
@@ -738,16 +1503,22 @@
       aplicarTamanoFuente();
     });
 
-    det.querySelectorAll(".copiar-golden").forEach(function (btn) {
+    det.querySelectorAll(".copiar-a-campo").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var fuente = btn.dataset.fuente;
+        var destino = btn.dataset.destino;
         var texto = fuente === "guardado" ? p.texto_guardado
           : fuente === "pymupdf" ? textos.pymupdf
           : fuente === "pdfplumber" ? textos.pdfplumber
           : textos.ocr_tesseract;
-        var campo = document.getElementById("golden_text");
-        campo.value = texto || "";
+        var campo = document.getElementById(destino);
+        if (destino === "excluded_text" && campo.value.trim()) {
+          campo.value = campo.value + "\n\n" + (texto || "");
+        } else {
+          campo.value = texto || "";
+        }
         campo.focus();
+        if (destino === "golden_text") d.fuente_base = fuente; // trazabilidad: qué motor sirvió de base para el golden
       });
     });
 
@@ -757,18 +1528,54 @@
         alert("Elige una decisión antes de guardar (una de las 5 opciones).");
         return;
       }
+      var clasificacionElegida = document.getElementById("select-clasificacion-pagina").value;
+      if (!clasificacionElegida) {
+        alert('Elige la clasificación de la página (bloque "Clasificación de la página y delimitación de la norma objetivo") antes de guardar.');
+        return;
+      }
       var golden = document.getElementById("golden_text").value;
-      if (!golden.trim()) {
+      if (!golden.trim() && !CLASIFICACIONES_SIN_GOLDEN[clasificacionElegida]) {
         document.getElementById("aviso-golden-vacio").style.display = "block";
         if (!confirm("El texto golden está vacío. ¿Seguro que quieres guardar así? (Presiona Cancelar para seguir editando.)")) {
           return;
         }
       }
+      var excluded = document.getElementById("excluded_text").value;
+      var errorOrden = document.getElementById("chk_error_orden_columnas").checked;
+      var tablasActuales = obtenerRegistroPagina(k).tablas;
+      if ((excluded.trim() || errorOrden || tablasActuales.length) && decisionMarcada.value !== "NINGUNO_TRANSCRIBIR_MANUAL") {
+        if (!confirm("Marcaste contenido excluido, ERROR_ORDEN_COLUMNAS o tablas en esta página. Lo habitual en ese caso es la decisión " +
+          'NINGUNO_TRANSCRIBIR_MANUAL. ¿Seguro que quieres guardar igual con "' + decisionMarcada.value + '"?')) {
+          return;
+        }
+      }
+
+      var previo = decisiones[k];
+      var historialPrevio = (previo && previo.historial) || [];
+      if (previo && previo.revisado_en) {
+        historialPrevio = historialPrevio.concat([{
+          version: previo.version || 0, decision: previo.decision, golden_text: previo.golden_text, observaciones: previo.observaciones,
+          clasificacion_pagina: previo.clasificacion_pagina, excluded_text: previo.excluded_text, revisor: previo.revisor, revisado_en: previo.revisado_en
+        }]);
+      }
+
       decisiones[k] = {
         decision: decisionMarcada.value,
         golden_text: golden,
         observaciones: document.getElementById("observaciones").value,
-        revisado_en: new Date().toISOString()
+        revisado_en: new Date().toISOString(),
+        revisor: document.getElementById("nombre-revisor").value || "",
+        version: ((previo && previo.version) || 0) + 1,
+        historial: historialPrevio,
+        clasificacion_pagina: clasificacionElegida,
+        fuente_base: (previo && previo.fuente_base) || "",
+        excluded_text: excluded,
+        seg_anterior_excluido: document.getElementById("seg_anterior_excluido").value,
+        seg_posterior_excluido: document.getElementById("seg_posterior_excluido").value,
+        marcador_inicio_norma: document.getElementById("marcador_inicio_norma").value,
+        marcador_fin_norma: document.getElementById("marcador_fin_norma").value,
+        error_orden_columnas: errorOrden,
+        tablas: tablasActuales
       };
       cambiosSinExportar = true;
       guardarLocalStorageSeguro();
@@ -778,6 +1585,21 @@
     }
 
     document.getElementById("btn-guardar-pagina").addEventListener("click", function () { guardarPaginaActual(true); });
+
+    document.getElementById("btn-copiar-chatgpt").addEventListener("click", function () {
+      var contexto = construirContextoChatGPT(p, k, obtenerRegistroPagina(k));
+      var bloque = document.getElementById("bloque-chatgpt");
+      var caja = document.getElementById("texto-contexto-chatgpt");
+      caja.value = contexto;
+      bloque.style.display = "block";
+      bloque.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      var aviso = document.getElementById("aviso-copiado-chatgpt");
+      aviso.style.display = "none";
+      copiarAlPortapapeles(contexto, function () {
+        aviso.style.display = "inline";
+        setTimeout(function () { aviso.style.display = "none"; }, 4000);
+      });
+    });
 
     document.getElementById("btn-limpiar-pagina").addEventListener("click", function () {
       if (!confirm("¿Borrar la decisión guardada de esta página?")) return;
@@ -804,15 +1626,40 @@
     var campoGolden = document.getElementById("golden_text");
     var campoObs = document.getElementById("observaciones");
     if (!campoGolden && !campoObs && !decisionMarcada) return; // nada renderizado todavia
-    var golden = campoGolden ? campoGolden.value : (decisiones[k] || {}).golden_text || "";
-    var obs = campoObs ? campoObs.value : (decisiones[k] || {}).observaciones || "";
-    if (!decisionMarcada && !golden.trim() && !obs.trim() && !decisiones[k]) return; // nada que preservar
     var previo = decisiones[k] || {};
+    var golden = campoGolden ? campoGolden.value : previo.golden_text || "";
+    var obs = campoObs ? campoObs.value : previo.observaciones || "";
+    // Campos de F-04-B.3: si el detalle está renderizado, todos estos existen junto con golden_text/observaciones.
+    var campoClasif = document.getElementById("select-clasificacion-pagina");
+    var campoExcluido = document.getElementById("excluded_text");
+    var campoSegAnt = document.getElementById("seg_anterior_excluido");
+    var campoSegPos = document.getElementById("seg_posterior_excluido");
+    var campoMarcInicio = document.getElementById("marcador_inicio_norma");
+    var campoMarcFin = document.getElementById("marcador_fin_norma");
+    var campoErrorOrden = document.getElementById("chk_error_orden_columnas");
+    var clasificacion = campoClasif ? campoClasif.value : (previo.clasificacion_pagina || "");
+    var excluido = campoExcluido ? campoExcluido.value : (previo.excluded_text || "");
+    var tablasActuales = previo.tablas || []; // el editor de tablas ya lo muta en vivo sobre este mismo arreglo
+
+    if (!decisionMarcada && !golden.trim() && !obs.trim() && !clasificacion && !excluido.trim() && !tablasActuales.length && !decisiones[k]) return; // nada que preservar
+
     decisiones[k] = {
       decision: decisionMarcada || previo.decision || null,
       golden_text: golden,
       observaciones: obs,
-      revisado_en: previo.revisado_en || null
+      revisado_en: previo.revisado_en || null,
+      revisor: previo.revisor != null ? previo.revisor : null,
+      version: previo.version || 0,
+      historial: previo.historial || [],
+      clasificacion_pagina: clasificacion,
+      fuente_base: previo.fuente_base || "",
+      excluded_text: excluido,
+      seg_anterior_excluido: campoSegAnt ? campoSegAnt.value : (previo.seg_anterior_excluido || ""),
+      seg_posterior_excluido: campoSegPos ? campoSegPos.value : (previo.seg_posterior_excluido || ""),
+      marcador_inicio_norma: campoMarcInicio ? campoMarcInicio.value : (previo.marcador_inicio_norma || ""),
+      marcador_fin_norma: campoMarcFin ? campoMarcFin.value : (previo.marcador_fin_norma || ""),
+      error_orden_columnas: campoErrorOrden ? campoErrorOrden.checked : !!previo.error_orden_columnas,
+      tablas: tablasActuales
     };
     guardarLocalStorageSeguro();
   }
@@ -856,6 +1703,294 @@
   });
   document.getElementById("btn-toggle-sidebar").addEventListener("click", function () {
     document.getElementById("sidebar").classList.toggle("colapsado");
+  });
+
+  // ---------- F-04-B.3: vistas de pantalla completa (Listado de normas / Norma consolidada) ----------
+  function mostrarVista(nombre) {
+    if (claveActual) capturarCamposDePagina(claveActual);
+    vistaActual = nombre;
+    document.querySelector("main.layout").style.display = nombre === "revision" ? "flex" : "none";
+    document.getElementById("vista-normas").style.display = nombre === "normas" ? "block" : "none";
+    document.getElementById("vista-consolidada").style.display = nombre === "consolidada" ? "block" : "none";
+    if (nombre === "normas") renderVistaNormas();
+    if (nombre === "consolidada") renderVistaConsolidada();
+  }
+
+  function gruposPorNorma() {
+    var grupos = {};
+    paginas.forEach(function (p) { (grupos[p.document_key] = grupos[p.document_key] || []).push(p); });
+    return grupos;
+  }
+
+  function metricasNorma(paginasDeNorma) {
+    var revisadas = 0, multinorma = 0, tablasDetectadas = 0, tablasValidadas = 0;
+    paginasDeNorma.forEach(function (p) {
+      var d = decisiones[clave(p.document_key, p.page_number)];
+      var nTablas = (d && d.tablas && d.tablas.length) || 0;
+      tablasDetectadas += nTablas;
+      if (d && d.decision) { revisadas++; tablasValidadas += nTablas; }
+      if (d && CLASIFICACIONES_MULTINORMA[d.clasificacion_pagina]) multinorma++;
+    });
+    return {
+      paginas_totales: paginasDeNorma.length, paginas_revisadas: revisadas, paginas_pendientes: paginasDeNorma.length - revisadas,
+      paginas_multinorma: multinorma, tablas_detectadas: tablasDetectadas, tablas_validadas: tablasValidadas
+    };
+  }
+
+  function renderVistaNormas() {
+    var cont = document.getElementById("vista-normas");
+    var grupos = gruposPorNorma();
+    var claves = Object.keys(grupos).sort();
+    var html = '<div class="barra-vista"><button type="button" class="secundario" id="btn-volver-desde-normas">← Volver a revisión</button>' +
+      "<h2>📑 Listado de normas (" + claves.length + ")</h2></div>";
+    if (!claves.length) {
+      html += '<div class="vacio">Carga primero el archivo "Comparación de motores (JSON)".</div>';
+    } else {
+      html += '<div class="scroll-tabla-editable"><table class="tabla-normas"><thead><tr>' +
+        "<th>ID (document_key)</th><th>Tipo</th><th>Número</th><th>Año</th><th>Sector</th><th>Título</th>" +
+        "<th>Páginas<br>tot./rev./pend.</th><th>Multi-<br>norma</th><th>Tablas<br>detect./valid.</th><th>Progreso</th><th>Estado</th><th>Observaciones</th><th></th>" +
+        "</tr></thead><tbody>";
+      claves.forEach(function (key) {
+        var m = metricasNorma(grupos[key]);
+        var meta = metaNorma(key);
+        var pct = m.paginas_totales ? Math.round(100 * m.paginas_revisadas / m.paginas_totales) : 0;
+        html += '<tr class="fila-norma"><td class="mono">' + escapeHtml(key) + "</td>" +
+          '<td><input type="text" class="campo-norma" data-campo="tipo_norma" data-norma="' + escapeHtml(key) + '" value="' + escapeHtml(meta.tipo_norma) + '" placeholder="Ej: Decreto Supremo"></td>' +
+          '<td><input type="text" class="campo-norma" data-campo="numero" data-norma="' + escapeHtml(key) + '" value="' + escapeHtml(meta.numero) + '"></td>' +
+          '<td><input type="text" class="campo-norma" data-campo="anio" data-norma="' + escapeHtml(key) + '" value="' + escapeHtml(meta.anio) + '" style="width:70px"></td>' +
+          '<td><input type="text" class="campo-norma" data-campo="sector" data-norma="' + escapeHtml(key) + '" value="' + escapeHtml(meta.sector) + '"></td>' +
+          '<td><input type="text" class="campo-norma" data-campo="titulo" data-norma="' + escapeHtml(key) + '" value="' + escapeHtml(meta.titulo) + '" style="min-width:180px"></td>' +
+          "<td>" + m.paginas_totales + " / " + m.paginas_revisadas + " / " + m.paginas_pendientes + "</td>" +
+          "<td>" + m.paginas_multinorma + "</td>" +
+          "<td>" + m.tablas_detectadas + " / " + m.tablas_validadas + "</td>" +
+          '<td><div class="barra-progreso-norma" title="' + pct + '%"><div style="width:' + pct + '%"></div></div>' + m.paginas_revisadas + "/" + m.paginas_totales + "</td>" +
+          '<td><select class="campo-norma estado-select ' + meta.estado + '" data-campo="estado" data-norma="' + escapeHtml(key) + '">' +
+          ESTADOS_NORMA.map(function (e) { return '<option value="' + e + '"' + (meta.estado === e ? " selected" : "") + ">" + e + "</option>"; }).join("") +
+          "</select></td>" +
+          '<td><textarea class="campo-norma" data-campo="observaciones" data-norma="' + escapeHtml(key) + '" style="min-height:34px">' + escapeHtml(meta.observaciones) + "</textarea></td>" +
+          '<td><button type="button" class="secundario btn-ir-a-norma" data-norma="' + escapeHtml(key) + '">Ir a revisar →</button></td>' +
+          "</tr>";
+      });
+      html += "</tbody></table></div>";
+    }
+    cont.innerHTML = html;
+    wireVistaNormas(cont, grupos);
+  }
+
+  function wireVistaNormas(cont, grupos) {
+    var btnVolver = document.getElementById("btn-volver-desde-normas");
+    if (btnVolver) btnVolver.addEventListener("click", function () { mostrarVista("revision"); });
+    cont.addEventListener("input", function (e) {
+      var campo = e.target.closest(".campo-norma");
+      if (!campo) return;
+      var meta = metaNorma(campo.dataset.norma);
+      meta[campo.dataset.campo] = campo.value;
+      if (campo.dataset.campo === "estado") campo.className = "campo-norma estado-select " + campo.value;
+      guardarNormasLocalStorageSeguro();
+    });
+    cont.addEventListener("click", function (e) {
+      var btn = e.target.closest(".btn-ir-a-norma");
+      if (!btn) return;
+      var paginasDeNorma = ordenarParaMostrar(grupos[btn.dataset.norma] || []);
+      var primeraPendiente = paginasDeNorma.filter(function (p) {
+        var d = decisiones[clave(p.document_key, p.page_number)];
+        return !d || !d.decision;
+      })[0] || paginasDeNorma[0];
+      if (!primeraPendiente) return;
+      mostrarVista("revision");
+      seleccionarPagina(clave(primeraPendiente.document_key, primeraPendiente.page_number), true);
+    });
+  }
+
+  function construirConsolidado(documentKey) {
+    var paginasDeNorma = ordenarParaMostrar(paginas.filter(function (p) { return p.document_key === documentKey; }));
+    var incluidas = [], excluidasSinContenido = [], pendientes = [], sinClasificar = [], partes = [];
+    paginasDeNorma.forEach(function (p) {
+      var d = decisiones[clave(p.document_key, p.page_number)];
+      if (!d || !d.decision) { pendientes.push(p.page_number); return; }
+      if (!d.clasificacion_pagina) { sinClasificar.push(p.page_number); return; }
+      if (CLASIFICACIONES_SIN_GOLDEN[d.clasificacion_pagina]) { excluidasSinContenido.push(p.page_number); return; }
+      incluidas.push(p.page_number);
+      partes.push((d.golden_text || "").trim());
+    });
+    return {
+      document_key: documentKey, paginas_incluidas: incluidas, paginas_excluidas_sin_contenido: excluidasSinContenido,
+      paginas_pendientes: pendientes, paginas_sin_clasificar: sinClasificar,
+      texto: partes.filter(function (t) { return t !== ""; }).join("\n\n")
+    };
+  }
+
+  function tablasConsolidadas(documentKey) {
+    var paginasDeNorma = ordenarParaMostrar(paginas.filter(function (p) { return p.document_key === documentKey; }));
+    var porId = {};
+    paginasDeNorma.forEach(function (p) {
+      var d = decisiones[clave(p.document_key, p.page_number)];
+      if (!d || !d.tablas) return;
+      d.tablas.forEach(function (t) {
+        if (t.pertenece !== "TABLA_NORMA_OBJETIVO") return;
+        var id = t.table_id || ("(sin table_id · página " + p.page_number + ")");
+        (porId[id] = porId[id] || []).push({ pagina: p.page_number, parte: t.parte || 1, tabla: t });
+      });
+    });
+    Object.keys(porId).forEach(function (id) { porId[id].sort(function (a, b) { return (a.parte - b.parte) || (a.pagina - b.pagina); }); });
+    return porId;
+  }
+
+  // ---------- F-04-B.3: proyección lista para una futura base de datos (Supabase/PostgreSQL) ----------
+  // Nunca es la fuente de verdad -eso sigue siendo "decisiones"-, solo una vista derivada para exportar.
+  function construirEntidadesDB() {
+    var documentsSet = {};
+    var pages = [], normative_segments = [], extractions = [], human_reviews = [], tables = [], table_cells = [];
+    var tablePagesMap = {};
+
+    paginas.forEach(function (p) {
+      var k = clave(p.document_key, p.page_number);
+      var d = decisiones[k];
+      var textos = p.textos || {};
+      documentsSet[p.document_key] = true;
+
+      pages.push({
+        document_key: p.document_key, page_number: p.page_number, estado_automatico: p.estado || null,
+        clasificacion_pagina: (d && d.clasificacion_pagina) || null, riesgo: p.riesgo || null,
+        same_engine_as_stored: !!p.same_engine_as_stored, sha256: p.sha256 || null
+      });
+
+      [["guardado", p.texto_guardado], ["pymupdf", textos.pymupdf], ["pdfplumber", textos.pdfplumber], ["tesseract", textos.ocr_tesseract]]
+        .forEach(function (par) {
+          extractions.push({ document_key: p.document_key, page_number: p.page_number, motor: par[0], longitud_caracteres: par[1] ? String(par[1]).length : 0 });
+        });
+
+      if (!d) return;
+
+      if (d.clasificacion_pagina || d.excluded_text || d.seg_anterior_excluido || d.seg_posterior_excluido || d.error_orden_columnas) {
+        normative_segments.push({
+          document_key: p.document_key, page_number: p.page_number, clasificacion_pagina: d.clasificacion_pagina || null,
+          excluded_text: d.excluded_text || "", seg_anterior_excluido: d.seg_anterior_excluido || "", seg_posterior_excluido: d.seg_posterior_excluido || "",
+          marcador_inicio_norma: d.marcador_inicio_norma || "", marcador_fin_norma: d.marcador_fin_norma || "", error_orden_columnas: !!d.error_orden_columnas
+        });
+      }
+
+      if (d.decision || d.golden_text || d.revisado_en) {
+        human_reviews.push({
+          document_key: p.document_key, page_number: p.page_number, decision: d.decision || null, golden_text: d.golden_text || "",
+          observaciones: d.observaciones || "", revisor: d.revisor != null ? d.revisor : null, version: d.version || 0, revisado_en: d.revisado_en || null,
+          fuente_base: d.fuente_base || "", historial: d.historial || []
+        });
+      }
+
+      (d.tablas || []).forEach(function (t) {
+        tables.push({
+          document_key: p.document_key, page_number: p.page_number, table_id: t.table_id || null, parte: t.parte || 1,
+          pertenece: t.pertenece || null, titulo: t.titulo || "", notas: t.notas || ""
+        });
+        (t.celdas || []).forEach(function (c) {
+          table_cells.push({
+            document_key: p.document_key, page_number: p.page_number, table_id: t.table_id || null, parte: t.parte || 1,
+            row: c.row, col: c.col, rowspan: c.rowspan, colspan: c.colspan, text: c.text || "", role: c.role || "data",
+            bbox: c.bbox != null ? c.bbox : null, confidence: c.confidence != null ? c.confidence : null
+          });
+        });
+        if (t.table_id) {
+          (tablePagesMap[t.table_id] = tablePagesMap[t.table_id] || []).push({ document_key: p.document_key, page_number: p.page_number, parte: t.parte || 1 });
+        }
+      });
+    });
+
+    var table_pages = Object.keys(tablePagesMap).sort().map(function (id) {
+      var partes = tablePagesMap[id].slice().sort(function (a, b) { return (a.parte - b.parte) || (a.page_number - b.page_number); });
+      return { table_id: id, partes: partes };
+    });
+
+    var grupos = gruposPorNorma();
+    var documents = Object.keys(documentsSet).sort().map(function (key) {
+      var meta = normasMeta[key] || {};
+      var m = metricasNorma(grupos[key] || []);
+      return {
+        id: key, tipo_norma: meta.tipo_norma || "", numero: meta.numero || "", anio: meta.anio || "", sector: meta.sector || "",
+        titulo: meta.titulo || "", estado: meta.estado || "PENDIENTE", observaciones: meta.observaciones || "",
+        paginas_totales: m.paginas_totales, paginas_revisadas: m.paginas_revisadas, paginas_pendientes: m.paginas_pendientes,
+        paginas_multinorma: m.paginas_multinorma, tablas_detectadas: m.tablas_detectadas, tablas_validadas: m.tablas_validadas
+      };
+    });
+
+    return {
+      documents: documents, pages: pages, normative_segments: normative_segments, extractions: extractions,
+      human_reviews: human_reviews, tables: tables, table_cells: table_cells, table_pages: table_pages
+    };
+  }
+
+  function renderVistaConsolidada(documentKeyElegido) {
+    var cont = document.getElementById("vista-consolidada");
+    var clavesNorma = Object.keys(gruposPorNorma()).sort();
+    var actual = documentKeyElegido || (claveActual ? claveActual.split("::").slice(0, -1).join("::") : "") || clavesNorma[0] || "";
+    var html = '<div class="barra-vista"><button type="button" class="secundario" id="btn-volver-desde-consolidada">← Volver a revisión</button>' +
+      "<h2>📄 Norma consolidada</h2></div>";
+    if (!clavesNorma.length) {
+      html += '<div class="vacio">Carga primero el archivo "Comparación de motores (JSON)".</div>';
+      cont.innerHTML = html;
+      return;
+    }
+    html += '<div class="fila-campo"><label>Norma (document_key)<br><select class="selector-norma" id="selector-norma-consolidada">' +
+      clavesNorma.map(function (kk) { return '<option value="' + escapeHtml(kk) + '"' + (kk === actual ? " selected" : "") + '>' + escapeHtml(kk) + "</option>"; }).join("") +
+      "</select></label>" +
+      '<button type="button" class="secundario" id="btn-copiar-consolidada">📋 Copiar</button>' +
+      '<button type="button" class="secundario" id="btn-descargar-consolidada">⬇ Descargar .txt</button>' +
+      '<span class="aviso-copiado" id="aviso-copiado-consolidada" style="display:none">✔ Copiado</span>' +
+      "</div>";
+
+    var resumen = construirConsolidado(actual);
+    html += '<div class="ayuda">Incluidas: página(s) ' + (resumen.paginas_incluidas.join(", ") || "ninguna") + ".";
+    if (resumen.paginas_pendientes.length) html += " · Pendientes de revisar (no incluidas todavía): " + resumen.paginas_pendientes.join(", ") + ".";
+    if (resumen.paginas_sin_clasificar.length) html += " · <b>Sin clasificar</b> (revísalas: no se sabe si pertenecen a la norma objetivo): " + resumen.paginas_sin_clasificar.join(", ") + ".";
+    if (resumen.paginas_excluidas_sin_contenido.length) html += " · Excluidas (sin contenido de la norma objetivo): " + resumen.paginas_excluidas_sin_contenido.join(", ") + ".";
+    html += "</div>";
+
+    html += '<label class="etiqueta">Texto consolidado (golden_text de páginas incluidas, en orden)</label>';
+    html += '<div class="caja-consolidada">' + (resumen.texto ? escapeHtml(resumen.texto) : "<i>(sin texto todavía)</i>") + "</div>";
+
+    var tablas = tablasConsolidadas(actual);
+    var idsTablas = Object.keys(tablas);
+    if (idsTablas.length) {
+      html += '<label class="etiqueta">Tablas de la norma objetivo, reconstruidas por table_id</label>';
+      idsTablas.forEach(function (id) {
+        html += '<div class="tabla-reconstruida-parte"><b>' + escapeHtml(id) + "</b> (" + tablas[id].length + " parte(s))";
+        tablas[id].forEach(function (parte) {
+          html += '<div style="margin:6px 0"><small>página ' + parte.pagina + " · parte " + parte.parte +
+            (parte.tabla.titulo ? " · " + escapeHtml(parte.tabla.titulo) : "") + "</small>" +
+            '<pre style="white-space:pre-wrap;font-size:12px;margin:4px 0">' + escapeHtml(tablaATextoPlano(parte.tabla)) + "</pre></div>";
+        });
+        html += "</div>";
+      });
+    }
+
+    cont.innerHTML = html;
+    wireVistaConsolidada();
+  }
+
+  function wireVistaConsolidada() {
+    document.getElementById("btn-volver-desde-consolidada").addEventListener("click", function () { mostrarVista("revision"); });
+    document.getElementById("selector-norma-consolidada").addEventListener("change", function (e) { renderVistaConsolidada(e.target.value); });
+    document.getElementById("btn-copiar-consolidada").addEventListener("click", function () {
+      var actual = document.getElementById("selector-norma-consolidada").value;
+      var resumen = construirConsolidado(actual);
+      var aviso = document.getElementById("aviso-copiado-consolidada");
+      copiarAlPortapapeles(resumen.texto, function () {
+        aviso.style.display = "inline";
+        setTimeout(function () { aviso.style.display = "none"; }, 4000);
+      });
+    });
+    document.getElementById("btn-descargar-consolidada").addEventListener("click", function () {
+      var actual = document.getElementById("selector-norma-consolidada").value;
+      var resumen = construirConsolidado(actual);
+      descargarArchivo("NORMA_CONSOLIDADA_" + actual.replace(/[^A-Za-z0-9_-]/g, "_") + ".txt", resumen.texto, "text/plain");
+    });
+  }
+
+  document.getElementById("btn-ver-normas").addEventListener("click", function () {
+    mostrarVista(vistaActual === "normas" ? "revision" : "normas");
+  });
+  document.getElementById("btn-ver-consolidada").addEventListener("click", function () {
+    mostrarVista(vistaActual === "consolidada" ? "revision" : "consolidada");
   });
 
   function cargarComparacion(datos) {
@@ -951,9 +2086,9 @@
       var cargadas = 0;
       datos.decisiones.forEach(function (d) {
         if (!d.document_key || d.page_number == null) return;
-        decisiones[clave(d.document_key, d.page_number)] = {
-          decision: d.decision, golden_text: d.golden_text, observaciones: d.observaciones, revisado_en: d.revisado_en
-        };
+        // normalizarRegistroPagina completa los campos que falten -compatible con un JSON exportado antes
+        // de F-04-B.3 (solo decision/golden_text/observaciones/revisado_en)- y conserva los que sí traiga.
+        decisiones[clave(d.document_key, d.page_number)] = normalizarRegistroPagina(d);
         cargadas++;
       });
       if (datos.revisor) document.getElementById("nombre-revisor").value = datos.revisor;
@@ -964,6 +2099,31 @@
       if (claveActual) seleccionarPagina(claveActual, true);
       alert("Se importaron " + cargadas + " decisión(es) previas.");
     });
+  });
+
+  function cargarNormasMeta(datos) {
+    var filas = Array.isArray(datos) ? datos : (datos.normas || datos.documents);
+    if (!Array.isArray(filas)) {
+      alert('El archivo no tiene el formato esperado (falta la lista "normas"). Verifica que sea un export del "Registro de normas".');
+      return;
+    }
+    var cargadas = 0;
+    filas.forEach(function (fila) {
+      var key = fila.id || fila.document_key;
+      if (!key) return;
+      normasMeta[key] = {
+        tipo_norma: fila.tipo_norma || "", numero: fila.numero || "", anio: fila.anio || "", sector: fila.sector || "",
+        titulo: fila.titulo || "", estado: fila.estado || "PENDIENTE", observaciones: fila.observaciones || "",
+        paginas_totales_manual: fila.paginas_totales_manual != null ? fila.paginas_totales_manual : null
+      };
+      cargadas++;
+    });
+    guardarNormasLocalStorageSeguro();
+    if (vistaActual === "normas") renderVistaNormas();
+    alert("Se importaron los metadatos de " + cargadas + " norma(s).");
+  }
+  document.getElementById("input-normas").addEventListener("change", function (e) {
+    if (e.target.files[0]) leerArchivoJSON(e.target.files[0], cargarNormasMeta);
   });
 
   function descargarArchivo(nombre, contenido, tipo) {
@@ -988,21 +2148,52 @@
         decision: d.decision || null,
         golden_text: d.golden_text || "",
         observaciones: d.observaciones || "",
-        revisado_en: d.revisado_en || null
+        revisado_en: d.revisado_en || null,
+        revisor: d.revisor != null ? d.revisor : null,
+        version: d.version || 0,
+        historial: d.historial || [],
+        clasificacion_pagina: d.clasificacion_pagina || null,
+        fuente_base: d.fuente_base || "",
+        excluded_text: d.excluded_text || "",
+        seg_anterior_excluido: d.seg_anterior_excluido || "",
+        seg_posterior_excluido: d.seg_posterior_excluido || "",
+        marcador_inicio_norma: d.marcador_inicio_norma || "",
+        marcador_fin_norma: d.marcador_fin_norma || "",
+        error_orden_columnas: !!d.error_orden_columnas,
+        tablas: d.tablas || []
       };
     });
+    var entidades = construirEntidadesDB();
     var salida = {
-      version: 1,
+      version: 2,
       generado_en: new Date().toISOString(),
       revisor: document.getElementById("nombre-revisor").value || "",
       total_paginas_en_muestra: paginas.length,
       total_decisiones: lista.length,
-      decisiones: lista
+      // "decisiones" sigue siendo la fuente de verdad -lo que esta misma herramienta reimporta en el punto
+      // 4, "Continuar progreso guardado"-. Las entidades de abajo son una PROYECCIÓN derivada de esa misma
+      // información, con nombres listos para una futura tabla de Supabase/PostgreSQL (sin conectarla todavía).
+      decisiones: lista,
+      documents: entidades.documents,
+      pages: entidades.pages,
+      normative_segments: entidades.normative_segments,
+      extractions: entidades.extractions,
+      human_reviews: entidades.human_reviews,
+      tables: entidades.tables,
+      table_cells: entidades.table_cells,
+      table_pages: entidades.table_pages
     };
     descargarArchivo("F04B_DECISIONES_HUMANAS.json", JSON.stringify(salida, null, 2), "application/json");
     cambiosSinExportar = false;
   }
   document.getElementById("btn-exportar-json").addEventListener("click", exportarDecisionesJSON);
+
+  document.getElementById("btn-exportar-normas").addEventListener("click", function () {
+    if (claveActual) capturarCamposDePagina(claveActual);
+    var entidades = construirEntidadesDB();
+    var salida = { version: 1, generado_en: new Date().toISOString(), normas: entidades.documents };
+    descargarArchivo("F04B_REGISTRO_NORMAS.json", JSON.stringify(salida, null, 2), "application/json");
+  });
 
   function csvEscape(v) {
     var s = v == null ? "" : String(v);
@@ -1011,19 +2202,24 @@
   }
 
   document.getElementById("btn-exportar-csv").addEventListener("click", function () {
-    var encabezado = ["document_key", "page_number", "decision", "golden_text", "observaciones", "revisado_en"];
+    var encabezado = ["document_key", "page_number", "decision", "golden_text", "observaciones", "revisado_en",
+      "clasificacion_pagina", "excluded_text", "error_orden_columnas", "num_tablas", "version", "revisor"];
     var filas = [encabezado.join(",")];
     Object.keys(decisiones).forEach(function (k) {
       var partes = k.split("::");
       var pageNumber = partes.pop();
       var documentKey = partes.join("::");
       var d = decisiones[k];
-      filas.push([documentKey, pageNumber, d.decision || "", d.golden_text || "", d.observaciones || "", d.revisado_en || ""]
-        .map(csvEscape).join(","));
+      filas.push([
+        documentKey, pageNumber, d.decision || "", d.golden_text || "", d.observaciones || "", d.revisado_en || "",
+        d.clasificacion_pagina || "", d.excluded_text || "", d.error_orden_columnas ? "SI" : "NO", (d.tablas || []).length,
+        d.version || 0, d.revisor || ""
+      ].map(csvEscape).join(","));
     });
     descargarArchivo("F04B_DECISIONES_HUMANAS.csv", filas.join("\r\n"), "text/csv");
   });
 
+  normasMeta = leerNormasLocalStorageSeguro() || {};
   actualizarContadores();
 })();
 </script>

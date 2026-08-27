@@ -2306,48 +2306,6 @@ const WEEK_ALERT_SELECT =
 const RECENT_ALERT_SELECT =
   "id, document_key, title, published_date, published_date_display, created_at, source_section, file_url, detail_url, telegram_file_id, process_status";
 
-const MAX_PDFS_POR_CONSULTA = 3;
-
-async function enviarPdfAlerta(chatId: string, row: any): Promise<void> {
-  if (!row?.id) return;
-
-  const fileRef =
-    row.telegram_file_id ||
-    row.pdf_source_url ||
-    row.file_url ||
-    row.drive_file_url ||
-    row.drive_download_url;
-
-  if (!fileRef) return;
-
-  const numero = row.alert_number ?? row.document_key ?? "";
-  const titulo = String(row.alert_title ?? row.title ?? "").slice(0, 200);
-
-  try {
-    const result: any = await telegram("sendDocument", {
-      chat_id: chatId,
-      document: fileRef,
-      caption: `📄 <b>${escapeHtml(numero)}</b> — ${escapeHtml(titulo)}`,
-      parse_mode: "HTML",
-    });
-
-    if (!row.telegram_file_id) {
-      const fileId = result?.result?.document?.file_id;
-      if (fileId) {
-        await supabase.from("digemid_documentos").update({ telegram_file_id: fileId }).eq("id", row.id);
-      }
-    }
-  } catch (_error) {
-    // No bloquea la respuesta del bot si falla el envio del PDF adjunto.
-  }
-}
-
-async function enviarPdfsAlertas(chatId: string, rows: any[]): Promise<void> {
-  for (const row of rows.slice(0, MAX_PDFS_POR_CONSULTA)) {
-    await enviarPdfAlerta(chatId, row);
-  }
-}
-
 // document_key/alert_number tiene forma "99-2026": ordenar esa columna como
 // texto rompe el orden numerico apenas hay numeros de distinta cantidad de
 // digitos (ej. "100-2026" queda antes que "93-2026" porque "1" < "9"). Esta
@@ -3646,7 +3604,6 @@ async function handleCommand(
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -3665,7 +3622,6 @@ async function handleCommand(
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -3684,7 +3640,6 @@ async function handleCommand(
       formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -3703,7 +3658,6 @@ async function handleCommand(
       formatRecentAlertList(rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -3722,7 +3676,6 @@ async function handleCommand(
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -3757,7 +3710,6 @@ async function handleCommand(
     }
 
     await sendMessage(chatId, formatAlertDetail(row), detailButtons(row));
-    await enviarPdfAlerta(chatId, row);
     return;
   }
 
@@ -3788,7 +3740,6 @@ async function handleCommand(
       formatAlertList(`🔎 <b>Resultados para:</b> ${escapeHtml(query)}`, rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -4554,7 +4505,7 @@ async function handleCommand(
       });
 
       await sendMessage(chatId, formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows), alertasMenu());
-      return await enviarPdfsAlertas(chatId, rows);
+      return;
     }
 
     if (ambito === "semana") {
@@ -4570,7 +4521,7 @@ async function handleCommand(
       });
 
       await sendMessage(chatId, formatWeekAlertList(rows, total, 10), alertasMenu());
-      return await enviarPdfsAlertas(chatId, rows);
+      return;
     }
 
     if (ambito === "mes") {
@@ -4586,7 +4537,7 @@ async function handleCommand(
       });
 
       await sendMessage(chatId, formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows), alertasMenu());
-      return await enviarPdfsAlertas(chatId, rows);
+      return;
     }
 
     if (esConsultaDeUltimasAlertas(question)) {
@@ -4608,7 +4559,7 @@ async function handleCommand(
         formatAlertList(titulo, rows),
         alertasMenu(),
       );
-      return await enviarPdfsAlertas(chatId, rows);
+      return;
     }
 
     try {
@@ -5037,7 +4988,6 @@ async function handleCallback(update: TelegramUpdate) {
       formatAlertList("🆕 <b>Últimas alertas DIGEMID</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -5049,7 +4999,6 @@ async function handleCallback(update: TelegramUpdate) {
       formatAlertList("📅 <b>Alertas DIGEMID de hoy</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -5061,7 +5010,6 @@ async function handleCallback(update: TelegramUpdate) {
       formatWeekAlertList(rows, total, 10),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -5073,7 +5021,6 @@ async function handleCallback(update: TelegramUpdate) {
       formatRecentAlertList(rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 
@@ -5085,7 +5032,6 @@ async function handleCallback(update: TelegramUpdate) {
       formatAlertList("🗓️ <b>Alertas DIGEMID del mes</b>", rows),
       alertasMenu(),
     );
-    await enviarPdfsAlertas(chatId, rows);
     return;
   }
 

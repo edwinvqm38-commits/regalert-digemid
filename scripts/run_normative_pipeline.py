@@ -13,6 +13,7 @@ from agents.agent_normative_monitor import NormativeMonitorAgent
 from agents.agent_normative_pdf_detector import NormativePdfDetectorAgent
 from agents.agent_normative_register import NormativeRegisterAgent
 from agents.agent_notify import NotifyAgent
+from agents.agent_utils import deduplicar_por_detalle
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,26 +50,6 @@ def run_metadata_phase() -> None:
         logger.exception("No se pudo notificar la normativa nueva por Telegram.")
 
 
-def _deduplicar_por_detalle(docs: list[dict]) -> list[dict]:
-    """DIGEMID a veces lista la misma norma bajo dos secciones distintas (ej.
-    normas-legales y resolucion-ministerial); como el document_key de
-    respaldo se arma por seccion cuando no se puede parsear un numero de
-    norma, terminan como dos filas para el mismo documento real. Se colapsan
-    por detail_url para no avisar dos veces lo mismo."""
-    vistos: set[str] = set()
-    unicos: list[dict] = []
-
-    for doc in docs:
-        detalle = doc.get("detail_url")
-        if detalle:
-            if detalle in vistos:
-                continue
-            vistos.add(detalle)
-        unicos.append(doc)
-
-    return unicos
-
-
 def notificar_normativa_pendiente(register: NormativeRegisterAgent) -> None:
     pending_docs = register.get_pending_notification_docs()
     logger.info("Normativa pendiente de notificar: %s", len(pending_docs))
@@ -76,7 +57,7 @@ def notificar_normativa_pendiente(register: NormativeRegisterAgent) -> None:
     if not pending_docs:
         return
 
-    docs_a_enviar = _deduplicar_por_detalle(pending_docs)
+    docs_a_enviar = deduplicar_por_detalle(pending_docs)
     if len(docs_a_enviar) < len(pending_docs):
         logger.info(
             "Normativa duplicada colapsada por detail_url: %s documento(s) -> %s a notificar.",

@@ -168,3 +168,26 @@ def utc_now_iso() -> str:
 def is_valid_document(doc: dict) -> bool:
     """Valida campos mínimos antes de registrar."""
     return bool(doc.get("document_key") and doc.get("detail_url"))
+
+
+def deduplicar_por_detalle(docs: list[dict]) -> list[dict]:
+    """Colapsa documentos que apuntan al mismo detail_url.
+
+    DIGEMID a veces lista la misma norma bajo dos secciones distintas (ej.
+    normas-legales y resolucion-ministerial); como el document_key de
+    respaldo se arma por seccion cuando no se puede parsear un numero de
+    norma, terminan como dos filas para el mismo documento real. Se usa antes
+    de notificar, listar o resolver identidad, para no tratar dos veces lo
+    que es un solo documento."""
+    vistos: set[str] = set()
+    unicos: list[dict] = []
+
+    for doc in docs:
+        detalle = doc.get("detail_url")
+        if detalle:
+            if detalle in vistos:
+                continue
+            vistos.add(detalle)
+        unicos.append(doc)
+
+    return unicos

@@ -216,6 +216,7 @@ const COMANDOS_ADMIN: { command: string; description: string }[] = [
   { command: "derogacionespendientes", description: "Revisar derogaciones/modificaciones detectadas por IA" },
   { command: "normapdf", description: "Instrucciones para subir el PDF de una norma" },
   { command: "normarevisar", description: "Corregir páginas de baja calidad de una norma" },
+  { command: "revisarnorma", description: "Revisar TODAS las páginas de una norma a demanda" },
   { command: "tablasrevisar", description: "Normas con tablas sin verificar" },
   { command: "tablarevisar", description: "Verificar las tablas de una norma" },
   { command: "normaestado", description: "Reporte de fidelidad (global o por norma)" },
@@ -648,6 +649,31 @@ async function getPaginasConTablas(documentKey: string) {
     .eq("norma_id", norma.id)
     .eq("has_tables", true)
     .eq("tabla_verificada", false)
+    .order("page_number");
+
+  return { norma, paginas: paginas ?? [] };
+}
+
+/** Igual que getPaginasBajaCalidad/getPaginasConTablas pero SIN filtrar por
+ * calidad, revisado_manual ni tablas: trae todas las paginas de la norma.
+ * getPaginasBajaCalidad/getPaginasConTablas solo muestran lo que el propio
+ * sistema marco como sospechoso; esto es para cuando un admin quiere
+ * revisar con calma un documento puntual (ej. recien detectado, sin ningun
+ * historial de revision todavia) aunque nada haya saltado como "de baja
+ * calidad" -una calidad alta no es lo mismo que verificado por una persona. */
+async function getTodasLasPaginas(documentKey: string) {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, pdf_url")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) return null;
+
+  const { data: paginas } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw")
+    .eq("norma_id", norma.id)
     .order("page_number");
 
   return { norma, paginas: paginas ?? [] };
@@ -1166,6 +1192,62 @@ async function enviarRevisionTablas(chatId: string, documentKey: string) {
   } catch (error) {
     console.error("TABLAREVISAR_ERROR:", error);
     return await sendMessage(chatId, `⚠️ Error al generar la revisión de tablas: ${escapeHtml(String(error))}`);
+  }
+}
+
+/** Igual que enviarRevisionNorma/enviarRevisionTablas pero manda TODAS las
+ * paginas de la norma, sin filtrar por calidad ni tablas: para revisar a
+ * demanda un documento puntual (ej. recien detectado) aunque el sistema no
+ * haya marcado ninguna pagina como sospechosa. Reusa exactamente el mismo
+ * reporte HTML, PDF y plantilla .txt -y la misma aplicarRevisionManualNorma
+ * al recibir la correccion- que /normarevisar y /tablarevisar. */
+async function enviarRevisionCompleta(chatId: string, documentKey: string) {
+  try {
+    const resultado = await getTodasLasPaginas(documentKey);
+
+    if (!resultado) {
+      return await sendMessage(chatId, `No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`);
+    }
+
+    const { norma, paginas } = resultado;
+
+    if (!paginas.length) {
+      return await sendMessage(
+        chatId,
+        `"${escapeHtml(documentKey)}" todavía no tiene texto extraído -corre primero extract_normativa_text_simple.py para esta norma-.`,
+      );
+    }
+
+    const html = construirReporteHtmlRevision(norma, paginas);
+    await enviarDocumentoTexto(
+      chatId,
+      html,
+      `revision_completa_${documentKey}.html`,
+      "text/html",
+      `📋 Reporte completo — ${documentKey} (${paginas.length} página(s))`,
+    );
+
+    if (norma.pdf_url) {
+      await telegram("sendDocument", {
+        chat_id: chatId,
+        document: norma.pdf_url,
+        caption: `📄 PDF original — ${documentKey}`,
+      });
+    }
+
+    const plantilla = construirPlantillaTxtRevision(documentKey, paginas);
+    await enviarDocumentoTexto(
+      chatId,
+      plantilla,
+      `revision_completa_${documentKey}.txt`,
+      "text/plain",
+      "✏️ Corrige el texto de cada página comparando con el PDF (todas las páginas, no solo las marcadas como dudosas) y reenvía este mismo archivo a este chat cuando termines.",
+    );
+
+    return new Response("OK", { status: 200 });
+  } catch (error) {
+    console.error("REVISARNORMA_ERROR:", error);
+    return await sendMessage(chatId, `⚠️ Error al generar la revisión: ${escapeHtml(String(error))}`);
   }
 }
 
@@ -4188,6 +4270,23 @@ async function handleCommand(
     }
 
     return await enviarRevisionNorma(chatId, documentKey);
+  }
+
+  if (trimmed.startsWith("/revisarnorma")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const documentKey = trimmed.replace("/revisarnorma", "").trim();
+
+    if (!documentKey) {
+      return await sendMessage(
+        chatId,
+        "Escribe el document_key de la norma.\n\nEjemplo:\n<code>/revisarnorma RM-614-2026</code>\n\nA diferencia de /normarevisar, manda TODAS las páginas, aunque ninguna esté marcada como de baja calidad.",
+      );
+    }
+
+    return await enviarRevisionCompleta(chatId, documentKey);
   }
 
   if (trimmed === "/tablasrevisar") {

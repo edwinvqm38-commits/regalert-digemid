@@ -197,7 +197,7 @@ def _tabla_a_markdown(tabla: list[list]) -> str:
     def formatear_fila(fila: list[str]) -> str:
         return "| " + " | ".join(formatear_celda(c, anchos[i]) for i, c in enumerate(fila)) + " |"
 
-    encabezado = filas[0]
+    encabezado = _limpiar_encabezado_sospechoso(filas[0])
     resto = filas[1:]
 
     lineas = [
@@ -233,6 +233,90 @@ def tablas_a_markdown(tablas: list[list[list]] | None) -> str:
 _MIN_CELDAS_NO_VACIAS_TABLA = 3
 _MIN_CARACTERES_TABLA = 20
 
+# Patrones de celda que delatan un FRAGMENTO de un valor o encabezado mas
+# largo, no un dato real: resultado tipico de una linea de grilla espuria
+# que pdfplumber detecto donde el PDF no la tenia (ej. "0.1 UIT" partido en
+# tres celdas "0" / ".1" / "UIT", o "BOTIQUÍN" partido en "B" / "OTI" /
+# "QUÍN"). Estas celdas NO son basura vacia (pasan _tabla_parece_real) pero
+# tampoco son un encabezado o valor legible: dejarlas pasar tal cual produce
+# encabezados sin sentido como "NE IO CÉ cul lec" en la tabla de infracciones
+# y sanciones de DIGEMID (confirmado en DS-020-2024, pag. 4-5).
+_FRAGMENTO_DECIMAL_RE = re.compile(r"^\.\d+$")
+_FRAGMENTO_ENTERO_SUELTO_RE = re.compile(r"^\d$")
+# Palabra suelta de 1 a 4 letras (cualquier mayus/minus): un pedazo de
+# "BOTIQUÍN" partido en "B" / "OTI" / "QUÍN" cae aca sin importar el caso.
+_FRAGMENTO_ALFA_SUELTO_RE = re.compile(r"^[A-Za-zÁÉÍÓÚÑáéíóúñ]{1,4}$")
+_ABREVIATURAS_TABLA_CONOCIDAS = {"NA", "N/A", "UIT", "IVA", "RUC", "DNI"}
+
+
+def _celda_parece_fragmento(celda: str) -> bool:
+    texto = (celda or "").strip()
+    if not texto or texto.upper() in _ABREVIATURAS_TABLA_CONOCIDAS:
+        return False
+    if _FRAGMENTO_DECIMAL_RE.match(texto):
+        return True
+    if _FRAGMENTO_ENTERO_SUELTO_RE.match(texto):
+        return True
+    if _FRAGMENTO_ALFA_SUELTO_RE.match(texto):
+        return True
+    return False
+
+
+def _fila_parece_fantasma(fila: list) -> bool:
+    """Una fila 'fantasma': casi vacia salvo 1-2 fragmentos sueltos de texto,
+    resultado de una banda de la grilla que no corresponde a ninguna fila de
+    contenido real (ej. un encabezado que hace wrap a 2 lineas de texto
+    dentro de una celda, y pdfplumber corta esa celda en 2 "filas" por una
+    linea horizontal que en realidad no separa contenido distinto)."""
+    celdas = [(str(c) if c is not None else "").strip() for c in fila]
+    no_vacias = [c for c in celdas if c]
+    return bool(no_vacias) and len(no_vacias) <= 2 and len(celdas) >= 5
+
+
+def _limpiar_filas_fantasma(tabla: list[list]) -> list[list]:
+    """Descarta filas fantasma solo en la zona de encabezado (primeras 2
+    filas): una fila casi vacia en medio de los datos puede ser legitima
+    (separador visual entre secciones de la tabla), asi que no se toca."""
+    if len(tabla) < 3:
+        return tabla
+    limite = min(2, len(tabla) - 2)
+    return [
+        fila for indice, fila in enumerate(tabla)
+        if not (indice < limite and _fila_parece_fantasma(fila))
+    ]
+
+
+def _fraccion_celdas_fragmentadas(tablas: list[list[list]]) -> float:
+    """Mide que tan fragmentada quedo una extraccion: proporcion de celdas
+    no vacias que parecen un pedazo de un valor/encabezado mas largo. Sirve
+    para comparar dos estrategias de extraccion de pdfplumber y quedarse con
+    la que reconstruyo mejor la grilla real de columnas."""
+    celdas = [
+        (str(c) if c is not None else "").strip()
+        for tabla in tablas
+        for fila in tabla
+        for c in fila
+    ]
+    celdas_no_vacias = [c for c in celdas if c]
+    if not celdas_no_vacias:
+        return 1.0
+    fragmentadas = sum(1 for c in celdas_no_vacias if _celda_parece_fragmento(c))
+    return fragmentadas / len(celdas_no_vacias)
+
+
+def _limpiar_encabezado_sospechoso(fila_encabezado: list[str]) -> list[str]:
+    """Vacia (en vez de dejar pasar) las celdas de encabezado que parecen
+    fragmentos sin sentido. El flujo de revision humana en Telegram
+    (etiquetaColumna, en el bot) ya sabe mostrar "Columna N" para un
+    encabezado vacio -- un encabezado vacio con esa clave interna estable es
+    preferible a uno con texto incorrecto que un revisor podria no notar que
+    esta mal, sobre todo en tablas juridicas (escalas de sanciones) donde el
+    significado de una columna es la informacion sensible."""
+    return [
+        "" if _celda_parece_fragmento(celda) else celda
+        for celda in fila_encabezado
+    ]
+
 
 def _tabla_parece_real(tabla: list[list]) -> bool:
     """pdfplumber a veces "detecta" como tabla un par de lineas de layout
@@ -256,6 +340,38 @@ def _tabla_parece_real(tabla: list[list]) -> bool:
     )
 
 
+# La estrategia por defecto de pdfplumber ("lines": detecta la grilla a
+# partir de las lineas de trazado del PDF) es la mas precisa cuando el PDF
+# trae una grilla limpia, pero una linea de trazado espuria (o un
+# encabezado que hace wrap a 2 lineas dentro de una celda) le hace partir
+# celdas de mas -- el caso confirmado en las tablas de "Escala de
+# infracciones y sanciones" de DIGEMID (DS-020-2024 y otras normas con el
+# mismo Anexo 01). La estrategia "text" (infiere columnas por alineacion y
+# huecos de texto, ignorando las lineas de trazado) no depende de esas
+# lineas espurias y reconstruye mejor esas tablas puntuales. Se prueban
+# ambas y se elige la que quede menos fragmentada, en vez de asumir una sola
+# estrategia para todas las normas.
+_ESTRATEGIAS_EXTRACCION_TABLA = (
+    None,
+    {"vertical_strategy": "text", "horizontal_strategy": "text"},
+)
+
+
+def _extraer_tablas_validas(page, settings: dict | None) -> list:
+    tablas = page.extract_tables(settings) if settings else page.extract_tables()
+    resultado = []
+    for tabla in tablas or []:
+        tabla_limpia = _limpiar_filas_fantasma(tabla)
+        if (
+            len(tabla_limpia) > 1
+            and tabla_limpia[0]
+            and len(tabla_limpia[0]) > 1
+            and _tabla_parece_real(tabla_limpia)
+        ):
+            resultado.append(tabla_limpia)
+    return resultado
+
+
 def _pdfplumber_tables(pdf_path: str, page_index: int) -> list:
     """Detecta tablas reales (>=2 filas y >=2 columnas, con suficiente
     contenido para no ser ruido de layout) para guardarlas como estructura
@@ -269,12 +385,34 @@ def _pdfplumber_tables(pdf_path: str, page_index: int) -> list:
             if page_index >= len(pdf.pages):
                 return []
             page = pdf.pages[page_index]
-            tablas = page.extract_tables() or []
-            return [
-                tabla for tabla in tablas
-                if len(tabla) > 1 and tabla[0] and len(tabla[0]) > 1
-                and _tabla_parece_real(tabla)
-            ]
+
+            candidatos = []
+            for settings in _ESTRATEGIAS_EXTRACCION_TABLA:
+                try:
+                    tablas_validas = _extraer_tablas_validas(page, settings)
+                except Exception as error:
+                    logger.warning(
+                        "Estrategia de tabla %s falló en página %s: %s",
+                        settings, page_index + 1, error,
+                    )
+                    continue
+                if tablas_validas:
+                    candidatos.append(tablas_validas)
+
+            if not candidatos:
+                return []
+
+            # La estrategia por defecto (candidatos[0], si produjo algo) se
+            # prefiere salvo que una alternativa reduzca claramente la
+            # fragmentacion -- un margen minimo evita cambiar de estrategia
+            # por ruido cuando ambas quedan igual de bien.
+            mejor = candidatos[0]
+            mejor_fragmentacion = _fraccion_celdas_fragmentadas(mejor)
+            for alternativa in candidatos[1:]:
+                fragmentacion = _fraccion_celdas_fragmentadas(alternativa)
+                if fragmentacion < mejor_fragmentacion - 0.05:
+                    mejor, mejor_fragmentacion = alternativa, fragmentacion
+            return mejor
     except Exception as error:
         logger.warning("Detección de tablas falló en página %s: %s", page_index + 1, error)
         return []

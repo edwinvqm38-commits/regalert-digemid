@@ -7,6 +7,12 @@ fusionó ni desplegó nada.
 **Principio:** el PDF oficial es la fuente de verdad. Ningún OCR, LLM,
 `quality_score` ni transcripción previa se considera verdad por sí solo.
 
+> Nota posterior de remediacion: el cambio local de cierre de Fase 1 separa
+> `text_raw`/`text_normalized` de tablas y correcciones humanas, bloquea
+> `--replace-text` para vision IA y agrega un gate fail-closed para consultas
+> relacionales con tablas no verificadas. Las observaciones historicas de este
+> documento describen el estado auditado anterior a esas correcciones.
+
 ---
 
 ## 1. El pipeline reconstruido

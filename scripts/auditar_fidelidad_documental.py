@@ -27,6 +27,7 @@ sys.path.insert(0, str(RAIZ / "agents"))
 from fidelidad_legal import (  # noqa: E402
     DOCUMENTO_INCOMPLETO,
     PDF_NO_DISPONIBLE,
+    TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE,
     SenalesPagina,
     es_pagina_dispositiva,
     evaluar_pagina,
@@ -123,6 +124,9 @@ def auditar(normas: list[dict], paginas: list[dict], verificar_pdf: bool) -> tup
 
         for pagina in pags:
             texto = pagina.get("text_normalized") or pagina.get("text_raw") or ""
+            metadata = pagina.get("metadata") if isinstance(pagina.get("metadata"), dict) else {}
+            possible_table = metadata.get("possible_table") is True
+            table_requires_review = metadata.get("table_requires_review") is True
             senales = SenalesPagina(
                 extraction_method=pagina.get("extraction_method"),
                 quality_score=pagina.get("quality_score"),
@@ -130,6 +134,11 @@ def auditar(normas: list[dict], paginas: list[dict], verificar_pdf: bool) -> tup
                 ocr_confidence=pagina.get("ocr_confidence"),
                 texto=texto,
                 has_tables=bool(pagina.get("has_tables")),
+                possible_table=possible_table,
+                table_requires_review=table_requires_review,
+                # Este auditor Python no duplica la autoridad TypeScript ni
+                # convierte booleanos legacy en evidencia estructural.
+                estructura_tabular_verificada=False,
                 posible_formula=bool(pagina.get("posible_formula")),
                 posible_grafico=bool(pagina.get("posible_grafico")),
                 revisado_manual=bool(pagina.get("revisado_manual")),
@@ -156,6 +165,8 @@ def auditar(normas: list[dict], paginas: list[dict], verificar_pdf: bool) -> tup
                 "ocr_confidence": pagina.get("ocr_confidence"),
                 "quality_score": pagina.get("quality_score"),
                 "has_tables": bool(pagina.get("has_tables")),
+                "possible_table": possible_table,
+                "table_requires_review": table_requires_review,
                 "posible_formula": bool(pagina.get("posible_formula")),
                 "posible_grafico": bool(pagina.get("posible_grafico")),
                 "revisado_manual": bool(pagina.get("revisado_manual")),
@@ -180,6 +191,8 @@ def recomendar(estado: str, dispositiva: bool) -> str:
         return "recuperar el PDF completo y reextraer antes de usar la norma"
     if estado == PDF_NO_DISPONIBLE:
         return "recuperar el PDF oficial: sin el no hay forma de verificar nada"
+    if estado == TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE:
+        return "mantener fuera de citas legales hasta verificar la estructura tabular con evidencia moderna"
     if dispositiva and estado not in ("VERIFICADA_HUMANO", "VERIFICADA_AUTOMATICAMENTE"):
         return "REVISION HUMANA PRIORITARIA: pagina dispositiva sin fidelidad verificada"
     if estado == "DISCREPANCIA_ENTRE_MOTORES":

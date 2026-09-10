@@ -65,6 +65,57 @@ Cada modulo documental debe poder representar, como minimo, el siguiente contrat
 
 No todos los campos tienen que vivir hoy en una sola tabla fisica. El objetivo es mantener un estandar comun para evolucion futura de pipelines, OCR y analisis.
 
+### Invariantes de evidencia textual y tabular
+
+- `text_raw` contiene exclusivamente el texto originalmente extraido de la pagina.
+- `text_normalized` aplica solo normalizacion conservadora a esa misma fuente.
+- Una correccion humana se conserva como capa separada y trazable en metadata; no reescribe las capas fuente.
+- `has_tables` / `possible_table` solo indican que existen indicios de tabla.
+- `tables` y `tables_markdown` contienen candidatos aceptados automaticamente, separados del texto fuente.
+- `table_requires_review` es verdadero si al menos una region geometrica detectada no tiene candidato seguro.
+- `table_quality_score` mide calidad estructural automatica; no es verificacion legal.
+- `revisado_manual` confirma revision del texto y nunca implica `tabla_verificada`.
+- `tabla_verificada` requiere una accion humana explicita sobre la estructura,
+  Markdown estricto, cobertura de todas las regiones detectadas y el SHA-256
+  del PDF fuente. El booleano aislado nunca es evidencia suficiente.
+- La autoridad de lectura es `isTrustedTableVerification`: exige metadata de
+  método, fecha, hash coincidente y `unresolved_regions = 0` en la cobertura
+  manual. Esta revisión es estructural y no equivale a validación jurídica
+  profesional.
+- La cobertura regional nunca se infiere: si faltan `detected_regions`,
+  `accepted_regions` o `unresolved_regions`, se registra
+  `coverage_unknown = true` y la tabla no puede ser confiable.
+- `table_requires_review = true` es un veto absoluto. Si coexiste con una
+  afirmación de tabla verificada, el estado se diagnostica como contradictorio
+  y falla cerrado.
+- `metadata.manual_review.table_verification.reviewer_id` permanece `null`
+  mientras el flujo no disponga de una identidad auditable segura; no se
+  infiere ni se inventa a partir del contenido de la plantilla.
+- En la representación editable, la identidad técnica de las columnas es
+  ordinal (`C1`, `C2`, `C3`...), nunca el texto del encabezado. Esto conserva
+  orden, cardinalidad y encabezados duplicados sin colisiones.
+- `Columna N` es exclusivamente un placeholder visual para un encabezado
+  fuente vacío. El roundtrip conserva el encabezado canónico vacío y por ello
+  la tabla no puede elevarse a verificada desde Telegram.
+- Telegram es un canal de consulta rápida y revisión estructural limitada: no
+  repara encabezados vacíos o ambiguos. Esas correcciones deberán realizarse
+  en un futuro panel documental que compare explícitamente PDF original y
+  estructura extraída; ese panel no forma parte de esta fase.
+- Los encabezados duplicados conservan identidad ordinal y cardinalidad, pero
+  producen `duplicate_header_ambiguity`. Una consulta que use solo el texto
+  duplicado debe indicar `C2`, `C3` u otra posición inequívoca antes de llegar
+  al modelo; los identificadores `C<n>` son internos y no contenido del PDF.
+- El formato Markdown escapa de forma reversible backslashes y pipes; la
+  matriz ordinal canónica, no el Markdown visible, preserva la identidad.
+- Mientras no exista `safe_prose_text` derivado de regiones con trazabilidad,
+  una página con tabla pendiente se excluye completa del contexto RAG, incluso
+  para preguntas narrativas. Si no queda otra página segura, la respuesta es
+  determinista y no se invoca al LLM.
+- `revisado_manual` solo acredita revisión textual. En páginas con indicios de
+  tabla sin evidencia estructural moderna, el estado es
+  `TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE` y no autoriza cita legal.
+- Una propuesta de OCR/vision IA permanece en metadata con estado de propuesta; no sustituye evidencia buscable automaticamente.
+
 ## Estructura Drive Recomendada
 Estructura general recomendada para mantener separacion funcional y consistencia documental:
 

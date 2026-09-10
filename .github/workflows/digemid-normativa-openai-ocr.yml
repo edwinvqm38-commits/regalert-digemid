@@ -56,14 +56,6 @@ on:
         required: false
         default: "0.85"
         type: string
-      replace_text:
-        description: "Reemplazar text_normalized para que /consulta use la transcripcion IA"
-        required: true
-        default: "false"
-        type: choice
-        options:
-          - "false"
-          - "true"
 
 jobs:
   openai-ocr:
@@ -118,10 +110,6 @@ jobs:
 
           if [[ "${{ inputs.mode }}" == "report" ]]; then
             CMD+=(--report-html reporte_diferencias.html)
-          fi
-
-          if [[ "${{ inputs.replace_text }}" == "true" ]]; then
-            CMD+=(--replace-text)
           fi
 
           if [[ -n "${{ inputs.document_key }}" ]]; then

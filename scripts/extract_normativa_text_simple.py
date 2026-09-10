@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agents.pdf_extract import extract_pdf
+from agents.pdf_extract import extract_pdf, tablas_a_markdown
 
 logging.basicConfig(
     level=logging.INFO,
@@ -217,6 +217,8 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         "baja_calidad": 0,
         "ocr_usado": False,
         "con_tablas": 0,
+        "tablas_estructuradas": 0,
+        "tablas_requieren_revision": 0,
         "con_formula": 0,
         "con_grafico": 0,
         "paginas_baja_calidad": [],
@@ -230,11 +232,16 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
             stats["ocr_usado"] = True
         if page.has_tables:
             stats["con_tablas"] += 1
+        if page.tables:
+            stats["tablas_estructuradas"] += 1
+        if page.table_requires_review:
+            stats["tablas_requieren_revision"] += 1
         if page.posible_formula:
             stats["con_formula"] += 1
         if page.posible_grafico:
             stats["con_grafico"] = stats.get("con_grafico", 0) + 1
 
+        tables_markdown = tablas_a_markdown(page.tables)
         payload = {
             "norma_id": norma_id,
             "page_number": page.page_number,
@@ -248,12 +255,24 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
             "posible_formula": page.posible_formula,
             "posible_grafico": page.posible_grafico,
             "metadata": {
+                # `quality_score` se conserva por compatibilidad y describe
+                # únicamente el texto. Las calidades de tabla/layout son
+                # independientes y viven en metadata, sin migración SQL.
                 "quality_score": page.quality,
+                "text_quality_score": page.text_quality_score,
+                "table_quality_score": page.table_quality_score,
+                "layout_quality_score": page.layout_quality_score,
                 "method": page.method,
+                "source_pdf_sha256": page.source_pdf_sha256,
                 "ocr_confidence": page.ocr_confidence,
                 "posible_formula": page.posible_formula,
                 "posible_grafico": page.posible_grafico,
+                "possible_table": page.possible_table,
+                "table_requires_review": page.table_requires_review,
                 "tables": page.tables,
+                "tables_markdown": tables_markdown or None,
+                "table_diagnostics": page.table_diagnostics,
+                "table_regions": page.table_region_summary,
             },
         }
         supabase.table(PAGE_TABLE).insert(payload).execute()
@@ -405,8 +424,14 @@ def construir_reporte_html(document_key: str, titulo: str | None, extracciones) 
             señales.append(f"OCR (confianza {page.ocr_confidence})")
         if page.posible_formula:
             señales.append("posible fórmula/notación técnica — revisar manualmente")
-        if page.has_tables:
-            señales.append("tabla detectada")
+        if page.tables:
+            señales.append(
+                f"tabla estructurada aceptada (confianza {page.table_quality_score})"
+            )
+        elif page.table_requires_review:
+            señales.append(
+                "posible tabla — estructura rechazada; conservar texto y revisar"
+            )
         if page.posible_grafico:
             señales.append("posible gráfico/imagen — revisar manualmente (no se interpreta el contenido)")
         señales_html = " · ".join(_escapar_html(s) for s in señales) if señales else "—"
@@ -421,7 +446,7 @@ def construir_reporte_html(document_key: str, titulo: str | None, extracciones) 
 
         secciones.append(f"""
         <section style="border-left: 6px solid {color}; padding-left: 1rem; margin-bottom: 1.5rem;">
-          <h3>Página {page.page_number} — calidad {page.quality} ({_escapar_html(page.method)})</h3>
+          <h3>Página {page.page_number} — calidad de texto {page.quality} ({_escapar_html(page.method)})</h3>
           <p><b>Señales:</b> {señales_html}</p>
           <pre>{_escapar_html(page.text)}</pre>
           {tablas_html}
@@ -494,6 +519,8 @@ def enviar_progreso_telegram(
     errores_con_pdf: int = 0,
     sin_pdf_sin_texto: int = 0,
     normas_con_tablas: int = 0,
+    normas_con_tablas_aceptadas: int = 0,
+    normas_con_tablas_pendientes: int = 0,
     normas_con_formula: int = 0,
     normas_con_grafico: int = 0,
     processed_summaries: list[dict] | None = None,
@@ -527,7 +554,9 @@ def enviar_progreso_telegram(
         lines.append("✅ Sin páginas de baja confiabilidad en esta corrida.")
 
     if normas_con_tablas:
-        lines.append(f"📊 Con tablas detectadas: <b>{normas_con_tablas}</b> (guardadas como estructura, no solo texto plano)")
+        lines.append(f"📊 Con indicios de tabla detectados: <b>{normas_con_tablas}</b>")
+        lines.append(f"✅ Con estructuras aceptadas automáticamente: <b>{normas_con_tablas_aceptadas}</b>")
+        lines.append(f"⚠️ Con regiones de tabla pendientes de revisión: <b>{normas_con_tablas_pendientes}</b>")
     if normas_con_formula:
         lines.append(f"🧮 Con posible fórmula/notación técnica: <b>{normas_con_formula}</b> (requieren revisión manual)")
     if normas_con_grafico:
@@ -643,6 +672,8 @@ def main():
     errores = 0
     normas_baja_calidad = 0
     normas_con_tablas = 0
+    normas_con_tablas_aceptadas = 0
+    normas_con_tablas_pendientes = 0
     normas_con_formula = 0
     normas_con_grafico = 0
     processed_summaries: list[dict] = []
@@ -691,6 +722,10 @@ def main():
                 normas_baja_calidad += 1
             if stats["con_tablas"] > 0:
                 normas_con_tablas += 1
+            if stats["tablas_estructuradas"] > 0:
+                normas_con_tablas_aceptadas += 1
+            if stats["tablas_requieren_revision"] > 0:
+                normas_con_tablas_pendientes += 1
             if stats["con_formula"] > 0:
                 normas_con_formula += 1
             if stats["con_grafico"] > 0:
@@ -763,6 +798,8 @@ def main():
             estado_despues["errores_con_pdf"],
             estado_despues["sin_pdf_sin_texto"],
             normas_con_tablas,
+            normas_con_tablas_aceptadas,
+            normas_con_tablas_pendientes,
             normas_con_formula,
             normas_con_grafico,
             processed_summaries,

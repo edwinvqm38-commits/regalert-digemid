@@ -36,6 +36,20 @@ jobs:
 
           echo "Secrets requeridos encontrados."
 
+      - name: Configurar Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+
+      - name: Verificar seguridad y tipos del bot
+        run: |
+          deno check supabase/functions/telegram-bot/index.ts
+          deno check supabase/functions/telegram-bot/consulta_safety.ts
+          deno check supabase/functions/telegram-bot/revision_safety.ts
+          deno test \
+            supabase/functions/telegram-bot/consulta_safety.test.ts \
+            supabase/functions/telegram-bot/revision_safety.test.ts
+
       - name: Configurar Supabase CLI
         uses: supabase/setup-cli@v1
         with:

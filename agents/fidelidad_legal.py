@@ -36,6 +36,7 @@ DISCREPANCIA_ENTRE_MOTORES = "DISCREPANCIA_ENTRE_MOTORES"
 REQUIERE_REVISION_HUMANA = "REQUIERE_REVISION_HUMANA"
 VERIFICADA_AUTOMATICAMENTE = "VERIFICADA_AUTOMATICAMENTE"
 VERIFICADA_HUMANO = "VERIFICADA_HUMANO"
+TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE = "TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE"
 ILEGIBLE_PARCIAL = "ILEGIBLE_PARCIAL"
 DOCUMENTO_INCOMPLETO = "DOCUMENTO_INCOMPLETO"
 PDF_NO_DISPONIBLE = "PDF_NO_DISPONIBLE"
@@ -306,6 +307,9 @@ class SenalesPagina:
     ocr_confidence: float | None = None
     texto: str | None = None
     has_tables: bool = False
+    possible_table: bool = False
+    table_requires_review: bool = False
+    estructura_tabular_verificada: bool = False
     posible_formula: bool = False
     posible_grafico: bool = False
     revisado_manual: bool = False
@@ -342,7 +346,19 @@ def evaluar_pagina(senales: SenalesPagina) -> tuple[str, str, list[str]]:
             "faltan paginas del PDF: el documento no esta completo aunque las paginas presentes se vean bien"
         ]
 
+    tiene_indicio_tabular = (
+        senales.has_tables
+        or senales.possible_table
+        or senales.table_requires_review
+    )
     if senales.revisado_manual:
+        if tiene_indicio_tabular and (
+            senales.table_requires_review
+            or not senales.estructura_tabular_verificada
+        ):
+            return TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE, RIESGO_ALTO, [
+                "texto revisado por una persona, pero la estructura tabular no tiene evidencia moderna confiable"
+            ]
         return VERIFICADA_HUMANO, RIESGO_BAJO, ["revisada contra el PDF por una persona"]
 
     # Evidencia cruzada entre motores: es lo único que puede verificar sola.
@@ -357,7 +373,7 @@ def evaluar_pagina(senales: SenalesPagina) -> tuple[str, str, list[str]]:
             estado = VERIFICADA_AUTOMATICAMENTE
             riesgo = RIESGO_BAJO
             motivos.append(f"dos motores independientes coinciden (CER {cmp_.cer:.3f}, sin errores de token)")
-            if senales.has_tables or senales.posible_formula or senales.posible_grafico:
+            if tiene_indicio_tabular or senales.posible_formula or senales.posible_grafico:
                 # La coincidencia de texto no dice nada de la estructura de una
                 # tabla ni de una formula: eso sigue exigiendo ojo humano.
                 return REQUIERE_REVISION_HUMANA, RIESGO_ALTO, motivos + [

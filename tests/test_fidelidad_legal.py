@@ -24,6 +24,7 @@ from fidelidad_legal import (  # noqa: E402
     RIESGO_ALTO,
     RIESGO_CRITICO,
     SenalesPagina,
+    TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE,
     VERIFICADA_AUTOMATICAMENTE,
     VERIFICADA_HUMANO,
     cer,
@@ -37,6 +38,7 @@ from fidelidad_legal import (  # noqa: E402
     verbos_normativos,
     wer,
 )
+from scripts.auditar_fidelidad_documental import auditar  # noqa: E402
 
 DISPOSITIVA = (
     "SE RESUELVE:\n"
@@ -234,6 +236,29 @@ class TestEstadosDeVerificacion(unittest.TestCase):
             texto=DISPOSITIVA, revisado_manual=True))
         self.assertEqual(estado, VERIFICADA_HUMANO)
 
+    def test_revision_textual_no_verifica_estructura_tabular(self):
+        estado, riesgo, _ = evaluar_pagina(SenalesPagina(
+            extraction_method="pymupdf",
+            quality_score=1.0,
+            texto=DISPOSITIVA,
+            has_tables=True,
+            revisado_manual=True,
+        ))
+        self.assertEqual(estado, TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE)
+        self.assertEqual(riesgo, RIESGO_ALTO)
+        self.assertFalse(puede_citarse_como_fuente_legal(estado))
+
+    def test_table_requires_review_veta_aun_con_verificacion_estructural_declarada(self):
+        estado, _, _ = evaluar_pagina(SenalesPagina(
+            texto=DISPOSITIVA,
+            possible_table=True,
+            table_requires_review=True,
+            estructura_tabular_verificada=True,
+            revisado_manual=True,
+        ))
+        self.assertEqual(estado, TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE)
+        self.assertFalse(puede_citarse_como_fuente_legal(estado))
+
 
 class TestPuertas(unittest.TestCase):
     def test_dispositiva_no_verificada_no_alimenta_al_detector(self):
@@ -256,8 +281,39 @@ class TestPuertas(unittest.TestCase):
             self.assertTrue(puede_citarse_como_fuente_legal(estado))
         for estado in (NO_EVALUADA, OCR_PENDIENTE_VERIFICACION, EXTRACCION_DIGITAL_ALTA_CONCORDANCIA,
                        REQUIERE_REVISION_HUMANA, DISCREPANCIA_ENTRE_MOTORES, ILEGIBLE_PARCIAL,
-                       DOCUMENTO_INCOMPLETO, PDF_NO_DISPONIBLE):
+                       DOCUMENTO_INCOMPLETO, PDF_NO_DISPONIBLE,
+                       TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE):
             self.assertFalse(puede_citarse_como_fuente_legal(estado), estado)
+
+
+class TestAuditorFidelidadTabular(unittest.TestCase):
+    def test_revisado_manual_con_tabla_no_es_apto_para_consulta_legal(self):
+        normas = [{
+            "id": "norma-1",
+            "document_key": "NORMA-1",
+            "pdf_url": "https://example.invalid/norma.pdf",
+            "file_storage_path": None,
+        }]
+        paginas = [{
+            "norma_id": "norma-1",
+            "page_number": 1,
+            "text_raw": DISPOSITIVA,
+            "text_normalized": DISPOSITIVA,
+            "has_tables": True,
+            "revisado_manual": True,
+            "metadata": {
+                "possible_table": True,
+                "table_requires_review": True,
+            },
+        }]
+
+        filas, _ = auditar(normas, paginas, verificar_pdf=False)
+
+        self.assertEqual(
+            filas[0]["verification_status"],
+            TEXTO_REVISADO_HUMANO_ESTRUCTURA_PENDIENTE,
+        )
+        self.assertFalse(filas[0]["apta_para_consulta"])
 
 
 if __name__ == "__main__":

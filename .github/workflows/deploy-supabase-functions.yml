@@ -43,3 +43,12 @@ jobs:
 
       - name: Desplegar función telegram-bot
         run: supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt
+
+      # Canal WhatsApp (inbound-only). Se despliega como paso aparte a
+      # proposito: si este falla, telegram-bot ya quedo desplegado arriba y
+      # el canal en produccion no se ve afectado.
+      # --no-verify-jwt es obligatorio: Meta llama al webhook sin JWT de
+      # Supabase. La autenticacion del webhook la hace la propia funcion,
+      # validando la firma X-Hub-Signature-256 con WHATSAPP_APP_SECRET.
+      - name: Desplegar función whatsapp-bot
+        run: supabase functions deploy whatsapp-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt

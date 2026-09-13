@@ -72,7 +72,8 @@ const WHATSAPP_VERIFY_TOKEN = Deno.env.get("WHATSAPP_VERIFY_TOKEN") ?? "";
 const WHATSAPP_APP_SECRET = Deno.env.get("WHATSAPP_APP_SECRET") ?? "";
 // Version de Graph API configurable: fijar una antigua en el codigo obliga a
 // un cambio de codigo cada vez que Meta deja de soportarla.
-const WHATSAPP_GRAPH_API_VERSION = Deno.env.get("WHATSAPP_GRAPH_API_VERSION") ?? "v21.0";
+const WHATSAPP_GRAPH_API_VERSION = Deno.env.get("WHATSAPP_GRAPH_API_VERSION")?.trim() ||
+  "v21.0";
 const WHATSAPP_OUTBOUND_MODE = Deno.env.get("WHATSAPP_OUTBOUND_MODE") ?? "";
 
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";

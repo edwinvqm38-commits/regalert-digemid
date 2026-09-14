@@ -26,10 +26,12 @@ import {
   searchAlerts,
 } from "../_shared/digemid-datos.ts";
 import { answerConsulta } from "../_shared/consulta-ia.ts";
-import { type ComandoParseado, parsearComando } from "./comandos.ts";
+import { type ComandoAdmin, type ComandoParseado, parsearComando, parsearComandoAdmin } from "./comandos.ts";
 import {
   cerrarMensaje,
   contarConsultasIaHoy,
+  listarUsuariosPorVencer,
+  listarUsuariosRecientes,
   logConsulta,
   reservarMensaje,
   upsertUsuarioWhatsApp,
@@ -49,6 +51,8 @@ import {
   sendWhatsAppServiceMessage,
 } from "./whatsapp-api.ts";
 import {
+  formatAdminUsuariosWhatsApp,
+  formatAdminVencenWhatsApp,
   formatAlertDetailWhatsApp,
   formatAlertListWhatsApp,
   formatConsultaWhatsApp,
@@ -77,6 +81,15 @@ const WHATSAPP_APP_SECRET = Deno.env.get("WHATSAPP_APP_SECRET") ?? "";
 const WHATSAPP_GRAPH_API_VERSION = Deno.env.get("WHATSAPP_GRAPH_API_VERSION")?.trim() ||
   "v21.0";
 const WHATSAPP_OUTBOUND_MODE = Deno.env.get("WHATSAPP_OUTBOUND_MODE") ?? "";
+// wa_id (numero sin "+") de quienes pueden usar comandos "admin ...". Sigue
+// siendo inbound-only: el admin escribe, se le responde a el; nadie recibe
+// nada que no haya pedido.
+const WHATSAPP_ADMIN_WA_IDS = new Set(
+  (Deno.env.get("WHATSAPP_ADMIN_WA_IDS") ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean),
+);
 
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
@@ -197,6 +210,22 @@ async function enviarMiPerfil(
   );
 
   await responder(contexto, lineas.join("\n"));
+}
+
+/** Comandos de administracion: solo se llega aqui si el wa_id ya pasó el
+ * filtro de WHATSAPP_ADMIN_WA_IDS en procesarMensaje(). Es de solo lectura:
+ * ninguna rama envía nada a otro usuario ni cambia su nivel. */
+async function ejecutarComandoAdmin(
+  contexto: ContextoInbound,
+  comando: ComandoAdmin,
+): Promise<void> {
+  if (comando.tipo === "usuarios") {
+    const usuarios = await listarUsuariosRecientes(supabase, 20);
+    return await responder(contexto, formatAdminUsuariosWhatsApp(usuarios));
+  }
+
+  const usuarios = await listarUsuariosPorVencer(supabase, comando.dias);
+  return await responder(contexto, formatAdminVencenWhatsApp(usuarios, comando.dias));
 }
 
 async function ejecutarComando(
@@ -374,10 +403,11 @@ async function procesarMensaje(mensaje: MensajeEntranteWhatsApp): Promise<void> 
   const contexto = crearContextoInbound(mensaje);
   const usuario = await upsertUsuarioWhatsApp(supabase, mensaje);
   const nivel = usuario.nivel;
+  const esAdmin = WHATSAPP_ADMIN_WA_IDS.has(mensaje.waId);
 
-  // Prueba gratuita vencida sin plan pagado: bloqueo total, ni siquiera el
-  // menu. Se corta aqui, antes de mirar tipo o contenido del mensaje.
-  if (!usuarioTieneAcceso(usuario)) {
+  // El admin nunca queda bloqueado por su propia prueba (en la practica su
+  // wa_id ni deberia quedar en "gratis", pero esto lo hace explicito).
+  if (!esAdmin && !usuarioTieneAcceso(usuario)) {
     await responder(contexto, TEXTO_PRUEBA_VENCIDA);
     await cerrarMensaje(supabase, mensaje.messageId, "ignorado", "prueba_vencida");
     return;
@@ -394,6 +424,18 @@ async function procesarMensaje(mensaje: MensajeEntranteWhatsApp): Promise<void> 
     await responder(contexto, TEXTO_NO_RECONOCIDO);
     await cerrarMensaje(supabase, mensaje.messageId, "ignorado", "texto_vacio");
     return;
+  }
+
+  // Comandos "admin ..." se prueban antes que el parser normal, y solo si
+  // el wa_id esta autorizado: para cualquier otro usuario, "admin usuarios"
+  // sigue el camino normal (cae en "desconocido", nunca en este bloque).
+  if (esAdmin) {
+    const comandoAdmin = parsearComandoAdmin(mensaje.texto);
+    if (comandoAdmin) {
+      await ejecutarComandoAdmin(contexto, comandoAdmin);
+      await cerrarMensaje(supabase, mensaje.messageId, "procesado", `admin:${comandoAdmin.tipo}`);
+      return;
+    }
   }
 
   const parseado = parsearComando(mensaje.texto);

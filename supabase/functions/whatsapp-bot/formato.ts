@@ -236,6 +236,59 @@ export function formatNormativaListWhatsApp(titulo: string, rows: any[]): string
   return lineas.join("\n");
 }
 
+type ResumenUsuarioAdmin = {
+  waId: string;
+  nombrePerfil: string | null;
+  nivel: string;
+  diasRestantesPrueba: number | null;
+};
+
+function estadoUsuarioAdmin(usuario: ResumenUsuarioAdmin): string {
+  if (usuario.nivel !== "gratis") return `Plan ${negrita(usuario.nivel)}`;
+  if (usuario.diasRestantesPrueba && usuario.diasRestantesPrueba > 0) {
+    return `Prueba: ${usuario.diasRestantesPrueba}d restantes`;
+  }
+  return "Prueba vencida";
+}
+
+/** Listado de administracion: usuarios mas recientes con su estado actual. */
+export function formatAdminUsuariosWhatsApp(usuarios: ResumenUsuarioAdmin[]): string {
+  const titulo = "👤 Usuarios de WhatsApp";
+
+  if (!usuarios.length) {
+    return `${negrita(titulo)}\n\nNo hay usuarios registrados todavía.`;
+  }
+
+  const lineas = [negrita(`${titulo} (${usuarios.length} más recientes)`), ""];
+  for (const usuario of usuarios) {
+    lineas.push(
+      `• ${usuario.nombrePerfil || "sin nombre"} (${usuario.waId}) — ${estadoUsuarioAdmin(usuario)}`,
+    );
+  }
+
+  return lineas.join("\n");
+}
+
+/** Listado de administracion: usuarios en plan gratis por vencer dentro de
+ * la ventana pedida. Solo informa; no envía nada a esos usuarios. */
+export function formatAdminVencenWhatsApp(usuarios: ResumenUsuarioAdmin[], diasVentana: number): string {
+  const titulo = `⏳ Pruebas que vencen en ${diasVentana} ${diasVentana === 1 ? "día" : "días"} o menos`;
+
+  if (!usuarios.length) {
+    return `${negrita(titulo)}\n\nNadie está por vencer en esa ventana.`;
+  }
+
+  const lineas = [negrita(titulo), ""];
+  for (const usuario of usuarios) {
+    lineas.push(
+      `• ${usuario.nombrePerfil || "sin nombre"} (${usuario.waId}) — ` +
+        `${usuario.diasRestantesPrueba} ${usuario.diasRestantesPrueba === 1 ? "día" : "días"} restantes`,
+    );
+  }
+
+  return lineas.join("\n");
+}
+
 /** Respuesta de /consulta: el texto de la IA ya viene con las citas que
  * exige el prompt; aqui solo se adapta el marcado y se agregan los links
  * oficiales de las fuentes (que en Telegram van en botones). */

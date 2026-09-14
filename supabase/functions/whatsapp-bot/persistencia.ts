@@ -152,6 +152,87 @@ export function usuarioTieneAcceso(usuario: UsuarioWhatsApp, ahora: Date = new D
   return enPeriodoDePrueba(usuario.createdAt, ahora);
 }
 
+/** Dias enteros que le quedan de prueba a partir de `ahora` (0 si ya vencio).
+ * Redondea hacia arriba: a un usuario que arranco hace 6 dias y 1 hora le
+ * quedan "1 dia", no "0.96". Pura, para no depender del reloj del sistema en
+ * los tests. */
+export function diasRestantesPrueba(
+  createdAt: string,
+  ahora: Date = new Date(),
+  diasLimite = PRUEBA_LIMITE_DIAS,
+): number | null {
+  const inicio = new Date(createdAt).getTime();
+  if (Number.isNaN(inicio)) return null;
+
+  const finMs = inicio + diasLimite * 24 * 60 * 60 * 1000;
+  const restanteMs = finMs - ahora.getTime();
+
+  return Math.max(0, Math.ceil(restanteMs / (24 * 60 * 60 * 1000)));
+}
+
+export type ResumenUsuarioAdmin = {
+  waId: string;
+  nombrePerfil: string | null;
+  nivel: string;
+  createdAt: string;
+  /** null cuando el usuario tiene un plan pagado (la prueba no le aplica). */
+  diasRestantesPrueba: number | null;
+};
+
+// deno-lint-ignore no-explicit-any
+function aResumenAdmin(fila: any, ahora: Date): ResumenUsuarioAdmin {
+  return {
+    waId: fila.wa_id,
+    nombrePerfil: fila.nombre_perfil ?? null,
+    nivel: fila.nivel,
+    createdAt: fila.created_at,
+    diasRestantesPrueba: fila.nivel === "gratis" ? diasRestantesPrueba(fila.created_at, ahora) : null,
+  };
+}
+
+/** Para el comando admin "usuarios": los mas recientes primero, sin
+ * distinguir estado (uso general, no pensado para vencimientos). */
+export async function listarUsuariosRecientes(
+  supabase: SupabaseLike,
+  limite = 20,
+): Promise<ResumenUsuarioAdmin[]> {
+  const { data, error } = await supabase
+    .from(USUARIOS_TABLE)
+    .select("wa_id, nombre_perfil, nivel, created_at")
+    .order("created_at", { ascending: false })
+    .limit(limite);
+
+  if (error) throw error;
+
+  const ahora = new Date();
+  return (data ?? []).map((fila: unknown) => aResumenAdmin(fila, ahora));
+}
+
+/** Para el comando admin "vencen [dias]": usuarios en plan gratis cuya
+ * prueba termina dentro de la ventana pedida, pero que TODAVIA no vencio
+ * (0 dias restantes = ya vencido, no es "por vencer"). No envia nada por su
+ * cuenta: solo lista, para que el admin decida que hacer manualmente. */
+export async function listarUsuariosPorVencer(
+  supabase: SupabaseLike,
+  diasVentana = 3,
+  limite = 30,
+): Promise<ResumenUsuarioAdmin[]> {
+  const { data, error } = await supabase
+    .from(USUARIOS_TABLE)
+    .select("wa_id, nombre_perfil, nivel, created_at")
+    .eq("nivel", "gratis")
+    .order("created_at", { ascending: true });
+
+  if (error) throw error;
+
+  const ahora = new Date();
+  return (data ?? [])
+    .map((fila: unknown) => aResumenAdmin(fila, ahora))
+    .filter((u: ResumenUsuarioAdmin) => u.diasRestantesPrueba !== null && u.diasRestantesPrueba > 0 &&
+      u.diasRestantesPrueba <= diasVentana)
+    .slice(0, limite);
+}
+
 export async function logConsulta(
   supabase: SupabaseLike,
   params: {

@@ -26,6 +26,11 @@ export const USUARIOS_TABLE = "digemid_whatsapp_usuarios";
 export const MENSAJES_TABLE = "digemid_whatsapp_mensajes_procesados";
 export const CONSULTAS_TABLE = "digemid_bot_consultas";
 
+/** Dias de prueba gratuita completa desde el primer contacto (created_at).
+ * Pasado este plazo, un usuario en nivel "gratis" pierde el acceso por
+ * completo (no solo el limite diario de IA) hasta que tenga un plan pagado. */
+export const PRUEBA_LIMITE_DIAS = 7;
+
 /** Prefijo de canal: evita colisionar con un chat_id de Telegram (numerico)
  * y deja ver en el log de que canal vino cada consulta. */
 export function identidadCanal(waId: string): string {
@@ -77,16 +82,22 @@ export async function cerrarMensaje(
     .eq("message_id", messageId);
 }
 
-/** Registra (o refresca) al usuario de WhatsApp y devuelve su nivel de plan.
- * Un usuario nuevo queda en "gratis": no hay alta automatica de planes por
- * este canal en el MVP. */
+export type UsuarioWhatsApp = {
+  nivel: string;
+  createdAt: string;
+};
+
+/** Registra (o refresca) al usuario de WhatsApp y devuelve su nivel de plan
+ * junto con la fecha de su primer contacto (created_at), que es el punto de
+ * partida de la prueba gratuita. Un usuario nuevo queda en "gratis": no hay
+ * alta automatica de planes por este canal en el MVP. */
 export async function upsertUsuarioWhatsApp(
   supabase: SupabaseLike,
   mensaje: { waId: string; telefono: string; nombrePerfil: string },
-): Promise<string> {
+): Promise<UsuarioWhatsApp> {
   const { data: existente } = await supabase
     .from(USUARIOS_TABLE)
-    .select("id, nivel, mensajes_recibidos")
+    .select("id, nivel, mensajes_recibidos, created_at")
     .eq("wa_id", mensaje.waId)
     .maybeSingle();
 
@@ -100,18 +111,45 @@ export async function upsertUsuarioWhatsApp(
       })
       .eq("wa_id", mensaje.waId);
 
-    return existente.nivel ?? "gratis";
+    return { nivel: existente.nivel ?? "gratis", createdAt: existente.created_at };
   }
+
+  const creadoEn = new Date().toISOString();
 
   await supabase.from(USUARIOS_TABLE).insert({
     wa_id: mensaje.waId,
     telefono: mensaje.telefono,
     nombre_perfil: mensaje.nombrePerfil || null,
     mensajes_recibidos: 1,
-    last_seen_at: new Date().toISOString(),
+    last_seen_at: creadoEn,
+    created_at: creadoEn,
   });
 
-  return "gratis";
+  return { nivel: "gratis", createdAt: creadoEn };
+}
+
+/** true mientras el usuario siga dentro de los PRUEBA_LIMITE_DIAS desde su
+ * primer contacto. Pura: no depende de la hora del sistema mas alla del
+ * parametro `ahora`, para poder probarla sin mockear Date. */
+export function enPeriodoDePrueba(
+  createdAt: string,
+  ahora: Date = new Date(),
+  diasLimite = PRUEBA_LIMITE_DIAS,
+): boolean {
+  const inicio = new Date(createdAt).getTime();
+  if (Number.isNaN(inicio)) return false;
+
+  const limiteMs = diasLimite * 24 * 60 * 60 * 1000;
+  return ahora.getTime() - inicio < limiteMs;
+}
+
+/** Un usuario tiene acceso si tiene un plan pagado, o si su plan gratis
+ * todavia esta dentro del periodo de prueba. Pasada la prueba sin plan
+ * pagado, se corta el acceso por completo (no solo el limite diario de IA):
+ * asi lo decidio el negocio para el canal de WhatsApp. */
+export function usuarioTieneAcceso(usuario: UsuarioWhatsApp, ahora: Date = new Date()): boolean {
+  if (usuario.nivel !== "gratis") return true;
+  return enPeriodoDePrueba(usuario.createdAt, ahora);
 }
 
 export async function logConsulta(

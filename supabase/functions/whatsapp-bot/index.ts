@@ -33,6 +33,7 @@ import {
   logConsulta,
   reservarMensaje,
   upsertUsuarioWhatsApp,
+  usuarioTieneAcceso,
 } from "./persistencia.ts";
 import {
   extraerMensajeEntrante,
@@ -58,6 +59,7 @@ import {
   TEXTO_AYUDA,
   TEXTO_MENU,
   TEXTO_NO_RECONOCIDO,
+  TEXTO_PRUEBA_VENCIDA,
   TEXTO_SOLO_TEXTO,
 } from "./formato.ts";
 
@@ -370,7 +372,16 @@ async function ejecutarComando(
 
 async function procesarMensaje(mensaje: MensajeEntranteWhatsApp): Promise<void> {
   const contexto = crearContextoInbound(mensaje);
-  const nivel = await upsertUsuarioWhatsApp(supabase, mensaje);
+  const usuario = await upsertUsuarioWhatsApp(supabase, mensaje);
+  const nivel = usuario.nivel;
+
+  // Prueba gratuita vencida sin plan pagado: bloqueo total, ni siquiera el
+  // menu. Se corta aqui, antes de mirar tipo o contenido del mensaje.
+  if (!usuarioTieneAcceso(usuario)) {
+    await responder(contexto, TEXTO_PRUEBA_VENCIDA);
+    await cerrarMensaje(supabase, mensaje.messageId, "ignorado", "prueba_vencida");
+    return;
+  }
 
   // Audio, imagen, ubicacion, etc.: el MVP responde solo texto.
   if (mensaje.tipo !== "text") {

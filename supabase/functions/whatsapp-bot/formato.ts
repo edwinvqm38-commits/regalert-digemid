@@ -86,6 +86,14 @@ export const TEXTO_NO_RECONOCIDO = [
   TEXTO_MENU,
 ].join("\n");
 
+export const TEXTO_PRUEBA_VENCIDA = [
+  negrita("⏰ Tu prueba gratuita de RegAlert DIGEMID terminó"),
+  "",
+  "Para seguir consultando alertas, normativa y hacer preguntas con IA, activa un plan.",
+  "",
+  "Escríbenos a través de nuestros canales de contacto para coordinar tu suscripción.",
+].join("\n");
+
 export const TEXTO_SOLO_TEXTO = [
   "Por ahora solo puedo leer mensajes de *texto*.",
   "",

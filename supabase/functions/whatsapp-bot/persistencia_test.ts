@@ -6,13 +6,16 @@
  * doble de prueba: no hay red ni credenciales.
  */
 
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assert, assertEquals, assertFalse } from "jsr:@std/assert@1";
 import {
+  enPeriodoDePrueba,
   identidadCanal,
   MENSAJES_TABLE,
+  PRUEBA_LIMITE_DIAS,
   reservarMensaje,
   upsertUsuarioWhatsApp,
   USUARIOS_TABLE,
+  usuarioTieneAcceso,
 } from "./persistencia.ts";
 
 type Operacion = { tabla: string; tipo: string; valores?: Record<string, unknown> };
@@ -109,13 +112,14 @@ Deno.test("un error de base distinto de duplicado sí se propaga", async () => {
 Deno.test("un usuario nuevo de WhatsApp queda registrado como gratis", async () => {
   const { cliente, operaciones } = fakeSupabase({ usuarioExistente: null });
 
-  const nivel = await upsertUsuarioWhatsApp(cliente, {
+  const usuario = await upsertUsuarioWhatsApp(cliente, {
     waId: "51987654321",
     telefono: "51987654321",
     nombrePerfil: "Edwin QF",
   });
 
-  assertEquals(nivel, "gratis");
+  assertEquals(usuario.nivel, "gratis");
+  assert(usuario.createdAt, "debe devolver la fecha de alta para calcular la prueba");
 
   const alta = operaciones.find((o) => o.tabla === USUARIOS_TABLE && o.tipo === "insert");
   assert(alta, "debió insertarse el usuario");
@@ -125,21 +129,62 @@ Deno.test("un usuario nuevo de WhatsApp queda registrado como gratis", async () 
 
 Deno.test("un usuario existente conserva su nivel y suma el mensaje", async () => {
   const { cliente, operaciones } = fakeSupabase({
-    usuarioExistente: { id: "uuid-1", nivel: "basico", mensajes_recibidos: 4 },
+    usuarioExistente: {
+      id: "uuid-1",
+      nivel: "basico",
+      mensajes_recibidos: 4,
+      created_at: "2026-01-01T00:00:00.000Z",
+    },
   });
 
-  const nivel = await upsertUsuarioWhatsApp(cliente, {
+  const usuario = await upsertUsuarioWhatsApp(cliente, {
     waId: "51987654321",
     telefono: "51987654321",
     nombrePerfil: "Edwin QF",
   });
 
-  assertEquals(nivel, "basico");
+  assertEquals(usuario.nivel, "basico");
+  assertEquals(usuario.createdAt, "2026-01-01T00:00:00.000Z");
 
   const actualizacion = operaciones.find(
     (o) => o.tabla === USUARIOS_TABLE && o.tipo === "update",
   );
   assertEquals(actualizacion?.valores?.mensajes_recibidos, 5);
+});
+
+Deno.test("dentro de los dias de prueba, enPeriodoDePrueba es true", () => {
+  const inicio = "2026-01-01T00:00:00.000Z";
+  const ahora = new Date("2026-01-05T00:00:00.000Z"); // 4 dias despues
+
+  assert(enPeriodoDePrueba(inicio, ahora));
+});
+
+Deno.test("pasado PRUEBA_LIMITE_DIAS, enPeriodoDePrueba es false", () => {
+  const inicio = "2026-01-01T00:00:00.000Z";
+  const ahora = new Date(
+    new Date(inicio).getTime() + (PRUEBA_LIMITE_DIAS + 1) * 24 * 60 * 60 * 1000,
+  );
+
+  assertFalse(enPeriodoDePrueba(inicio, ahora));
+});
+
+Deno.test("un usuario gratis dentro de la prueba tiene acceso", () => {
+  const inicio = new Date().toISOString();
+  assert(usuarioTieneAcceso({ nivel: "gratis", createdAt: inicio }));
+});
+
+Deno.test("un usuario gratis con la prueba vencida NO tiene acceso", () => {
+  const inicio = new Date(
+    Date.now() - (PRUEBA_LIMITE_DIAS + 1) * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  assertFalse(usuarioTieneAcceso({ nivel: "gratis", createdAt: inicio }));
+});
+
+Deno.test("un usuario con plan pagado tiene acceso aunque la prueba haya vencido", () => {
+  const inicioMuyViejo = new Date(
+    Date.now() - (PRUEBA_LIMITE_DIAS + 100) * 24 * 60 * 60 * 1000,
+  ).toISOString();
+  assert(usuarioTieneAcceso({ nivel: "basico", createdAt: inicioMuyViejo }));
 });
 
 Deno.test("los usuarios de WhatsApp NO se escriben en las tablas de Telegram", async () => {

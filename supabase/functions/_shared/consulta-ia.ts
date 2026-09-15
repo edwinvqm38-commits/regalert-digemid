@@ -70,6 +70,194 @@ function formatUltimaNormativaComoRespuesta(rows: any[], estilo: EstiloNegrita):
   return lineas.join("\n");
 }
 
+/** Prefijos de tipo de norma reconocidos en el texto libre de una pregunta,
+ * hacia el mismo formato de document_key que usa digemid_normas ("RM-727-2025").
+ * Las claves de mas de una palabra deben probarse antes que sus abreviaturas
+ * (extraerReferenciaNormativa las ordena por longitud) para que "resolucion
+ * ministerial" no quede capturado a medias por una entrada mas corta. */
+const PREFIJOS_NORMA: Record<string, string> = {
+  "ley": "LEY",
+  "decreto supremo": "DS",
+  "decreto legislativo": "DL",
+  "decreto de urgencia": "DU",
+  "resolucion ministerial": "RM",
+  "resolucion directoral": "RD",
+  "resolucion suprema": "RS",
+  "ds": "DS",
+  "dl": "DL",
+  "du": "DU",
+  "rm": "RM",
+  "rd": "RD",
+  "rs": "RS",
+};
+
+export type ReferenciaNormativa = { documentKey: string };
+
+/** Detecta que el usuario esta preguntando por UNA norma puntual, citada por
+ * su tipo + numero + año ("Resolución Ministerial 727-2025/MINSA", "DS
+ * 020-2024", "Ley 29459"). Para estas preguntas, buscar por texto libre es
+ * poco confiable (puede traer una norma distinta que "suena" parecida); es
+ * mejor ir directo al documento por su identificador exacto. */
+export function extraerReferenciaNormativa(pregunta: string): ReferenciaNormativa | null {
+  const texto = normalizarParaPatron(pregunta);
+  const claves = Object.keys(PREFIJOS_NORMA).sort((a, b) => b.length - a.length);
+
+  for (const clave of claves) {
+    const escapado = clave.replace(/ /g, "\\s+");
+    const regex = new RegExp(`\\b${escapado}\\b\\s*(?:n[°ºo.]?\\s*)?(\\d{1,4})[\\s\\-/]+(\\d{4})\\b`);
+    const match = texto.match(regex);
+    if (match) {
+      return { documentKey: `${PREFIJOS_NORMA[clave]}-${match[1]}-${match[2]}` };
+    }
+  }
+
+  return null;
+}
+
+/** Tope de paginas que se envian al modelo para UNA norma puntual: evita que
+ * una ley larga (varias decenas de paginas) dispare un costo/latencia
+ * absurdos en una sola consulta. Si la norma tiene mas, se avisa en vez de
+ * cortar en silencio. */
+const MAX_PAGINAS_NORMA_PUNTUAL = 25;
+
+/** Trae una norma puntual por su document_key exacto, con su contenido
+ * (digemid_norma_paginas) y sus relaciones normativas conocidas
+ * (digemid_norma_relaciones, en ambos sentidos: a que otras normas afecta, y
+ * que otras normas la afectaron a ella) para que el modelo pueda responder
+ * tambien "que mas debo tener en cuenta" y no solo "que dice este articulo". */
+async function getNormaConContenido(
+  supabase: SupabaseLike,
+  documentKey: string,
+  // deno-lint-ignore no-explicit-any
+): Promise<{ norma: any; paginas: any[]; relaciones: any[] } | null> {
+  const { data: norma, error: errorNorma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, fecha_publicacion, source_url, pdf_url, estado_vigencia")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (errorNorma) throw errorNorma;
+  if (!norma) return null;
+
+  const { data: paginas, error: errorPaginas } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula")
+    .eq("norma_id", norma.id)
+    .order("page_number")
+    .limit(MAX_PAGINAS_NORMA_PUNTUAL);
+
+  if (errorPaginas) throw errorPaginas;
+
+  const { data: relaciones, error: errorRelaciones } = await supabase
+    .from("digemid_norma_relaciones")
+    .select(
+      "tipo_relacion, tipo_norma_afectada, numero_afectada, anio_afectada, descripcion_afectada, estado, norma_origen_id, norma_afectada_id, norma_origen_document_key",
+    )
+    .or(`norma_origen_id.eq.${norma.id},norma_afectada_id.eq.${norma.id}`);
+
+  if (errorRelaciones) throw errorRelaciones;
+
+  return { norma, paginas: paginas ?? [], relaciones: relaciones ?? [] };
+}
+
+// deno-lint-ignore no-explicit-any
+function paginaComoChunk(pagina: any, norma: any) {
+  return {
+    document_key: norma.document_key,
+    title: norma.titulo,
+    published_date: norma.fecha_publicacion,
+    page_number: pagina.page_number,
+    text_content: pagina.text_normalized ?? pagina.text_raw ?? "",
+    detail_url: norma.source_url ?? norma.pdf_url ?? "",
+    quality_score: pagina.quality_score,
+    revisado_manual: pagina.revisado_manual,
+    has_tables: pagina.has_tables,
+    posible_formula: pagina.posible_formula,
+    estado_vigencia: norma.estado_vigencia,
+  };
+}
+
+/** Convierte las relaciones normativas en un bloque de texto adicional para
+ * el modelo: deroga/modifica/prorroga detectados automaticamente, en las dos
+ * direcciones (esta norma afecta a otra vs. otra norma afecto a esta). Nunca
+ * se presenta como confirmado por un humano — eso lo dice `estado`. */
+// deno-lint-ignore no-explicit-any
+function formatRelacionesComoContexto(relaciones: any[], norma: any): string {
+  if (!relaciones.length) return "";
+
+  const lineas = [
+    "",
+    `[Relaciones normativas de ${norma.document_key} detectadas automaticamente, estado de verificacion segun cada una]`,
+  ];
+
+  for (const r of relaciones) {
+    if (r.norma_origen_id === norma.id) {
+      lineas.push(
+        `- ${norma.document_key} ${r.tipo_relacion} a ${r.tipo_norma_afectada ?? "norma"} ` +
+          `${r.numero_afectada ?? "?"}-${r.anio_afectada ?? "?"} (${r.descripcion_afectada ?? "sin descripción"}). ` +
+          `Estado: ${r.estado}.`,
+      );
+    } else {
+      lineas.push(
+        `- ${norma.document_key} fue afectada (${r.tipo_relacion}) por ${r.norma_origen_document_key ?? "otra norma"}. ` +
+          `Estado: ${r.estado}.`,
+      );
+    }
+  }
+
+  return lineas.join("\n");
+}
+
+/** Responde sobre UNA norma puntual citada por numero exacto, usando su
+ * contenido real (no busqueda difusa) y sus relaciones conocidas. Devuelve
+ * null si no se encontro esa norma exacta en digemid_normas: quien llama
+ * decide si sigue con la busqueda de texto como respaldo. */
+async function responderNormaPuntual(
+  supabase: SupabaseLike,
+  documentKey: string,
+  question: string,
+  config: ConfigConsultaIa,
+): Promise<RespuestaConsulta | null> {
+  const resultado = await getNormaConContenido(supabase, documentKey);
+  if (!resultado) return null;
+
+  const { norma, paginas, relaciones } = resultado;
+
+  if (!paginas.length) {
+    return {
+      answer: `Encontré ${negritaPorEstilo(config.estiloNegrita, norma.document_key)} en la base, pero su ` +
+        "contenido todavía no fue extraído/revisado, así que no puedo interpretarla todavía. " +
+        "Verifica directamente con el PDF oficial.",
+      sources: [{ documentKey: norma.document_key, url: norma.source_url ?? norma.pdf_url ?? "" }],
+      sinEvidencia: true,
+    };
+  }
+
+  const chunks = paginas.map((pagina) => paginaComoChunk(pagina, norma));
+  const systemPrompt = construirSystemPrompt(config.estiloNegrita);
+  const userContent = `Contexto:\n\n${buildConsultaContext(chunks)}${formatRelacionesComoContexto(relaciones, norma)}` +
+    `\n\nPregunta: ${question}`;
+  const sources = consultaSources(chunks);
+
+  if (config.deepseekApiKey) {
+    try {
+      return { answer: await callDeepseek(config.deepseekApiKey, systemPrompt, userContent), sources, sinEvidencia: false };
+    } catch (error) {
+      console.error("DeepSeek falló, probando respaldo Gemini:", error);
+    }
+  }
+
+  if (config.geminiApiKey) {
+    return {
+      answer: await callGemini(config.geminiApiKey, config.geminiModel, systemPrompt, userContent),
+      sources,
+      sinEvidencia: false,
+    };
+  }
+
+  throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
+}
+
 export function construirSystemPrompt(estilo: EstiloNegrita): string {
   const instruccionNegrita = estilo === "html"
     ? "usa negrita en formato HTML de Telegram: <b>texto</b>. No uses markdown (**texto**)."
@@ -374,6 +562,19 @@ export async function answerConsulta(
       sources: rows.map((row) => ({ documentKey: row.document_key, url: row.detail_url })),
       sinEvidencia: false,
     };
+  }
+
+  // Si la pregunta cita una norma puntual por numero exacto ("Resolucion
+  // Ministerial 727-2025"), no se usa busqueda difusa: se va directo a esa
+  // norma en digemid_normas, con su contenido real y sus relaciones. La
+  // busqueda por relevancia puede devolver una norma distinta que "suena"
+  // parecida, que es justo lo que se quiere evitar aqui.
+  const referencia = extraerReferenciaNormativa(question);
+  if (referencia) {
+    const respuesta = await responderNormaPuntual(supabase, referencia.documentKey, question, config);
+    if (respuesta) return respuesta;
+    // No se encontro esa norma exacta en digemid_normas: se cae al flujo
+    // normal de busqueda de texto como respaldo, en vez de fallar.
   }
 
   const consultaBusqueda = await reformularConsultaParaBusqueda(question, config);

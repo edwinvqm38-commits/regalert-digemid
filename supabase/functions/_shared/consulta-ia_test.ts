@@ -16,6 +16,7 @@ import {
   buildConsultaContext,
   construirSystemPrompt,
   consultaSources,
+  extraerReferenciaNormativa,
   pareceConsultaSobreUltimaNorma,
 } from "./consulta-ia.ts";
 
@@ -37,6 +38,12 @@ function fakeSupabase(opciones: {
   chunks?: unknown[];
   sugerencias?: unknown[];
   normativaReciente?: unknown[];
+  // deno-lint-ignore no-explicit-any
+  norma?: any;
+  // deno-lint-ignore no-explicit-any
+  paginasNorma?: any[];
+  // deno-lint-ignore no-explicit-any
+  relacionesNorma?: any[];
 } = {}) {
   return {
     rpc(nombre: string) {
@@ -48,7 +55,55 @@ function fakeSupabase(opciones: {
       }
       return Promise.resolve({ data: [], error: null });
     },
-    from() {
+    from(tabla: string) {
+      if (tabla === "digemid_normas") {
+        return {
+          select() {
+            return {
+              eq() {
+                return {
+                  maybeSingle() {
+                    return Promise.resolve({ data: opciones.norma ?? null, error: null });
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (tabla === "digemid_norma_paginas") {
+        return {
+          select() {
+            return {
+              eq() {
+                return {
+                  order() {
+                    return {
+                      limit() {
+                        return Promise.resolve({ data: opciones.paginasNorma ?? [], error: null });
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      }
+
+      if (tabla === "digemid_norma_relaciones") {
+        return {
+          select() {
+            return {
+              or() {
+                return Promise.resolve({ data: opciones.relacionesNorma ?? [], error: null });
+              },
+            };
+          },
+        };
+      }
+
       return {
         select() {
           return {
@@ -285,6 +340,131 @@ Deno.test("una pregunta sobre la ultima norma se responde con datos ordenados po
     assertEquals(resultado.sources[0].documentKey, "RM-793-2025");
     assertStringIncludes(resultado.answer, "RM-793-2025");
     assertEquals(llm.cuerposEnviados.length, 0, "no debe gastarse ninguna llamada al modelo");
+  } finally {
+    llm.restaurar();
+  }
+});
+
+Deno.test("extraerReferenciaNormativa reconoce tipo + numero + año", () => {
+  assertEquals(
+    extraerReferenciaNormativa("interpreta la resolución ministerial 727-2025/minsa")?.documentKey,
+    "RM-727-2025",
+  );
+  // "Ley 29459" no trae año explícito, así que no se puede armar un
+  // document_key exacto (LEY-{numero}-{anio}): se deja sin resolver.
+  assertEquals(extraerReferenciaNormativa("qué establece la Ley 29459"), null);
+  assertEquals(extraerReferenciaNormativa("DS 020-2024")?.documentKey, "DS-020-2024");
+  assertEquals(extraerReferenciaNormativa("cuánto es la multa por no informar precios"), null);
+  assertEquals(extraerReferenciaNormativa("cual es la norma mas reciente publicada"), null);
+});
+
+Deno.test("una norma citada por numero exacto se responde con su contenido real, no busqueda difusa", async () => {
+  const llm = fakeLlm("*RM-727-2025 establece...*\n\n📌 Fuente: *RM-727-2025* — 2025-08-01, pag. 1");
+
+  try {
+    const resultado = await answerConsulta(
+      fakeSupabase({
+        // Si el flujo cayera a busqueda difusa, encontraria estos chunks de
+        // OTRA norma en vez de la citada; la prueba falla si eso pasa.
+        chunks: [{ ...CHUNK_VERIFICADO, document_key: "RM-899-2025" }],
+        norma: {
+          id: "norma-1",
+          document_key: "RM-727-2025",
+          titulo: "Resolución Ministerial N° 727-2025/MINSA",
+          fecha_publicacion: "2025-08-01",
+          source_url: "https://www.digemid.minsa.gob.pe/rm-727-2025",
+          pdf_url: null,
+          estado_vigencia: "vigente",
+        },
+        paginasNorma: [
+          {
+            page_number: 1,
+            text_normalized: "Aprueban el listado de productos farmacéuticos...",
+            text_raw: null,
+            quality_score: 0.9,
+            revisado_manual: false,
+            has_tables: false,
+            posible_formula: false,
+          },
+        ],
+        relacionesNorma: [
+          {
+            tipo_relacion: "deroga",
+            tipo_norma_afectada: "RM",
+            numero_afectada: "049",
+            anio_afectada: "2025",
+            descripcion_afectada: "listado anterior",
+            estado: "detectada_automaticamente",
+            norma_origen_id: "norma-1",
+            norma_afectada_id: "norma-otra",
+            norma_origen_document_key: "RM-727-2025",
+          },
+        ],
+      }),
+      "interpreta la resolución ministerial 727-2025/minsa y a que otras normas afecta",
+      CONFIG,
+    );
+
+    assertEquals(resultado.sinEvidencia, false);
+    assertEquals(resultado.sources.length, 1);
+    assertEquals(resultado.sources[0].documentKey, "RM-727-2025");
+
+    // Una sola llamada al modelo (responder), ninguna de reformulacion ni de
+    // busqueda difusa: la referencia exacta evita ambas.
+    assertEquals(llm.cuerposEnviados.length, 1);
+    const cuerpo = llm.cuerposEnviados[0];
+    assertStringIncludes(cuerpo, "RM-727-2025");
+    assertStringIncludes(cuerpo, "deroga");
+    assert(!cuerpo.includes("RM-899-2025"));
+  } finally {
+    llm.restaurar();
+  }
+});
+
+Deno.test("una norma citada que no existe en digemid_normas cae a busqueda de texto", async () => {
+  const llm = fakeLlm("*Respuesta desde busqueda difusa*\n\n📌 Fuente: *RM-899-2025* — 2025-08-01, pag. 1");
+
+  try {
+    const resultado = await answerConsulta(
+      fakeSupabase({
+        chunks: [{ ...CHUNK_VERIFICADO, document_key: "RM-899-2025" }],
+        norma: null,
+      }),
+      "interpreta la resolución ministerial 727-2025/minsa",
+      CONFIG,
+    );
+
+    assertEquals(resultado.sinEvidencia, false);
+    assertEquals(resultado.sources[0].documentKey, "RM-899-2025");
+  } finally {
+    llm.restaurar();
+  }
+});
+
+Deno.test("una norma citada sin contenido extraido avisa en vez de inventar", async () => {
+  const llm = fakeLlm("no deberia usarse");
+
+  try {
+    const resultado = await answerConsulta(
+      fakeSupabase({
+        norma: {
+          id: "norma-2",
+          document_key: "RM-614-2026",
+          titulo: "Resolución Ministerial N° 614-2026/MINSA",
+          fecha_publicacion: "2026-08-27",
+          source_url: "https://www.digemid.minsa.gob.pe/rm-614-2026",
+          pdf_url: null,
+          estado_vigencia: "vigente",
+        },
+        paginasNorma: [],
+      }),
+      "interpreta la resolución ministerial 614-2026/minsa",
+      CONFIG,
+    );
+
+    assertEquals(resultado.sinEvidencia, true);
+    assertStringIncludes(resultado.answer, "RM-614-2026");
+    assertEquals(llm.cuerposEnviados.length, 0);
   } finally {
     llm.restaurar();
   }

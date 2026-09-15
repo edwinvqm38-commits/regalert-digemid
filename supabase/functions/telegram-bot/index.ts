@@ -2714,6 +2714,22 @@ function esConsultaDeConteoAlertas(pregunta: string): boolean {
   return preguntaCuantas && mencionaAlertas && ambitoTemporalAlertas(pregunta) !== null;
 }
 
+// Mismo problema que esConsultaDeUltimasAlertas, pero para leyes, decretos,
+// resoluciones y normativa en general: "cual es la ultima norma que subio
+// DIGEMID" tampoco lo responde una busqueda de texto (no es un dato escrito
+// en ningun documento), asi que se intercepta aqui y se resuelve con
+// getLatestNormativa(), igual que /normas.
+function esConsultaDeUltimaNormativa(pregunta: string): boolean {
+  const texto = normalizarTexto(pregunta);
+
+  const mencionaNormativa = /\b(norma|normativa|ley|decreto|resolucion)\b/.test(texto);
+  const pideRecencia = /\b(ultima|ultimas|ultimo|ultimos|reciente|recientes|nueva|nuevas|nuevo|nuevos)\b/.test(
+    texto,
+  );
+
+  return mencionaNormativa && pideRecencia;
+}
+
 const UMBRAL_CONTEXTO_BAJA_CALIDAD = 0.5;
 const UMBRAL_CONTEXTO_MEDIA_CALIDAD = 0.85;
 
@@ -3411,13 +3427,78 @@ async function transcribirNotaDeVoz(fileId: string): Promise<string> {
   return parts.map((p: any) => p.text ?? "").join("").trim();
 }
 
+const PROMPT_REFORMULACION_CONSULTA =
+  "Eres un asistente que reformula preguntas de usuarios en una consulta de " +
+  "busqueda de texto breve y precisa. Responde UNICAMENTE con la consulta " +
+  "reformulada (maximo 12 palabras, terminos legales/tecnicos concretos en " +
+  "español), sin explicaciones, sin comillas, sin texto adicional.";
+
+/** Reescribe la pregunta en una consulta mas apta para buscar_paginas_texto,
+ * para que preguntas vagas o mal formuladas encuentren paginas que una
+ * busqueda literal de esas palabras no encontraria. Si falla (o no hay
+ * proveedor configurado), se sigue con la pregunta original: es una ayuda,
+ * no un requisito. No reutiliza callDeepseek/callGemini porque esas usan
+ * CONSULTA_SYSTEM_PROMPT fijo; esta llamada necesita su propio prompt. */
+async function reformularConsultaParaBusqueda(question: string): Promise<string> {
+  try {
+    if (DEEPSEEK_API_KEY) {
+      const response = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            { role: "system", content: PROMPT_REFORMULACION_CONSULTA },
+            { role: "user", content: question },
+          ],
+          max_tokens: 60,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const texto = data.choices?.[0]?.message?.content?.trim();
+        if (texto) return texto;
+      }
+    } else if (GEMINI_API_KEY) {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: PROMPT_REFORMULACION_CONSULTA }] },
+            contents: [{ role: "user", parts: [{ text: question }] }],
+            generationConfig: { maxOutputTokens: 60 },
+          }),
+        },
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const parts = data.candidates?.[0]?.content?.parts ?? [];
+        const texto = parts.map((p: any) => p.text ?? "").join("").trim();
+        if (texto) return texto;
+      }
+    }
+  } catch (error) {
+    console.error("No se pudo reformular la consulta, se usa la pregunta original:", error);
+  }
+
+  return question;
+}
+
 async function answerConsulta(
   question: string,
 ): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
-  const chunks = await searchConsultaChunks(question);
+  const consultaBusqueda = await reformularConsultaParaBusqueda(question);
+  const chunks = await searchConsultaChunks(consultaBusqueda);
 
   if (!chunks.length) {
-    const suggestions = await suggestSimilarAlerts(question);
+    const suggestions = await suggestSimilarAlerts(consultaBusqueda);
 
     if (!suggestions.length) {
       return {
@@ -4784,6 +4865,25 @@ async function handleCommand(
         chatId,
         formatAlertList(titulo, rows),
         alertasMenu(),
+      );
+      return;
+    }
+
+    if (esConsultaDeUltimaNormativa(question)) {
+      const rows = await getLatestNormativa(8);
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: rows.length,
+        status: "ok_redirigido_normativa",
+      });
+
+      await sendMessage(
+        chatId,
+        formatNormativaList("📜 <b>Últimas leyes, reglamentos y decretos</b>", rows),
       );
       return;
     }

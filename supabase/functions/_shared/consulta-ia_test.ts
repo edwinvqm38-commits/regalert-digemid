@@ -16,6 +16,7 @@ import {
   buildConsultaContext,
   construirSystemPrompt,
   consultaSources,
+  pareceConsultaSobreUltimaNorma,
 } from "./consulta-ia.ts";
 
 const CHUNK_VERIFICADO = {
@@ -35,6 +36,7 @@ const CHUNK_VERIFICADO = {
 function fakeSupabase(opciones: {
   chunks?: unknown[];
   sugerencias?: unknown[];
+  normativaReciente?: unknown[];
 } = {}) {
   return {
     rpc(nombre: string) {
@@ -45,6 +47,25 @@ function fakeSupabase(opciones: {
         return Promise.resolve({ data: opciones.sugerencias ?? [], error: null });
       }
       return Promise.resolve({ data: [], error: null });
+    },
+    from() {
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                order() {
+                  return {
+                    limit() {
+                      return Promise.resolve({ data: opciones.normativaReciente ?? [], error: null });
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
     },
   };
 }
@@ -138,6 +159,10 @@ Deno.test("las fuentes no se repiten aunque un documento aporte varias páginas"
 });
 
 Deno.test("una consulta con evidencia devuelve respuesta y fuente trazable", async () => {
+  // La reformulación y la respuesta final usan el mismo modelo mockeado: la
+  // reformulación "responde" con este mismo texto, pero como solo se usa
+  // para buscar (y el fake ignora el argumento de búsqueda), no afecta el
+  // resultado — lo que importa es la ÚLTIMA llamada, la de la respuesta.
   const llm = fakeLlm("*La sanción es 0.5 UIT.*\n\n📌 Fuente: *DS-20-2024* — 25/10/2024, pag. 5");
 
   try {
@@ -153,16 +178,20 @@ Deno.test("una consulta con evidencia devuelve respuesta y fuente trazable", asy
     assertEquals(resultado.sources[0].page, 5);
     assertStringIncludes(resultado.answer, "0.5 UIT");
 
-    // El contexto documental viajó al modelo (no respondió de memoria).
-    assertStringIncludes(llm.cuerposEnviados[0], "DS-20-2024");
-    assertStringIncludes(llm.cuerposEnviados[0], "pagina 5");
+    // Dos llamadas al modelo: reformular la pregunta y generar la respuesta.
+    assertEquals(llm.cuerposEnviados.length, 2);
+    // El contexto documental viajó al modelo en la llamada de respuesta
+    // (no respondió de memoria).
+    const cuerpoRespuesta = llm.cuerposEnviados[llm.cuerposEnviados.length - 1];
+    assertStringIncludes(cuerpoRespuesta, "DS-20-2024");
+    assertStringIncludes(cuerpoRespuesta, "pagina 5");
   } finally {
     llm.restaurar();
   }
 });
 
-Deno.test("sin documentos relacionados se marca sinEvidencia y no se llama al modelo", async () => {
-  const llm = fakeLlm("no debería usarse");
+Deno.test("sin documentos relacionados se marca sinEvidencia y no se fabrica una respuesta", async () => {
+  const llm = fakeLlm("no debería usarse como respuesta final");
 
   try {
     const resultado = await answerConsulta(
@@ -174,14 +203,16 @@ Deno.test("sin documentos relacionados se marca sinEvidencia y no se llama al mo
     assertEquals(resultado.sinEvidencia, true);
     assertEquals(resultado.sources.length, 0);
     assertStringIncludes(resultado.answer, "No encontré documentos relacionados");
-    assertEquals(llm.cuerposEnviados.length, 0, "no debe gastarse una llamada al modelo");
+    // Solo la reformulación gasta modelo; sin evidencia jamás se gasta una
+    // llamada para FABRICAR una respuesta.
+    assertEquals(llm.cuerposEnviados.length, 1, "solo debe gastarse la reformulación, no una respuesta");
   } finally {
     llm.restaurar();
   }
 });
 
 Deno.test("sin coincidencia exacta se ofrecen alertas similares, no una conclusión", async () => {
-  const llm = fakeLlm("no debería usarse");
+  const llm = fakeLlm("no debería usarse como respuesta final");
 
   try {
     const resultado = await answerConsulta(
@@ -201,7 +232,59 @@ Deno.test("sin coincidencia exacta se ofrecen alertas similares, no una conclusi
     assertEquals(resultado.sinEvidencia, true);
     assertEquals(resultado.sources.length, 1);
     assertStringIncludes(resultado.answer, "No encontré una coincidencia exacta");
-    assertEquals(llm.cuerposEnviados.length, 0);
+    assertEquals(llm.cuerposEnviados.length, 1, "solo debe gastarse la reformulación, no una respuesta");
+  } finally {
+    llm.restaurar();
+  }
+});
+
+Deno.test("reformularConsultaParaBusqueda: si el modelo falla, se usa la pregunta original", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (() => Promise.reject(new Error("caída de red"))) as typeof fetch;
+
+  try {
+    const { reformularConsultaParaBusqueda } = await import("./consulta-ia.ts");
+    const resultado = await reformularConsultaParaBusqueda("pregunta cualquiera", CONFIG);
+    assertEquals(resultado, "pregunta cualquiera");
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+Deno.test("pareceConsultaSobreUltimaNorma detecta preguntas de reciencia", () => {
+  assert(pareceConsultaSobreUltimaNorma("¿Puedes explicarme la última norma que ha subido DIGEMID?"));
+  assert(pareceConsultaSobreUltimaNorma("cual es la norma mas reciente publicada"));
+  assert(pareceConsultaSobreUltimaNorma("dame la ley mas reciente"));
+  assert(!pareceConsultaSobreUltimaNorma("qué establece la Ley 29459"));
+  assert(!pareceConsultaSobreUltimaNorma("cuánto es la multa por no informar precios"));
+});
+
+Deno.test("una pregunta sobre la ultima norma se responde con datos ordenados por fecha, sin modelo", async () => {
+  const llm = fakeLlm("no debería usarse");
+
+  try {
+    const resultado = await answerConsulta(
+      fakeSupabase({
+        normativaReciente: [
+          {
+            document_key: "RM-793-2025",
+            title: "Aprueba lineamientos",
+            published_date: "2025-08-01",
+            published_date_display: "01/08/2025",
+            source_section: "resolucion-ministerial",
+            detail_url: "https://www.digemid.minsa.gob.pe/rm-793-2025",
+          },
+        ],
+      }),
+      "¿Puedes explicarme la última norma que ha subido a la página web de DIGEMID?",
+      CONFIG,
+    );
+
+    assertEquals(resultado.sinEvidencia, false);
+    assertEquals(resultado.sources.length, 1);
+    assertEquals(resultado.sources[0].documentKey, "RM-793-2025");
+    assertStringIncludes(resultado.answer, "RM-793-2025");
+    assertEquals(llm.cuerposEnviados.length, 0, "no debe gastarse ninguna llamada al modelo");
   } finally {
     llm.restaurar();
   }

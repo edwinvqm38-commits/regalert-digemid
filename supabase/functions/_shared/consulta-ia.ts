@@ -12,6 +12,8 @@
  * el contexto no alcanza, en vez de completar con conocimiento propio.
  */
 
+import { getLatestNormativa, tipoNormativa } from "./digemid-datos.ts";
+
 // deno-lint-ignore no-explicit-any
 export type SupabaseLike = any;
 
@@ -19,6 +21,54 @@ export type EstiloNegrita = "html" | "whatsapp";
 
 const UMBRAL_CONTEXTO_BAJA_CALIDAD = 0.5;
 const UMBRAL_CONTEXTO_MEDIA_CALIDAD = 0.85;
+
+function negritaPorEstilo(estilo: EstiloNegrita, texto: string): string {
+  return estilo === "html" ? `<b>${texto}</b>` : `*${texto}*`;
+}
+
+function normalizarParaPatron(texto: string): string {
+  return (texto ?? "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+}
+
+/** Detecta preguntas sobre "cual es la ultima/mas reciente norma", que la
+ * busqueda de texto NUNCA puede responder bien: el dato que se pide (que es
+ * lo mas reciente) no esta escrito dentro de ningun documento, es un hecho
+ * sobre el propio catalogo. Para esas se responde con datos ordenados por
+ * fecha en vez de dejar que el modelo adivine o se rinda sin sustento. */
+export function pareceConsultaSobreUltimaNorma(pregunta: string): boolean {
+  const normalizada = normalizarParaPatron(pregunta);
+  const patronRecienciaAntes = /(ultima|mas reciente|recien|nueva)s?\s+(norma|normativa|ley|decreto|resolucion|alerta)/;
+  const patronRecienciaDespues = /(norma|normativa|ley|decreto|resolucion|alerta).{0,25}(ultima|mas reciente|recien|nueva)/;
+  return patronRecienciaAntes.test(normalizada) || patronRecienciaDespues.test(normalizada);
+}
+
+// deno-lint-ignore no-explicit-any
+function formatUltimaNormativaComoRespuesta(rows: any[], estilo: EstiloNegrita): string {
+  const b = (t: string) => negritaPorEstilo(estilo, t);
+
+  if (!rows.length) {
+    return "No encontré normativa registrada en la base de datos.";
+  }
+
+  const lineas = [`${b("Últimas normas registradas por RegAlert")}:`, ""];
+  rows.forEach((row, indice) => {
+    lineas.push(
+      `${indice + 1}. ${b(`${tipoNormativa(row)} ${row.document_key}`)} — ` +
+        `${row.published_date_display ?? row.published_date ?? "sin fecha"}`,
+    );
+    if (row.title) lineas.push(String(row.title));
+  });
+  lineas.push(
+    "",
+    "Esto es lo más reciente que RegAlert tiene registrado; no equivale necesariamente al instante " +
+      "en que DIGEMID lo subió a su propia página web.",
+  );
+
+  return lineas.join("\n");
+}
 
 export function construirSystemPrompt(estilo: EstiloNegrita): string {
   const instruccionNegrita = estilo === "html"
@@ -271,15 +321,66 @@ export type RespuestaConsulta = {
   sinEvidencia: boolean;
 };
 
+const PROMPT_REFORMULACION =
+  "Eres un asistente que reformula preguntas de usuarios en una consulta de " +
+  "busqueda de texto breve y precisa. Responde UNICAMENTE con la consulta " +
+  "reformulada (maximo 12 palabras, terminos legales/tecnicos concretos en " +
+  "español), sin explicaciones, sin comillas, sin texto adicional.";
+
+/** Reescribe la pregunta del usuario en una consulta mas apta para la
+ * busqueda de texto (RPC buscar_paginas_texto), para que preguntas vagas o
+ * mal formuladas ("esa cosa de los precios raros de las boticas") encuentren
+ * paginas que una busqueda literal de esas palabras no encontraria. Si la
+ * reformulacion falla (o no hay proveedor configurado), se sigue con la
+ * pregunta original: esta reescritura es una ayuda, no un requisito. */
+export async function reformularConsultaParaBusqueda(
+  question: string,
+  config: ConfigConsultaIa,
+): Promise<string> {
+  try {
+    if (config.deepseekApiKey) {
+      const reformulada = await callDeepseek(config.deepseekApiKey, PROMPT_REFORMULACION, question);
+      return reformulada.trim() || question;
+    }
+    if (config.geminiApiKey) {
+      const reformulada = await callGemini(
+        config.geminiApiKey,
+        config.geminiModel,
+        PROMPT_REFORMULACION,
+        question,
+      );
+      return reformulada.trim() || question;
+    }
+  } catch (error) {
+    console.error("No se pudo reformular la consulta, se usa la pregunta original:", error);
+  }
+
+  return question;
+}
+
 export async function answerConsulta(
   supabase: SupabaseLike,
   question: string,
   config: ConfigConsultaIa,
 ): Promise<RespuestaConsulta> {
-  const chunks = await searchConsultaChunks(supabase, question);
+  // "¿cuál es la última norma...?" no lo responde ninguna busqueda de texto:
+  // lo que se pide no esta escrito en ningun documento, es un hecho sobre el
+  // catalogo. Se resuelve con datos ordenados por fecha, sin gastar ni una
+  // llamada al modelo.
+  if (pareceConsultaSobreUltimaNorma(question)) {
+    const rows = await getLatestNormativa(supabase, 5);
+    return {
+      answer: formatUltimaNormativaComoRespuesta(rows, config.estiloNegrita),
+      sources: rows.map((row) => ({ documentKey: row.document_key, url: row.detail_url })),
+      sinEvidencia: false,
+    };
+  }
+
+  const consultaBusqueda = await reformularConsultaParaBusqueda(question, config);
+  const chunks = await searchConsultaChunks(supabase, consultaBusqueda);
 
   if (!chunks.length) {
-    const suggestions = await suggestSimilarAlerts(supabase, question);
+    const suggestions = await suggestSimilarAlerts(supabase, consultaBusqueda);
 
     if (!suggestions.length) {
       return {

@@ -416,6 +416,12 @@ Deno.test("una norma citada por numero exacto se responde con su contenido real,
     assertStringIncludes(cuerpo, "RM-727-2025");
     assertStringIncludes(cuerpo, "deroga");
     assert(!cuerpo.includes("RM-899-2025"));
+
+    // La relacion normativa tambien llega al USUARIO, no solo al modelo:
+    // "a que otras normas afecta" no se contesta solo con el contexto que
+    // recibio el modelo, sino con un bloque visible en la respuesta final.
+    assertStringIncludes(resultado.answer, "Otras normas a tener en cuenta");
+    assertStringIncludes(resultado.answer, "listado anterior");
   } finally {
     llm.restaurar();
   }

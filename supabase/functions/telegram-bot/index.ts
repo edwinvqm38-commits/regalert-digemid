@@ -140,14 +140,31 @@ function escapeHtml(value: unknown): string {
     .replaceAll(">", "&gt;");
 }
 
+/** Reconoce en UNA sola pasada los bloques en negrita que el modelo puede
+ * haber usado, en cualquiera de los dos formatos (HTML real <b>texto</b> o
+ * markdown **texto**), y escapa todo lo demas por seguridad. Hacerlo en dos
+ * reemplazos sucesivos (primero markdown, despues HTML escapado) fallaba
+ * cuando el primer bloque <b> del mensaje no se convertia: el reemplazo de
+ * markdown de abajo podia insertar <b> reales ANTES de que el segundo
+ * reemplazo buscara el patron escapado, y una sola pasada evita esa
+ * interferencia por completo. */
 function formatConsultaAnswer(rawAnswer: string): string {
-  // Escapa todo primero (seguridad), y despues convierte negrita en
-  // cualquiera de los dos formatos que el modelo pueda haber usado:
-  // markdown (**texto**) o HTML real (<b>texto</b>, que quedo escapado).
-  const escaped = escapeHtml(rawAnswer);
-  return escaped
-    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-    .replace(/&lt;b&gt;(.+?)&lt;\/b&gt;/g, "<b>$1</b>");
+  const partes: string[] = [];
+  let posicion = 0;
+  const patronNegrita = /<b>([\s\S]+?)<\/b>|\*\*([\s\S]+?)\*\*/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = patronNegrita.exec(rawAnswer)) !== null) {
+    if (match.index > posicion) {
+      partes.push(escapeHtml(rawAnswer.slice(posicion, match.index)));
+    }
+    const contenido = match[1] ?? match[2] ?? "";
+    partes.push(`<b>${escapeHtml(contenido)}</b>`);
+    posicion = match.index + match[0].length;
+  }
+
+  partes.push(escapeHtml(rawAnswer.slice(posicion)));
+  return partes.join("");
 }
 
 function isAllowed(chatId: string): boolean {
@@ -3619,6 +3636,162 @@ function formatRelacionesComoContexto(relaciones: any[], norma: any): string {
   return lineas.join("\n");
 }
 
+/** Version legible para el USUARIO (no para el modelo) de las relaciones
+ * normativas de una norma: mismo contenido que formatRelacionesComoContexto,
+ * pero en <b> reales (sin escapar aqui — formatConsultaAnswer se encarga de
+ * escapar y convertir negrita en una sola pasada al armar el mensaje final,
+ * asi que escapar aqui tambien dejaria el texto escapado dos veces). */
+function formatRelacionesParaUsuario(relaciones: any[], norma: any): string {
+  if (!relaciones.length) return "";
+
+  const lineas = [
+    "",
+    "📚 <b>Otras normas a tener en cuenta</b> (relación detectada automáticamente, verifica antes de asumirla como definitiva):",
+  ];
+
+  for (const r of relaciones) {
+    const etiquetaEstado = r.estado === "verificada" ? "verificada" : "sin verificar por un humano";
+    if (r.norma_origen_id === norma.id) {
+      lineas.push(
+        `• <b>${norma.document_key}</b> ${r.tipo_relacion} a ${r.tipo_norma_afectada ?? "norma"} ` +
+          `${r.numero_afectada ?? "?"}-${r.anio_afectada ?? "?"}` +
+          (r.descripcion_afectada ? ` (${r.descripcion_afectada})` : "") +
+          ` — ${etiquetaEstado}.`,
+      );
+    } else {
+      lineas.push(
+        `• <b>${norma.document_key}</b> fue afectada (${r.tipo_relacion}) por ` +
+          `<b>${r.norma_origen_document_key ?? "otra norma"}</b> — ${etiquetaEstado}.`,
+      );
+    }
+  }
+
+  return lineas.join("\n");
+}
+
+/** Banner de marca para los reportes HTML especiales: un shield inline en
+ * SVG (sin depender de un archivo de logo que todavia no existe en el
+ * repo) para que el reporte no se vea generico. Si el usuario manda su
+ * logo real, esto se reemplaza por un <img> con ese archivo embebido. */
+const BANNER_MARCA_HTML = `
+  <div class="marca">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2L4 5v6c0 5 3.5 8.5 8 11 4.5-2.5 8-6 8-11V5l-8-3z" fill="#2563eb"/>
+      <path d="M9 12.5l2 2 4-4.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <span>RegAlert · Alertas DIGEMID Perú</span>
+  </div>`;
+
+/** Reporte especial en HTML de una norma puntual: mismo contenido real que
+ * se usa para responder (texto extraido pagina por pagina, con tablas
+ * reconstruidas via renderTextoConTablasHtml), mas la interpretacion que
+ * dio el modelo y las relaciones normativas conocidas — para que el
+ * usuario pueda revisar con calma que pagina/articulo sustenta cada punto,
+ * en vez de solo leer la respuesta corta del chat. */
+function construirReporteEspecialNorma(
+  norma: any,
+  paginas: any[],
+  relaciones: any[],
+  interpretacion: string,
+): string {
+  const filasPaginas = paginas
+    .map((p: any) => {
+      const advertencias = advertenciasDelBloque(paginaComoChunk(p, norma));
+      const aviso = advertencias.length
+        ? `<div class="aviso">⚠️ ${escapeHtml(advertencias.join("; "))}.</div>`
+        : "";
+      const texto = renderTextoConTablasHtml(p.text_normalized ?? p.text_raw ?? "");
+      return `
+        <section class="pagina">
+          <h3>Página ${p.page_number}</h3>
+          ${aviso}
+          ${texto}
+        </section>`;
+    })
+    .join("\n");
+
+  const filasRelaciones = relaciones.length
+    ? relaciones
+      .map((r: any) => {
+        const propia = r.norma_origen_id === norma.id;
+        const texto = propia
+          ? `${escapeHtml(norma.document_key)} <b>${escapeHtml(r.tipo_relacion)}</b> a ` +
+            `${escapeHtml(r.tipo_norma_afectada ?? "norma")} ${escapeHtml(String(r.numero_afectada ?? "?"))}-` +
+            `${escapeHtml(String(r.anio_afectada ?? "?"))}` +
+            (r.descripcion_afectada ? ` (${escapeHtml(r.descripcion_afectada)})` : "")
+          : `${escapeHtml(norma.document_key)} fue afectada (<b>${escapeHtml(r.tipo_relacion)}</b>) por ` +
+            `${escapeHtml(r.norma_origen_document_key ?? "otra norma")}`;
+        return `<li>${texto} — estado: ${escapeHtml(r.estado ?? "sin verificar")}.</li>`;
+      })
+      .join("\n")
+    : "<li>No se detectaron relaciones automáticas con otras normas.</li>";
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Reporte — ${escapeHtml(norma.document_key)}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #f7f8fa; }
+  .marca { display: flex; align-items: center; gap: 0.6rem; padding: 1rem 2rem; background: #0f172a; color: #fff; font-weight: 600; }
+  .marca span { font-size: 1.05rem; }
+  main { max-width: 860px; margin: 0 auto; padding: 1.5rem 2rem 3rem; }
+  .encabezado { background: #fff; border-radius: 10px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1.5rem; }
+  .encabezado h1 { font-size: 1.3rem; margin: 0 0 0.3rem; }
+  .encabezado .meta { color: #555; font-size: 0.9rem; }
+  .estado { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem; }
+  .estado.vigente { background: #dcfce7; color: #166534; }
+  .estado.otro { background: #fee2e2; color: #991b1b; }
+  section.bloque { background: #fff; border-radius: 10px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1.5rem; }
+  section.bloque h2 { font-size: 1.05rem; margin-top: 0; }
+  .interpretacion { white-space: pre-wrap; line-height: 1.5; }
+  .pagina { border-top: 1px solid #eee; padding-top: 1rem; margin-top: 1rem; }
+  .pagina:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+  .pagina h3 { font-size: 0.95rem; color: #333; margin: 0 0 0.5rem; }
+  .aviso { background: #fff8e1; border: 1px solid #ffe082; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; background: #fafafa; padding: 0.75rem; border-radius: 6px; }
+  ul.relaciones { padding-left: 1.2rem; font-size: 0.92rem; line-height: 1.6; }
+  table.tabla-extraida { border-collapse: collapse; width: auto; margin: 0.5rem 0; }
+  table.tabla-extraida th, table.tabla-extraida td { border: 1px solid #999; padding: 0.35rem 0.6rem; font-size: 0.8rem; max-width: 420px; word-break: break-word; }
+  table.tabla-extraida th { background: #eef2ff; }
+  footer { text-align: center; color: #888; font-size: 0.8rem; padding: 1rem; }
+</style>
+</head>
+<body>
+${BANNER_MARCA_HTML}
+<main>
+  <div class="encabezado">
+    <h1>${escapeHtml(norma.document_key)}</h1>
+    <div class="meta">${escapeHtml(norma.titulo ?? "")}</div>
+    <div class="meta">Publicada: ${escapeHtml(norma.fecha_publicacion ?? "sin fecha")}</div>
+    <span class="estado ${norma.estado_vigencia === "vigente" ? "vigente" : "otro"}">
+      ${escapeHtml(norma.estado_vigencia ?? "sin estado registrado")}
+    </span>
+  </div>
+
+  <section class="bloque">
+    <h2>🤖 Interpretación</h2>
+    <div class="interpretacion">${formatConsultaAnswer(interpretacion)}</div>
+  </section>
+
+  <section class="bloque">
+    <h2>📚 Normas relacionadas</h2>
+    <ul class="relaciones">${filasRelaciones}</ul>
+  </section>
+
+  <section class="bloque">
+    <h2>📄 Contenido extraído (página por página)</h2>
+    ${filasPaginas}
+  </section>
+</main>
+<footer>
+  Generado automáticamente por RegAlert a partir de la extracción documental de DIGEMID.
+  No reemplaza al Director Técnico ni a la autoridad sanitaria.
+</footer>
+</body>
+</html>`;
+}
+
 /** Responde sobre UNA norma puntual citada por numero exacto, usando su
  * contenido real (no busqueda difusa) y sus relaciones conocidas. Devuelve
  * null si no se encontro esa norma exacta en digemid_normas: quien llama
@@ -3626,7 +3799,10 @@ function formatRelacionesComoContexto(relaciones: any[], norma: any): string {
 async function responderNormaPuntual(
   documentKey: string,
   question: string,
-): Promise<{ answer: string; sources: { documentKey: string; url: string }[] } | null> {
+): Promise<
+  { answer: string; sources: { documentKey: string; url: string }[]; reportHtml?: string; reportFileName?: string }
+  | null
+> {
   const resultado = await getNormaConContenido(documentKey);
   if (!resultado) return null;
 
@@ -3634,7 +3810,7 @@ async function responderNormaPuntual(
 
   if (!paginas.length) {
     return {
-      answer: `Encontré <b>${escapeHtml(norma.document_key)}</b> en la base, pero su contenido todavía no fue ` +
+      answer: `Encontré <b>${norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
         "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
       sources: [{ documentKey: norma.document_key, url: norma.source_url ?? norma.pdf_url ?? "" }],
     };
@@ -3645,17 +3821,31 @@ async function responderNormaPuntual(
   const userContent = `Contexto:\n\n${context}${formatRelacionesComoContexto(relaciones, norma)}` +
     `\n\nPregunta: ${question}`;
   const sources = consultaSources(chunks);
+  const relacionesTexto = formatRelacionesParaUsuario(relaciones, norma);
+  const reportFileName = `reporte_${norma.document_key}.html`;
 
   if (DEEPSEEK_API_KEY) {
     try {
-      return { answer: await callDeepseek(userContent), sources };
+      const interpretacion = await callDeepseek(userContent);
+      return {
+        answer: `${interpretacion}${relacionesTexto}`,
+        sources,
+        reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
+        reportFileName,
+      };
     } catch (error) {
       console.error("DeepSeek falló, probando respaldo Gemini:", error);
     }
   }
 
   if (GEMINI_API_KEY) {
-    return { answer: await callGemini(userContent), sources };
+    const interpretacion = await callGemini(userContent);
+    return {
+      answer: `${interpretacion}${relacionesTexto}`,
+      sources,
+      reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
+      reportFileName,
+    };
   }
 
   throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
@@ -3663,7 +3853,9 @@ async function responderNormaPuntual(
 
 async function answerConsulta(
   question: string,
-): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
+): Promise<
+  { answer: string; sources: { documentKey: string; url: string }[]; reportHtml?: string; reportFileName?: string }
+> {
   // Si la pregunta cita una norma puntual por numero exacto ("Resolucion
   // Ministerial 727-2025"), no se usa busqueda difusa: se va directo a esa
   // norma en digemid_normas, con su contenido real y sus relaciones. La
@@ -5111,7 +5303,7 @@ async function handleCommand(
         );
       }
 
-      const { answer, sources } = await answerConsulta(question);
+      const { answer, sources, reportHtml, reportFileName } = await answerConsulta(question);
 
       const consultaId = await logConsulta({
         chatId,
@@ -5145,7 +5337,27 @@ async function handleCommand(
         }
       }
 
-      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
+      await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
+
+      // Cuando la pregunta cito una norma puntual (extraerReferenciaNormativa
+      // dentro de answerConsulta) hay un reporte HTML con el detalle completo
+      // pagina por pagina: se manda como documento aparte, sin bloquear la
+      // respuesta corta de arriba si esto llegara a fallar.
+      if (reportHtml && reportFileName) {
+        try {
+          await enviarDocumentoTexto(
+            chatId,
+            reportHtml,
+            reportFileName,
+            "text/html",
+            "📊 Reporte detallado (HTML) — contenido completo, página por página, y normas relacionadas.",
+          );
+        } catch (error) {
+          console.error("CONSULTA_REPORTE_ERROR:", error);
+        }
+      }
+
+      return new Response("OK", { status: 200 });
     } catch (error) {
       console.error("CONSULTA_ERROR:", error);
 

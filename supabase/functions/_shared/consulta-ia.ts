@@ -208,6 +208,41 @@ function formatRelacionesComoContexto(relaciones: any[], norma: any): string {
   return lineas.join("\n");
 }
 
+/** Version legible para el USUARIO (no para el modelo) de las relaciones
+ * normativas de una norma: mismo contenido que formatRelacionesComoContexto
+ * pero en negrita segun el estilo del canal, para que el usuario tambien
+ * vea "a que otras normas afecta o lo afectaron" sin tener que abrir el
+ * link ni pedirlo explicitamente. */
+// deno-lint-ignore no-explicit-any
+function formatRelacionesParaUsuario(relaciones: any[], norma: any, estilo: EstiloNegrita): string {
+  if (!relaciones.length) return "";
+
+  const b = (t: string) => negritaPorEstilo(estilo, t);
+  const lineas = [
+    "",
+    `${b("Otras normas a tener en cuenta")} (relación detectada automáticamente, verifica antes de asumirla como definitiva):`,
+  ];
+
+  for (const r of relaciones) {
+    const etiquetaEstado = r.estado === "verificada" ? "verificada" : "sin verificar por un humano";
+    if (r.norma_origen_id === norma.id) {
+      lineas.push(
+        `- ${b(norma.document_key)} ${r.tipo_relacion} a ${r.tipo_norma_afectada ?? "norma"} ` +
+          `${r.numero_afectada ?? "?"}-${r.anio_afectada ?? "?"}` +
+          (r.descripcion_afectada ? ` (${r.descripcion_afectada})` : "") +
+          ` — ${etiquetaEstado}.`,
+      );
+    } else {
+      lineas.push(
+        `- ${b(norma.document_key)} fue afectada (${r.tipo_relacion}) por ` +
+          `${b(r.norma_origen_document_key ?? "otra norma")} — ${etiquetaEstado}.`,
+      );
+    }
+  }
+
+  return lineas.join("\n");
+}
+
 /** Responde sobre UNA norma puntual citada por numero exacto, usando su
  * contenido real (no busqueda difusa) y sus relaciones conocidas. Devuelve
  * null si no se encontro esa norma exacta en digemid_normas: quien llama
@@ -238,21 +273,20 @@ async function responderNormaPuntual(
   const userContent = `Contexto:\n\n${buildConsultaContext(chunks)}${formatRelacionesComoContexto(relaciones, norma)}` +
     `\n\nPregunta: ${question}`;
   const sources = consultaSources(chunks);
+  const relacionesTexto = formatRelacionesParaUsuario(relaciones, norma, config.estiloNegrita);
 
   if (config.deepseekApiKey) {
     try {
-      return { answer: await callDeepseek(config.deepseekApiKey, systemPrompt, userContent), sources, sinEvidencia: false };
+      const interpretacion = await callDeepseek(config.deepseekApiKey, systemPrompt, userContent);
+      return { answer: `${interpretacion}${relacionesTexto}`, sources, sinEvidencia: false };
     } catch (error) {
       console.error("DeepSeek falló, probando respaldo Gemini:", error);
     }
   }
 
   if (config.geminiApiKey) {
-    return {
-      answer: await callGemini(config.geminiApiKey, config.geminiModel, systemPrompt, userContent),
-      sources,
-      sinEvidencia: false,
-    };
+    const interpretacion = await callGemini(config.geminiApiKey, config.geminiModel, systemPrompt, userContent);
+    return { answer: `${interpretacion}${relacionesTexto}`, sources, sinEvidencia: false };
   }
 
   throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");

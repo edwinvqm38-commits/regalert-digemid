@@ -168,7 +168,7 @@ function paginaComoChunk(pagina: any, norma: any) {
     published_date: norma.fecha_publicacion,
     page_number: pagina.page_number,
     text_content: pagina.text_normalized ?? pagina.text_raw ?? "",
-    detail_url: norma.source_url ?? norma.pdf_url ?? "",
+    detail_url: norma.pdf_url ?? norma.source_url ?? "",
     quality_score: pagina.quality_score,
     revisado_manual: pagina.revisado_manual,
     has_tables: pagina.has_tables,
@@ -263,7 +263,7 @@ async function responderNormaPuntual(
       answer: `Encontré ${negritaPorEstilo(config.estiloNegrita, norma.document_key)} en la base, pero su ` +
         "contenido todavía no fue extraído/revisado, así que no puedo interpretarla todavía. " +
         "Verifica directamente con el PDF oficial.",
-      sources: [{ documentKey: norma.document_key, url: norma.source_url ?? norma.pdf_url ?? "" }],
+      sources: [{ documentKey: norma.document_key, url: norma.pdf_url ?? norma.source_url ?? "" }],
       sinEvidencia: true,
     };
   }

@@ -140,31 +140,53 @@ function escapeHtml(value: unknown): string {
     .replaceAll(">", "&gt;");
 }
 
-/** Reconoce en UNA sola pasada los bloques en negrita que el modelo puede
- * haber usado, en cualquiera de los dos formatos (HTML real <b>texto</b> o
- * markdown **texto**), y escapa todo lo demas por seguridad. Hacerlo en dos
- * reemplazos sucesivos (primero markdown, despues HTML escapado) fallaba
- * cuando el primer bloque <b> del mensaje no se convertia: el reemplazo de
- * markdown de abajo podia insertar <b> reales ANTES de que el segundo
- * reemplazo buscara el patron escapado, y una sola pasada evita esa
- * interferencia por completo. */
+/** Formatea la negrita que el modelo puede haber usado, en cualquiera de
+ * los dos formatos (HTML real <b>texto</b> o markdown **texto**), y escapa
+ * todo lo demas por seguridad.
+ *
+ * El modelo a veces envuelve TODO el resumen en <b> y ADEMAS envuelve un
+ * termino clave adentro en su propio <b> anidado (HTML invalido: un <b>
+ * dentro de otro <b> no tiene sentido, pero el modelo lo escribe igual
+ * porque el prompt solo pide "usa <b> para el resumen" Y "usa <b> para
+ * terminos clave" sin aclarar que no se combinen). Confirmado en produccion
+ * con "<b>La <b>RM-727-2025/MINSA</b> no contiene ninguna tabla...</b>":
+ * un simple regex de a-o-b <b>...<\/b> empareja el <b> exterior con el
+ * primer <\/b> que encuentra (el del <b> interior), dejando el <\/b>
+ * exterior suelto como texto literal. Por eso esto colapsa cualquier nivel
+ * de anidamiento a un solo par <b>...</b> en vez de emparejar por regex. */
 function formatConsultaAnswer(rawAnswer: string): string {
-  const partes: string[] = [];
-  let posicion = 0;
-  const patronNegrita = /<b>([\s\S]+?)<\/b>|\*\*([\s\S]+?)\*\*/g;
-  let match: RegExpExecArray | null;
+  // Fase 1: markdown **texto** -> <b>texto</b> reales (sin escapar todavia;
+  // puede introducir mas anidamiento, la fase 2 lo colapsa igual).
+  const conNegritaHtml = rawAnswer.replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>");
 
-  while ((match = patronNegrita.exec(rawAnswer)) !== null) {
-    if (match.index > posicion) {
-      partes.push(escapeHtml(rawAnswer.slice(posicion, match.index)));
+  // Fase 2: recorre el texto token por token (<b>, </b>, o cualquier otra
+  // cosa) llevando la profundidad de anidamiento; solo emite el PRIMER <b>
+  // que abre y el <\/b> que lo cierra a profundidad 0, todo lo demas
+  // (aperturas/cierres anidados) se descarta sin emitir nada.
+  const tokens = conNegritaHtml.split(/(<b>|<\/b>)/);
+  let profundidad = 0;
+  let resultado = "";
+
+  for (const token of tokens) {
+    if (token === "<b>") {
+      if (profundidad === 0) resultado += "<b>";
+      profundidad++;
+      continue;
     }
-    const contenido = match[1] ?? match[2] ?? "";
-    partes.push(`<b>${escapeHtml(contenido)}</b>`);
-    posicion = match.index + match[0].length;
+    if (token === "</b>") {
+      if (profundidad > 0) {
+        profundidad--;
+        if (profundidad === 0) resultado += "</b>";
+      }
+      continue;
+    }
+    resultado += escapeHtml(token);
   }
 
-  partes.push(escapeHtml(rawAnswer.slice(posicion)));
-  return partes.join("");
+  // Si el modelo se olvido de cerrar la negrita, se cierra aqui en vez de
+  // dejar el tag abierto y romper el resto del mensaje.
+  if (profundidad > 0) resultado += "</b>";
+  return resultado;
 }
 
 function isAllowed(chatId: string): boolean {
@@ -2635,10 +2657,11 @@ function formatNormativaList(title: string, rows: any[]) {
     lines.push(
       `📅 ${escapeHtml(row.published_date_display ?? row.published_date ?? "Sin fecha")}`,
     );
-    lines.push(`🔗 ${escapeHtml(row.detail_url)}`);
-    if (row.file_url) {
-      lines.push(`📄 PDF: ${escapeHtml(row.file_url)}`);
-    }
+    // Un solo link, no los dos: el link de la pagina web de DIGEMID se cae
+    // o se reorganiza con el tiempo mas seguido que el PDF directo, asi que
+    // se prefiere el PDF cuando existe en vez de mostrar ambos.
+    const link = row.file_url || row.detail_url;
+    lines.push(`${row.file_url ? "📄" : "🔗"} ${escapeHtml(link)}`);
     lines.push("");
   }
 
@@ -3681,7 +3704,7 @@ function paginaComoChunk(pagina: any, norma: any) {
     published_date: norma.fecha_publicacion,
     page_number: pagina.page_number,
     text_content: pagina.text_normalized ?? pagina.text_raw ?? "",
-    detail_url: norma.source_url ?? norma.pdf_url ?? "",
+    detail_url: norma.pdf_url ?? norma.source_url ?? "",
     quality_score: pagina.quality_score,
     revisado_manual: pagina.revisado_manual,
     has_tables: pagina.has_tables,
@@ -3896,7 +3919,7 @@ async function responderNormaPuntual(
     return {
       answer: `Encontré <b>${norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
         "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
-      sources: [{ documentKey: norma.document_key, url: norma.source_url ?? norma.pdf_url ?? "" }],
+      sources: [{ documentKey: norma.document_key, url: norma.pdf_url ?? norma.source_url ?? "" }],
     };
   }
 

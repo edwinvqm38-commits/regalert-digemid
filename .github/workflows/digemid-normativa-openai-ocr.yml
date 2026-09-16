@@ -21,6 +21,7 @@ on:
           - todas-pendientes
           - calidad-baja
           - tablas-pendientes
+          - graficos-pendientes
       limit:
         description: "Maximo de paginas a procesar"
         required: false

@@ -67,12 +67,15 @@ def parse_args():
     parser.add_argument("--all-pages", action="store_true")
     parser.add_argument(
         "--filtro",
-        choices=["calidad-baja", "tablas-pendientes", "todas-pendientes"],
+        choices=["calidad-baja", "tablas-pendientes", "graficos-pendientes", "todas-pendientes"],
         default="calidad-baja",
         help=(
             "calidad-baja: quality_score < --quality-below (comportamiento previo). "
             "tablas-pendientes: has_tables=true y tabla_verificada=false. "
-            "todas-pendientes: union de las dos anteriores (lo que /normaestado marca como pendiente)."
+            "graficos-pendientes: posible_grafico=true y revisado_manual=false (una pagina con "
+            "grafico/imagen puede tener quality_score alto y sin tablas, asi que sin este filtro "
+            "nunca entraba como candidata a la verificacion por vision). "
+            "todas-pendientes: union de las tres anteriores (lo que /normaestado marca como pendiente)."
         ),
     )
     parser.add_argument("--apply", action="store_true")
@@ -118,21 +121,28 @@ def norm_text(value: str | None) -> str:
 
 PAGE_SELECT = (
     "id, norma_id, page_number, text_raw, text_normalized, extraction_method, "
-    "quality_score, has_tables, tabla_verificada, metadata"
+    "quality_score, has_tables, tabla_verificada, posible_grafico, revisado_manual, metadata"
 )
 
 
 def aplicar_filtro_pendientes(query, args):
     """Aplica el mismo criterio de 'pendiente' que ya usa /normaestado en el
     bot: calidad-baja (quality_score < umbral), tablas-pendientes (tabla
-    detectada sin verificar a mano) o la union de ambas."""
+    detectada sin verificar a mano), graficos-pendientes (imagen/grafico
+    detectado sin revisar a mano -- sin este filtro una pagina asi podia
+    tener quality_score alto y sin tablas, y nunca entraba como candidata a
+    pesar de que el heuristico de posible_grafico existe justo para esto) o
+    la union de las tres."""
     if args.filtro == "calidad-baja":
         return query.lt("quality_score", args.quality_below)
     if args.filtro == "tablas-pendientes":
         return query.eq("has_tables", True).eq("tabla_verificada", False)
+    if args.filtro == "graficos-pendientes":
+        return query.eq("posible_grafico", True).eq("revisado_manual", False)
     return query.or_(
         f"quality_score.lt.{args.quality_below},"
-        "and(has_tables.eq.true,tabla_verificada.eq.false)"
+        "and(has_tables.eq.true,tabla_verificada.eq.false),"
+        "and(posible_grafico.eq.true,revisado_manual.eq.false)"
     )
 
 

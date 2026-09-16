@@ -18,6 +18,7 @@ import {
   consultaSources,
   extraerReferenciaNormativa,
   pareceConsultaSobreUltimaNorma,
+  preguntaPideVerificacionVisual,
 } from "./consulta-ia.ts";
 
 const CHUNK_VERIFICADO = {
@@ -471,6 +472,135 @@ Deno.test("una norma citada sin contenido extraido avisa en vez de inventar", as
     assertEquals(resultado.sinEvidencia, true);
     assertStringIncludes(resultado.answer, "RM-614-2026");
     assertEquals(llm.cuerposEnviados.length, 0);
+  } finally {
+    llm.restaurar();
+  }
+});
+
+Deno.test("preguntaPideVerificacionVisual detecta preguntas sobre tablas/graficos", () => {
+  assert(preguntaPideVerificacionVisual("interpreta la tabla de la resolución ministerial 727-2025"));
+  assert(preguntaPideVerificacionVisual("qué dice el cuadro del anexo 1"));
+  assert(preguntaPideVerificacionVisual("explica el gráfico de la página 3"));
+  assert(!preguntaPideVerificacionVisual("interpreta la resolución ministerial 727-2025/minsa"));
+  assert(!preguntaPideVerificacionVisual("cuánto es la multa por no informar precios"));
+});
+
+/** Mock de fetch que distingue las 3 llamadas de red que puede hacer una
+ * norma puntual con pregunta sobre tabla/grafico: DeepSeek (respuesta
+ * principal), Gemini (verificacion visual) y la descarga del PDF (todo lo
+ * demas) — sin esto, un solo mock generico (como fakeLlm) no puede simular
+ * este flujo porque las 3 llamadas necesitan formas de respuesta distintas. */
+function fakeFetchConVision(respuestaPrincipal: string, respuestaVisual: string) {
+  const original = globalThis.fetch;
+  const llamadas: string[] = [];
+
+  globalThis.fetch = ((url: string | URL | Request) => {
+    const urlStr = String(url);
+    llamadas.push(urlStr);
+
+    if (urlStr.includes("deepseek.com")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ choices: [{ message: { content: respuestaPrincipal } }] }),
+          { status: 200 },
+        ),
+      );
+    }
+
+    if (urlStr.includes("generativelanguage.googleapis.com")) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: respuestaVisual }] } }] }),
+          { status: 200 },
+        ),
+      );
+    }
+
+    // Cualquier otra URL se asume la descarga del PDF.
+    return Promise.resolve(new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 }));
+  }) as typeof fetch;
+
+  return { llamadas, restaurar: () => { globalThis.fetch = original; } };
+}
+
+Deno.test("una pregunta sobre una tabla puntual agrega verificacion visual del PDF real", async () => {
+  const mock = fakeFetchConVision(
+    "*Escala de sanciones...*\n\n📌 Fuente: *RM-727-2025* — 2025-08-01, pag. 6",
+    "La tabla tiene 3 columnas: infracción, farmacia y botica, con celdas combinadas en la fila 1.",
+  );
+
+  try {
+    const resultado = await answerConsulta(
+      fakeSupabase({
+        norma: {
+          id: "norma-3",
+          document_key: "RM-727-2025",
+          titulo: "Resolución Ministerial N° 727-2025/MINSA",
+          fecha_publicacion: "2025-08-01",
+          source_url: "https://www.digemid.minsa.gob.pe/rm-727-2025",
+          pdf_url: "https://www.digemid.minsa.gob.pe/rm-727-2025.pdf",
+          estado_vigencia: "vigente",
+        },
+        paginasNorma: [
+          {
+            page_number: 6,
+            text_normalized: "Tabla de escala de sanciones (texto aplanado, poco confiable)",
+            text_raw: null,
+            quality_score: 0.6,
+            revisado_manual: false,
+            has_tables: true,
+            posible_formula: false,
+          },
+        ],
+        relacionesNorma: [],
+      }),
+      "interpreta la tabla de sanciones de la resolución ministerial 727-2025/minsa",
+      { ...CONFIG, geminiApiKey: "clave-gemini-prueba" },
+    );
+
+    assertEquals(resultado.sinEvidencia, false);
+    assertStringIncludes(resultado.answer, "Verificación visual del PDF");
+    assertStringIncludes(resultado.answer, "celdas combinadas");
+    assert(mock.llamadas.some((u) => u.includes("rm-727-2025.pdf")));
+    assert(mock.llamadas.some((u) => u.includes("generativelanguage.googleapis.com")));
+  } finally {
+    mock.restaurar();
+  }
+});
+
+Deno.test("sin GEMINI_API_KEY configurada, una pregunta sobre tabla no intenta verificacion visual", async () => {
+  const llm = fakeLlm("*Respuesta sin vision*\n\n📌 Fuente: *RM-727-2025* — 2025-08-01, pag. 6");
+
+  try {
+    const resultado = await answerConsulta(
+      fakeSupabase({
+        norma: {
+          id: "norma-4",
+          document_key: "RM-727-2025",
+          titulo: "Resolución Ministerial N° 727-2025/MINSA",
+          fecha_publicacion: "2025-08-01",
+          source_url: "https://www.digemid.minsa.gob.pe/rm-727-2025",
+          pdf_url: "https://www.digemid.minsa.gob.pe/rm-727-2025.pdf",
+          estado_vigencia: "vigente",
+        },
+        paginasNorma: [
+          {
+            page_number: 6,
+            text_normalized: "Tabla de escala de sanciones",
+            text_raw: null,
+            quality_score: 0.6,
+            revisado_manual: false,
+            has_tables: true,
+            posible_formula: false,
+          },
+        ],
+        relacionesNorma: [],
+      }),
+      "interpreta la tabla de sanciones de la resolución ministerial 727-2025/minsa",
+      CONFIG,
+    );
+
+    assert(!resultado.answer.includes("Verificación visual del PDF"));
   } finally {
     llm.restaurar();
   }

@@ -2862,6 +2862,90 @@ async function callGemini(userContent: string): Promise<string> {
   return parts.map((p: any) => p.text ?? "").join("");
 }
 
+/** Detecta que la pregunta pide especificamente el contenido de una tabla,
+ * cuadro, anexo, grafico o imagen: son justo los casos donde el texto ya
+ * extraido (aplanado por OCR/pdfplumber) es menos confiable, asi que ahi
+ * conviene el costo extra de mandarle el PDF real a un modelo con vision en
+ * vez de conformarse con el texto plano. */
+function preguntaPideVerificacionVisual(pregunta: string): boolean {
+  const normalizada = normalizarTexto(pregunta);
+  return /\b(tabla|cuadro|anexo|grafico|imagen|figura|diagrama|escala de (infraccion|sancion))/.test(normalizada);
+}
+
+/** Tope de tamaño del PDF para mandarlo inline a Gemini: la API acepta
+ * datos inline hasta ~20MB en la request; se deja margen para el resto del
+ * payload en vez de pegarle justo al limite. */
+const MAX_BYTES_PDF_INLINE = 18 * 1024 * 1024;
+
+/** Codifica un ArrayBuffer a base64 en bloques: hacerlo de una sola pasada
+ * con String.fromCharCode(...bytes) revienta el limite de argumentos de la
+ * funcion para un PDF de varios MB. */
+function arrayBufferABase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const TAMANO_BLOQUE = 8192;
+  let binario = "";
+  for (let i = 0; i < bytes.length; i += TAMANO_BLOQUE) {
+    binario += String.fromCharCode(...bytes.subarray(i, i + TAMANO_BLOQUE));
+  }
+  return btoa(binario);
+}
+
+/** Le manda el PDF real (no el texto ya extraido) a Gemini como documento
+ * nativo: a diferencia del OCR/pdfplumber de la extraccion, un modelo con
+ * vision SI puede leer una tabla con celdas combinadas o describir un
+ * grafico, porque esta viendo el render real de la pagina. Devuelve null
+ * (nunca lanza) si el PDF no esta disponible, es muy grande, o la llamada
+ * falla — es un complemento opcional a la respuesta de texto, no un
+ * requisito. */
+async function intentarVerificacionVisual(norma: any, question: string): Promise<string | null> {
+  const pdfUrl = norma.pdf_url || norma.source_url;
+  if (!pdfUrl || !GEMINI_API_KEY) return null;
+
+  try {
+    const respuestaPdf = await fetch(pdfUrl);
+    if (!respuestaPdf.ok) return null;
+
+    const buffer = await respuestaPdf.arrayBuffer();
+    if (buffer.byteLength === 0 || buffer.byteLength > MAX_BYTES_PDF_INLINE) return null;
+
+    const base64Pdf = arrayBufferABase64(buffer);
+    const systemPrompt =
+      "Eres un asistente que responde preguntas sobre tablas, cuadros, anexos o graficos de un " +
+      "documento oficial de DIGEMID (Peru), mirando el PDF real adjunto. Cita la pagina exacta. " +
+      "Si la tabla tiene celdas combinadas, describe la combinacion en vez de fingir una grilla " +
+      "simple. Si no encuentras lo que se pregunta en el documento, dilo explicitamente.";
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemPrompt }] },
+          contents: [{
+            role: "user",
+            parts: [
+              { inline_data: { mime_type: "application/pdf", data: base64Pdf } },
+              { text: `Documento: ${norma.document_key}\n\nPregunta: ${question}` },
+            ],
+          }],
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      },
+    );
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const texto = parts.map((p: any) => p.text ?? "").join("").trim();
+    return texto || null;
+  } catch (error) {
+    console.error("Verificacion visual del PDF falló (se sigue con la respuesta de texto):", error);
+    return null;
+  }
+}
+
 function consultaSources(chunks: any[]) {
   const seen = new Set<string>();
   const sources: { documentKey: string; url: string; page: number }[] = [];
@@ -3824,11 +3908,23 @@ async function responderNormaPuntual(
   const relacionesTexto = formatRelacionesParaUsuario(relaciones, norma);
   const reportFileName = `reporte_${norma.document_key}.html`;
 
+  // Si preguntan puntualmente por una tabla/cuadro/grafico, el texto ya
+  // extraido (aplanado por OCR/pdfplumber) es justo el menos confiable para
+  // eso: se complementa con una lectura del PDF real via un modelo con
+  // vision. Es un extra opcional (nunca lanza, nunca bloquea la respuesta
+  // de texto normal si falla o no hay GEMINI_API_KEY configurada).
+  const verificacionVisual = preguntaPideVerificacionVisual(question)
+    ? await intentarVerificacionVisual(norma, question)
+    : null;
+  const bloqueVisual = verificacionVisual
+    ? `\n\n<b>🔎 Verificación visual del PDF (tabla/gráfico)</b>:\n${verificacionVisual}`
+    : "";
+
   if (DEEPSEEK_API_KEY) {
     try {
       const interpretacion = await callDeepseek(userContent);
       return {
-        answer: `${interpretacion}${relacionesTexto}`,
+        answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`,
         sources,
         reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
         reportFileName,
@@ -3841,7 +3937,7 @@ async function responderNormaPuntual(
   if (GEMINI_API_KEY) {
     const interpretacion = await callGemini(userContent);
     return {
-      answer: `${interpretacion}${relacionesTexto}`,
+      answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`,
       sources,
       reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
       reportFileName,

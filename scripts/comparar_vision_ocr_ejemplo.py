@@ -23,10 +23,19 @@ import argparse
 import base64
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 
 import requests
+
+# Al correr "python scripts/comparar_vision_ocr_ejemplo.py" directamente
+# (no via -m), sys.path[0] queda en scripts/, no en la raiz del repo, y
+# "from scripts.X import ..." falla con ModuleNotFoundError. Mismo fix que
+# ya usa scripts/vincular_normativa_identidad.py para este mismo problema.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 from scripts.ocr_normativa_openai_pages import (
     NORMAS_TABLE,

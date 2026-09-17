@@ -233,50 +233,37 @@ def main():
 
     resultados: dict[str, dict] = {}
 
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        logger.info("Transcribiendo con OpenAI (%s)...", args.openai_model)
+    def _transcribir(nombre: str, key: str | None, funcion, *args_funcion) -> dict:
+        if not key:
+            return {}
+        logger.info("Transcribiendo con %s...", nombre)
         try:
-            resultados[f"OpenAI ({args.openai_model})"] = {
-                "resultado": transcribe_page_openai(
-                    openai_key, args.openai_model, "original", args.document_key,
-                    norma.get("titulo"), args.page, image_base64,
-                ),
-            }
+            resultado = funcion(*args_funcion)
+            logger.info(
+                "%s OK: %s caracteres de transcripcion", nombre, len(resultado.get("transcripcion") or ""),
+            )
+            return {"resultado": resultado}
         except Exception as error:  # noqa: BLE001 -- se reporta, no se detiene el resto
-            resultados[f"OpenAI ({args.openai_model})"] = {"error": str(error)}
-    else:
-        resultados[f"OpenAI ({args.openai_model})"] = {}
+            logger.error("%s fallo: %s", nombre, error)
+            return {"error": str(error)}
 
-    openrouter_key = os.getenv("OPENROUTER_API_KEY")
-    if openrouter_key:
-        logger.info("Transcribiendo con OpenRouter (%s)...", args.openrouter_model)
-        try:
-            resultados[f"OpenRouter ({args.openrouter_model})"] = {
-                "resultado": transcribe_page_openrouter(
-                    openrouter_key, args.openrouter_model, args.document_key,
-                    norma.get("titulo"), args.page, image_base64,
-                ),
-            }
-        except Exception as error:  # noqa: BLE001
-            resultados[f"OpenRouter ({args.openrouter_model})"] = {"error": str(error)}
-    else:
-        resultados[f"OpenRouter ({args.openrouter_model})"] = {}
+    resultados[f"OpenAI ({args.openai_model})"] = _transcribir(
+        "OpenAI", os.getenv("OPENAI_API_KEY"), transcribe_page_openai,
+        os.getenv("OPENAI_API_KEY"), args.openai_model, "original", args.document_key,
+        norma.get("titulo"), args.page, image_base64,
+    )
 
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if gemini_key:
-        logger.info("Transcribiendo con Gemini (%s)...", args.gemini_model)
-        try:
-            resultados[f"Gemini ({args.gemini_model})"] = {
-                "resultado": transcribe_page_gemini(
-                    gemini_key, args.gemini_model, args.document_key,
-                    norma.get("titulo"), args.page, image_base64,
-                ),
-            }
-        except Exception as error:  # noqa: BLE001
-            resultados[f"Gemini ({args.gemini_model})"] = {"error": str(error)}
-    else:
-        resultados[f"Gemini ({args.gemini_model})"] = {}
+    resultados[f"OpenRouter ({args.openrouter_model})"] = _transcribir(
+        "OpenRouter", os.getenv("OPENROUTER_API_KEY"), transcribe_page_openrouter,
+        os.getenv("OPENROUTER_API_KEY"), args.openrouter_model, args.document_key,
+        norma.get("titulo"), args.page, image_base64,
+    )
+
+    resultados[f"Gemini ({args.gemini_model})"] = _transcribir(
+        "Gemini", os.getenv("GEMINI_API_KEY"), transcribe_page_gemini,
+        os.getenv("GEMINI_API_KEY"), args.gemini_model, args.document_key,
+        norma.get("titulo"), args.page, image_base64,
+    )
 
     html = construir_reporte(args.document_key, args.page, actual, resultados)
     Path(args.output).write_text(html, encoding="utf-8")

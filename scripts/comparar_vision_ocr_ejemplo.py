@@ -41,6 +41,7 @@ from scripts.ocr_normativa_openai_pages import (
     NORMAS_TABLE,
     PAGE_TABLE,
     PROMPT_TRANSCRIPCION,
+    _html_escape,
     build_replacement_text,
     diff_resaltado_html,
     download_pdf_bytes,
@@ -142,13 +143,24 @@ def _bloque_modelo(nombre: str, resultado: dict | None, error: str | None, actua
     advertencias = resultado.get("advertencias") or []
     confianza = resultado.get("confianza_estimada")
 
+    # El diff palabra-por-palabra es util para ver CUANTO cambio, pero una
+    # tabla se ve ilegible resaltada asi (rompe la alineacion visual de
+    # filas/columnas); por eso se agrega tambien la transcripcion propuesta
+    # tal cual, sin marcar diferencias, como vista principal.
+    propuesto_html = _html_escape(propuesto) or "<i>(vacío)</i>"
+
     return f"""
     <section class="modelo">
       <h2>{nombre}</h2>
       <p class="meta">Cambio vs. texto actual: <b>{proporcion:.0%}</b> de palabras distintas
         {f"· Confianza estimada: <b>{confianza}</b>" if confianza is not None else ""}</p>
       {f'<p class="aviso">⚠️ {", ".join(advertencias)}</p>' if advertencias else ""}
-      <pre>{diff_html}</pre>
+      <h3>Transcripción propuesta</h3>
+      <pre>{propuesto_html}</pre>
+      <details>
+        <summary>Ver diferencias resaltadas contra el texto actual</summary>
+        <pre>{diff_html}</pre>
+      </details>
     </section>"""
 
 
@@ -171,6 +183,8 @@ def construir_reporte(document_key: str, page_number: int, actual: str, resultad
   .modelo h2 {{ margin-top: 0; font-size: 1.05rem; }}
   .meta {{ color: #555; font-size: 0.85rem; }}
   .aviso {{ background: #fff8e1; border: 1px solid #ffe082; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; }}
+  h3 {{ font-size: 0.9rem; color: #333; margin: 1rem 0 0.4rem; }}
+  details summary {{ cursor: pointer; font-size: 0.85rem; color: #555; margin-top: 0.75rem; }}
   pre {{ white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; background: #fafafa; padding: 0.75rem; border-radius: 6px; }}
   del {{ background: #fee2e2; text-decoration: line-through; }}
   ins {{ background: #dcfce7; text-decoration: none; }}

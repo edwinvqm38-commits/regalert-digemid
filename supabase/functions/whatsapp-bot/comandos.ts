@@ -145,3 +145,33 @@ export function parsearComando(textoEntrante: string): ComandoParseado {
 
   return { comando: "desconocido", argumento: "", textoOriginal };
 }
+
+/** Comandos de administracion (§ solo accesibles para wa_id en la lista de
+ * admins, verificado en index.ts). Se parsean aparte de parsearComando()
+ * para que un usuario normal que escriba "admin algo" no dispare nada por
+ * accidente: sin autorizacion, este resultado simplemente no se usa. */
+export type ComandoAdmin =
+  | { tipo: "usuarios" }
+  | { tipo: "vencen"; dias: number };
+
+const VENCEN_DIAS_DEFECTO = 3;
+const VENCEN_DIAS_MAXIMO = 30;
+
+export function parsearComandoAdmin(textoEntrante: string): ComandoAdmin | null {
+  const sinBarra = (textoEntrante ?? "").trim().replace(/^\//, "").trim();
+  const normalizado = normalizarTexto(sinBarra);
+
+  if (!normalizado.startsWith("admin")) return null;
+
+  const resto = normalizado.slice("admin".length).trim();
+
+  if (resto === "usuarios") return { tipo: "usuarios" };
+
+  const matchVencen = resto.match(/^vencen(?:\s+(\d+))?$/);
+  if (matchVencen) {
+    const diasPedidos = matchVencen[1] ? parseInt(matchVencen[1], 10) : VENCEN_DIAS_DEFECTO;
+    return { tipo: "vencen", dias: Math.max(1, Math.min(diasPedidos, VENCEN_DIAS_MAXIMO)) };
+  }
+
+  return null;
+}

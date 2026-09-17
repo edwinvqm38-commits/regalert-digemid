@@ -86,6 +86,14 @@ export const TEXTO_NO_RECONOCIDO = [
   TEXTO_MENU,
 ].join("\n");
 
+export const TEXTO_PRUEBA_VENCIDA = [
+  negrita("⏰ Tu prueba gratuita de RegAlert DIGEMID terminó"),
+  "",
+  "Para seguir consultando alertas, normativa y hacer preguntas con IA, activa un plan.",
+  "",
+  "Escríbenos a través de nuestros canales de contacto para coordinar tu suscripción.",
+].join("\n");
+
 export const TEXTO_SOLO_TEXTO = [
   "Por ahora solo puedo leer mensajes de *texto*.",
   "",
@@ -224,6 +232,59 @@ export function formatNormativaListWhatsApp(titulo: string, rows: any[]): string
   lineas.push(
     "ℹ️ Detección automática por título/metadata; el contenido aún no pasa por el proceso de verificación de fidelidad.",
   );
+
+  return lineas.join("\n");
+}
+
+type ResumenUsuarioAdmin = {
+  waId: string;
+  nombrePerfil: string | null;
+  nivel: string;
+  diasRestantesPrueba: number | null;
+};
+
+function estadoUsuarioAdmin(usuario: ResumenUsuarioAdmin): string {
+  if (usuario.nivel !== "gratis") return `Plan ${negrita(usuario.nivel)}`;
+  if (usuario.diasRestantesPrueba && usuario.diasRestantesPrueba > 0) {
+    return `Prueba: ${usuario.diasRestantesPrueba}d restantes`;
+  }
+  return "Prueba vencida";
+}
+
+/** Listado de administracion: usuarios mas recientes con su estado actual. */
+export function formatAdminUsuariosWhatsApp(usuarios: ResumenUsuarioAdmin[]): string {
+  const titulo = "👤 Usuarios de WhatsApp";
+
+  if (!usuarios.length) {
+    return `${negrita(titulo)}\n\nNo hay usuarios registrados todavía.`;
+  }
+
+  const lineas = [negrita(`${titulo} (${usuarios.length} más recientes)`), ""];
+  for (const usuario of usuarios) {
+    lineas.push(
+      `• ${usuario.nombrePerfil || "sin nombre"} (${usuario.waId}) — ${estadoUsuarioAdmin(usuario)}`,
+    );
+  }
+
+  return lineas.join("\n");
+}
+
+/** Listado de administracion: usuarios en plan gratis por vencer dentro de
+ * la ventana pedida. Solo informa; no envía nada a esos usuarios. */
+export function formatAdminVencenWhatsApp(usuarios: ResumenUsuarioAdmin[], diasVentana: number): string {
+  const titulo = `⏳ Pruebas que vencen en ${diasVentana} ${diasVentana === 1 ? "día" : "días"} o menos`;
+
+  if (!usuarios.length) {
+    return `${negrita(titulo)}\n\nNadie está por vencer en esa ventana.`;
+  }
+
+  const lineas = [negrita(titulo), ""];
+  for (const usuario of usuarios) {
+    lineas.push(
+      `• ${usuario.nombrePerfil || "sin nombre"} (${usuario.waId}) — ` +
+        `${usuario.diasRestantesPrueba} ${usuario.diasRestantesPrueba === 1 ? "día" : "días"} restantes`,
+    );
+  }
 
   return lineas.join("\n");
 }

@@ -1,0 +1,65 @@
+name: DIGEMID - Comparar Vision OCR (ejemplo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      document_key:
+        description: "Norma a usar de ejemplo (debe tener PDF ya subido)"
+        required: true
+        default: "DS-020-2024"
+        type: string
+      page:
+        description: "Numero de pagina a comparar (la tabla de infracciones de DS-020-2024 esta en la pagina 4)"
+        required: true
+        default: "4"
+        type: string
+
+jobs:
+  comparar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generar comparacion
+        run: |
+          python scripts/comparar_vision_ocr_ejemplo.py \
+            --document-key "${{ inputs.document_key }}" \
+            --page "${{ inputs.page }}" \
+            --output comparacion_vision_ocr.html
+
+      - name: Enviar reporte a Telegram
+        run: |
+          python scripts/send_telegram_document.py comparacion_vision_ocr.html \
+            --caption "📊 Comparación vision OCR — ${{ inputs.document_key }} pág. ${{ inputs.page }}"
+
+      - name: Subir reporte como artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparacion-vision-ocr
+          path: comparacion_vision_ocr.html
+          retention-days: 14

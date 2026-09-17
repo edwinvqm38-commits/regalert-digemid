@@ -140,14 +140,53 @@ function escapeHtml(value: unknown): string {
     .replaceAll(">", "&gt;");
 }
 
+/** Formatea la negrita que el modelo puede haber usado, en cualquiera de
+ * los dos formatos (HTML real <b>texto</b> o markdown **texto**), y escapa
+ * todo lo demas por seguridad.
+ *
+ * El modelo a veces envuelve TODO el resumen en <b> y ADEMAS envuelve un
+ * termino clave adentro en su propio <b> anidado (HTML invalido: un <b>
+ * dentro de otro <b> no tiene sentido, pero el modelo lo escribe igual
+ * porque el prompt solo pide "usa <b> para el resumen" Y "usa <b> para
+ * terminos clave" sin aclarar que no se combinen). Confirmado en produccion
+ * con "<b>La <b>RM-727-2025/MINSA</b> no contiene ninguna tabla...</b>":
+ * un simple regex de a-o-b <b>...<\/b> empareja el <b> exterior con el
+ * primer <\/b> que encuentra (el del <b> interior), dejando el <\/b>
+ * exterior suelto como texto literal. Por eso esto colapsa cualquier nivel
+ * de anidamiento a un solo par <b>...</b> en vez de emparejar por regex. */
 function formatConsultaAnswer(rawAnswer: string): string {
-  // Escapa todo primero (seguridad), y despues convierte negrita en
-  // cualquiera de los dos formatos que el modelo pueda haber usado:
-  // markdown (**texto**) o HTML real (<b>texto</b>, que quedo escapado).
-  const escaped = escapeHtml(rawAnswer);
-  return escaped
-    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-    .replace(/&lt;b&gt;(.+?)&lt;\/b&gt;/g, "<b>$1</b>");
+  // Fase 1: markdown **texto** -> <b>texto</b> reales (sin escapar todavia;
+  // puede introducir mas anidamiento, la fase 2 lo colapsa igual).
+  const conNegritaHtml = rawAnswer.replace(/\*\*([\s\S]+?)\*\*/g, "<b>$1</b>");
+
+  // Fase 2: recorre el texto token por token (<b>, </b>, o cualquier otra
+  // cosa) llevando la profundidad de anidamiento; solo emite el PRIMER <b>
+  // que abre y el <\/b> que lo cierra a profundidad 0, todo lo demas
+  // (aperturas/cierres anidados) se descarta sin emitir nada.
+  const tokens = conNegritaHtml.split(/(<b>|<\/b>)/);
+  let profundidad = 0;
+  let resultado = "";
+
+  for (const token of tokens) {
+    if (token === "<b>") {
+      if (profundidad === 0) resultado += "<b>";
+      profundidad++;
+      continue;
+    }
+    if (token === "</b>") {
+      if (profundidad > 0) {
+        profundidad--;
+        if (profundidad === 0) resultado += "</b>";
+      }
+      continue;
+    }
+    resultado += escapeHtml(token);
+  }
+
+  // Si el modelo se olvido de cerrar la negrita, se cierra aqui en vez de
+  // dejar el tag abierto y romper el resto del mensaje.
+  if (profundidad > 0) resultado += "</b>";
+  return resultado;
 }
 
 function isAllowed(chatId: string): boolean {
@@ -2618,10 +2657,11 @@ function formatNormativaList(title: string, rows: any[]) {
     lines.push(
       `📅 ${escapeHtml(row.published_date_display ?? row.published_date ?? "Sin fecha")}`,
     );
-    lines.push(`🔗 ${escapeHtml(row.detail_url)}`);
-    if (row.file_url) {
-      lines.push(`📄 PDF: ${escapeHtml(row.file_url)}`);
-    }
+    // Un solo link, no los dos: el link de la pagina web de DIGEMID se cae
+    // o se reorganiza con el tiempo mas seguido que el PDF directo, asi que
+    // se prefiere el PDF cuando existe en vez de mostrar ambos.
+    const link = row.file_url || row.detail_url;
+    lines.push(`${row.file_url ? "📄" : "🔗"} ${escapeHtml(link)}`);
     lines.push("");
   }
 
@@ -2712,6 +2752,22 @@ function esConsultaDeConteoAlertas(pregunta: string): boolean {
   const mencionaAlertas = /alerta/.test(texto);
 
   return preguntaCuantas && mencionaAlertas && ambitoTemporalAlertas(pregunta) !== null;
+}
+
+// Mismo problema que esConsultaDeUltimasAlertas, pero para leyes, decretos,
+// resoluciones y normativa en general: "cual es la ultima norma que subio
+// DIGEMID" tampoco lo responde una busqueda de texto (no es un dato escrito
+// en ningun documento), asi que se intercepta aqui y se resuelve con
+// getLatestNormativa(), igual que /normas.
+function esConsultaDeUltimaNormativa(pregunta: string): boolean {
+  const texto = normalizarTexto(pregunta);
+
+  const mencionaNormativa = /\b(norma|normativa|ley|decreto|resolucion)\b/.test(texto);
+  const pideRecencia = /\b(ultima|ultimas|ultimo|ultimos|reciente|recientes|nueva|nuevas|nuevo|nuevos)\b/.test(
+    texto,
+  );
+
+  return mencionaNormativa && pideRecencia;
 }
 
 const UMBRAL_CONTEXTO_BAJA_CALIDAD = 0.5;
@@ -2827,6 +2883,90 @@ async function callGemini(userContent: string): Promise<string> {
   const data = await response.json();
   const parts = data.candidates?.[0]?.content?.parts ?? [];
   return parts.map((p: any) => p.text ?? "").join("");
+}
+
+/** Detecta que la pregunta pide especificamente el contenido de una tabla,
+ * cuadro, anexo, grafico o imagen: son justo los casos donde el texto ya
+ * extraido (aplanado por OCR/pdfplumber) es menos confiable, asi que ahi
+ * conviene el costo extra de mandarle el PDF real a un modelo con vision en
+ * vez de conformarse con el texto plano. */
+function preguntaPideVerificacionVisual(pregunta: string): boolean {
+  const normalizada = normalizarTexto(pregunta);
+  return /\b(tabla|cuadro|anexo|grafico|imagen|figura|diagrama|escala de (infraccion|sancion))/.test(normalizada);
+}
+
+/** Tope de tamaño del PDF para mandarlo inline a Gemini: la API acepta
+ * datos inline hasta ~20MB en la request; se deja margen para el resto del
+ * payload en vez de pegarle justo al limite. */
+const MAX_BYTES_PDF_INLINE = 18 * 1024 * 1024;
+
+/** Codifica un ArrayBuffer a base64 en bloques: hacerlo de una sola pasada
+ * con String.fromCharCode(...bytes) revienta el limite de argumentos de la
+ * funcion para un PDF de varios MB. */
+function arrayBufferABase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const TAMANO_BLOQUE = 8192;
+  let binario = "";
+  for (let i = 0; i < bytes.length; i += TAMANO_BLOQUE) {
+    binario += String.fromCharCode(...bytes.subarray(i, i + TAMANO_BLOQUE));
+  }
+  return btoa(binario);
+}
+
+/** Le manda el PDF real (no el texto ya extraido) a Gemini como documento
+ * nativo: a diferencia del OCR/pdfplumber de la extraccion, un modelo con
+ * vision SI puede leer una tabla con celdas combinadas o describir un
+ * grafico, porque esta viendo el render real de la pagina. Devuelve null
+ * (nunca lanza) si el PDF no esta disponible, es muy grande, o la llamada
+ * falla — es un complemento opcional a la respuesta de texto, no un
+ * requisito. */
+async function intentarVerificacionVisual(norma: any, question: string): Promise<string | null> {
+  const pdfUrl = norma.pdf_url || norma.source_url;
+  if (!pdfUrl || !GEMINI_API_KEY) return null;
+
+  try {
+    const respuestaPdf = await fetch(pdfUrl);
+    if (!respuestaPdf.ok) return null;
+
+    const buffer = await respuestaPdf.arrayBuffer();
+    if (buffer.byteLength === 0 || buffer.byteLength > MAX_BYTES_PDF_INLINE) return null;
+
+    const base64Pdf = arrayBufferABase64(buffer);
+    const systemPrompt =
+      "Eres un asistente que responde preguntas sobre tablas, cuadros, anexos o graficos de un " +
+      "documento oficial de DIGEMID (Peru), mirando el PDF real adjunto. Cita la pagina exacta. " +
+      "Si la tabla tiene celdas combinadas, describe la combinacion en vez de fingir una grilla " +
+      "simple. Si no encuentras lo que se pregunta en el documento, dilo explicitamente.";
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemPrompt }] },
+          contents: [{
+            role: "user",
+            parts: [
+              { inline_data: { mime_type: "application/pdf", data: base64Pdf } },
+              { text: `Documento: ${norma.document_key}\n\nPregunta: ${question}` },
+            ],
+          }],
+          generationConfig: { maxOutputTokens: 1024 },
+        }),
+      },
+    );
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    const parts = data.candidates?.[0]?.content?.parts ?? [];
+    const texto = parts.map((p: any) => p.text ?? "").join("").trim();
+    return texto || null;
+  } catch (error) {
+    console.error("Verificacion visual del PDF falló (se sigue con la respuesta de texto):", error);
+    return null;
+  }
 }
 
 function consultaSources(chunks: any[]) {
@@ -3411,13 +3551,448 @@ async function transcribirNotaDeVoz(fileId: string): Promise<string> {
   return parts.map((p: any) => p.text ?? "").join("").trim();
 }
 
+const PROMPT_REFORMULACION_CONSULTA =
+  "Eres un asistente que reformula preguntas de usuarios en una consulta de " +
+  "busqueda de texto breve y precisa. Responde UNICAMENTE con la consulta " +
+  "reformulada (maximo 12 palabras, terminos legales/tecnicos concretos en " +
+  "español), sin explicaciones, sin comillas, sin texto adicional.";
+
+/** Reescribe la pregunta en una consulta mas apta para buscar_paginas_texto,
+ * para que preguntas vagas o mal formuladas encuentren paginas que una
+ * busqueda literal de esas palabras no encontraria. Si falla (o no hay
+ * proveedor configurado), se sigue con la pregunta original: es una ayuda,
+ * no un requisito. No reutiliza callDeepseek/callGemini porque esas usan
+ * CONSULTA_SYSTEM_PROMPT fijo; esta llamada necesita su propio prompt. */
+async function reformularConsultaParaBusqueda(question: string): Promise<string> {
+  try {
+    if (DEEPSEEK_API_KEY) {
+      const response = await fetch("https://api.deepseek.com/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${DEEPSEEK_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "deepseek-chat",
+          messages: [
+            { role: "system", content: PROMPT_REFORMULACION_CONSULTA },
+            { role: "user", content: question },
+          ],
+          max_tokens: 60,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const texto = data.choices?.[0]?.message?.content?.trim();
+        if (texto) return texto;
+      }
+    } else if (GEMINI_API_KEY) {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: PROMPT_REFORMULACION_CONSULTA }] },
+            contents: [{ role: "user", parts: [{ text: question }] }],
+            generationConfig: { maxOutputTokens: 60 },
+          }),
+        },
+      );
+
+      if (response.ok) {
+        const data = await response.json();
+        const parts = data.candidates?.[0]?.content?.parts ?? [];
+        const texto = parts.map((p: any) => p.text ?? "").join("").trim();
+        if (texto) return texto;
+      }
+    }
+  } catch (error) {
+    console.error("No se pudo reformular la consulta, se usa la pregunta original:", error);
+  }
+
+  return question;
+}
+
+/** Prefijos de tipo de norma reconocidos en el texto libre de una pregunta,
+ * hacia el mismo formato de document_key que usa digemid_normas ("RM-727-2025").
+ * Las claves de mas de una palabra deben probarse antes que sus abreviaturas
+ * (extraerReferenciaNormativa las ordena por longitud) para que "resolucion
+ * ministerial" no quede capturado a medias por una entrada mas corta. */
+const PREFIJOS_NORMA: Record<string, string> = {
+  "ley": "LEY",
+  "decreto supremo": "DS",
+  "decreto legislativo": "DL",
+  "decreto de urgencia": "DU",
+  "resolucion ministerial": "RM",
+  "resolucion directoral": "RD",
+  "resolucion suprema": "RS",
+  "ds": "DS",
+  "dl": "DL",
+  "du": "DU",
+  "rm": "RM",
+  "rd": "RD",
+  "rs": "RS",
+};
+
+/** Detecta que el usuario esta preguntando por UNA norma puntual, citada por
+ * su tipo + numero + año ("Resolución Ministerial 727-2025/MINSA", "DS
+ * 020-2024"). Para estas preguntas buscar por texto libre es poco confiable
+ * (puede traer una norma distinta que "suena" parecida); es mejor ir directo
+ * al documento por su identificador exacto. */
+function extraerReferenciaNormativa(pregunta: string): { documentKey: string } | null {
+  const texto = normalizarTexto(pregunta);
+  const claves = Object.keys(PREFIJOS_NORMA).sort((a, b) => b.length - a.length);
+
+  for (const clave of claves) {
+    const escapado = clave.replace(/ /g, "\\s+");
+    const regex = new RegExp(`\\b${escapado}\\b\\s*(?:n[°ºo.]?\\s*)?(\\d{1,4})[\\s\\-/]+(\\d{4})\\b`);
+    const match = texto.match(regex);
+    if (match) {
+      return { documentKey: `${PREFIJOS_NORMA[clave]}-${match[1]}-${match[2]}` };
+    }
+  }
+
+  return null;
+}
+
+/** Tope de paginas que se envian al modelo para UNA norma puntual: evita que
+ * una ley larga dispare un costo/latencia absurdos en una sola consulta. */
+const MAX_PAGINAS_NORMA_PUNTUAL = 25;
+
+/** Trae una norma puntual por su document_key exacto, con su contenido real
+ * (digemid_norma_paginas) y sus relaciones normativas conocidas
+ * (digemid_norma_relaciones, en ambos sentidos) para que el modelo pueda
+ * responder tambien "que mas debo tener en cuenta" y no solo "que dice este
+ * articulo". */
+async function getNormaConContenido(documentKey: string) {
+  const { data: norma, error: errorNorma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, fecha_publicacion, source_url, pdf_url, estado_vigencia")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (errorNorma) throw errorNorma;
+  if (!norma) return null;
+
+  const { data: paginas, error: errorPaginas } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula")
+    .eq("norma_id", norma.id)
+    .order("page_number")
+    .limit(MAX_PAGINAS_NORMA_PUNTUAL);
+
+  if (errorPaginas) throw errorPaginas;
+
+  const { data: relaciones, error: errorRelaciones } = await supabase
+    .from("digemid_norma_relaciones")
+    .select(
+      "tipo_relacion, tipo_norma_afectada, numero_afectada, anio_afectada, descripcion_afectada, estado, norma_origen_id, norma_afectada_id, norma_origen_document_key",
+    )
+    .or(`norma_origen_id.eq.${norma.id},norma_afectada_id.eq.${norma.id}`);
+
+  if (errorRelaciones) throw errorRelaciones;
+
+  return { norma, paginas: paginas ?? [], relaciones: relaciones ?? [] };
+}
+
+function paginaComoChunk(pagina: any, norma: any) {
+  return {
+    document_key: norma.document_key,
+    title: norma.titulo,
+    published_date: norma.fecha_publicacion,
+    page_number: pagina.page_number,
+    text_content: pagina.text_normalized ?? pagina.text_raw ?? "",
+    detail_url: norma.pdf_url ?? norma.source_url ?? "",
+    quality_score: pagina.quality_score,
+    revisado_manual: pagina.revisado_manual,
+    has_tables: pagina.has_tables,
+    posible_formula: pagina.posible_formula,
+    estado_vigencia: norma.estado_vigencia,
+  };
+}
+
+/** Convierte las relaciones normativas en un bloque de texto adicional para
+ * el modelo: deroga/modifica/prorroga detectados automaticamente, en las dos
+ * direcciones. Nunca se presenta como confirmado por un humano — eso lo dice
+ * `estado`. */
+function formatRelacionesComoContexto(relaciones: any[], norma: any): string {
+  if (!relaciones.length) return "";
+
+  const lineas = [
+    "",
+    `[Relaciones normativas de ${norma.document_key} detectadas automaticamente, estado de verificacion segun cada una]`,
+  ];
+
+  for (const r of relaciones) {
+    if (r.norma_origen_id === norma.id) {
+      lineas.push(
+        `- ${norma.document_key} ${r.tipo_relacion} a ${r.tipo_norma_afectada ?? "norma"} ` +
+          `${r.numero_afectada ?? "?"}-${r.anio_afectada ?? "?"} (${r.descripcion_afectada ?? "sin descripción"}). ` +
+          `Estado: ${r.estado}.`,
+      );
+    } else {
+      lineas.push(
+        `- ${norma.document_key} fue afectada (${r.tipo_relacion}) por ${r.norma_origen_document_key ?? "otra norma"}. ` +
+          `Estado: ${r.estado}.`,
+      );
+    }
+  }
+
+  return lineas.join("\n");
+}
+
+/** Version legible para el USUARIO (no para el modelo) de las relaciones
+ * normativas de una norma: mismo contenido que formatRelacionesComoContexto,
+ * pero en <b> reales (sin escapar aqui — formatConsultaAnswer se encarga de
+ * escapar y convertir negrita en una sola pasada al armar el mensaje final,
+ * asi que escapar aqui tambien dejaria el texto escapado dos veces). */
+function formatRelacionesParaUsuario(relaciones: any[], norma: any): string {
+  if (!relaciones.length) return "";
+
+  const lineas = [
+    "",
+    "📚 <b>Otras normas a tener en cuenta</b> (relación detectada automáticamente, verifica antes de asumirla como definitiva):",
+  ];
+
+  for (const r of relaciones) {
+    const etiquetaEstado = r.estado === "verificada" ? "verificada" : "sin verificar por un humano";
+    if (r.norma_origen_id === norma.id) {
+      lineas.push(
+        `• <b>${norma.document_key}</b> ${r.tipo_relacion} a ${r.tipo_norma_afectada ?? "norma"} ` +
+          `${r.numero_afectada ?? "?"}-${r.anio_afectada ?? "?"}` +
+          (r.descripcion_afectada ? ` (${r.descripcion_afectada})` : "") +
+          ` — ${etiquetaEstado}.`,
+      );
+    } else {
+      lineas.push(
+        `• <b>${norma.document_key}</b> fue afectada (${r.tipo_relacion}) por ` +
+          `<b>${r.norma_origen_document_key ?? "otra norma"}</b> — ${etiquetaEstado}.`,
+      );
+    }
+  }
+
+  return lineas.join("\n");
+}
+
+/** Banner de marca para los reportes HTML especiales: un shield inline en
+ * SVG (sin depender de un archivo de logo que todavia no existe en el
+ * repo) para que el reporte no se vea generico. Si el usuario manda su
+ * logo real, esto se reemplaza por un <img> con ese archivo embebido. */
+const BANNER_MARCA_HTML = `
+  <div class="marca">
+    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2L4 5v6c0 5 3.5 8.5 8 11 4.5-2.5 8-6 8-11V5l-8-3z" fill="#2563eb"/>
+      <path d="M9 12.5l2 2 4-4.5" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <span>RegAlert · Alertas DIGEMID Perú</span>
+  </div>`;
+
+/** Reporte especial en HTML de una norma puntual: mismo contenido real que
+ * se usa para responder (texto extraido pagina por pagina, con tablas
+ * reconstruidas via renderTextoConTablasHtml), mas la interpretacion que
+ * dio el modelo y las relaciones normativas conocidas — para que el
+ * usuario pueda revisar con calma que pagina/articulo sustenta cada punto,
+ * en vez de solo leer la respuesta corta del chat. */
+function construirReporteEspecialNorma(
+  norma: any,
+  paginas: any[],
+  relaciones: any[],
+  interpretacion: string,
+): string {
+  const filasPaginas = paginas
+    .map((p: any) => {
+      const advertencias = advertenciasDelBloque(paginaComoChunk(p, norma));
+      const aviso = advertencias.length
+        ? `<div class="aviso">⚠️ ${escapeHtml(advertencias.join("; "))}.</div>`
+        : "";
+      const texto = renderTextoConTablasHtml(p.text_normalized ?? p.text_raw ?? "");
+      return `
+        <section class="pagina">
+          <h3>Página ${p.page_number}</h3>
+          ${aviso}
+          ${texto}
+        </section>`;
+    })
+    .join("\n");
+
+  const filasRelaciones = relaciones.length
+    ? relaciones
+      .map((r: any) => {
+        const propia = r.norma_origen_id === norma.id;
+        const texto = propia
+          ? `${escapeHtml(norma.document_key)} <b>${escapeHtml(r.tipo_relacion)}</b> a ` +
+            `${escapeHtml(r.tipo_norma_afectada ?? "norma")} ${escapeHtml(String(r.numero_afectada ?? "?"))}-` +
+            `${escapeHtml(String(r.anio_afectada ?? "?"))}` +
+            (r.descripcion_afectada ? ` (${escapeHtml(r.descripcion_afectada)})` : "")
+          : `${escapeHtml(norma.document_key)} fue afectada (<b>${escapeHtml(r.tipo_relacion)}</b>) por ` +
+            `${escapeHtml(r.norma_origen_document_key ?? "otra norma")}`;
+        return `<li>${texto} — estado: ${escapeHtml(r.estado ?? "sin verificar")}.</li>`;
+      })
+      .join("\n")
+    : "<li>No se detectaron relaciones automáticas con otras normas.</li>";
+
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Reporte — ${escapeHtml(norma.document_key)}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; background: #f7f8fa; }
+  .marca { display: flex; align-items: center; gap: 0.6rem; padding: 1rem 2rem; background: #0f172a; color: #fff; font-weight: 600; }
+  .marca span { font-size: 1.05rem; }
+  main { max-width: 860px; margin: 0 auto; padding: 1.5rem 2rem 3rem; }
+  .encabezado { background: #fff; border-radius: 10px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1.5rem; }
+  .encabezado h1 { font-size: 1.3rem; margin: 0 0 0.3rem; }
+  .encabezado .meta { color: #555; font-size: 0.9rem; }
+  .estado { display: inline-block; padding: 0.15rem 0.6rem; border-radius: 999px; font-size: 0.8rem; font-weight: 600; margin-top: 0.5rem; }
+  .estado.vigente { background: #dcfce7; color: #166534; }
+  .estado.otro { background: #fee2e2; color: #991b1b; }
+  section.bloque { background: #fff; border-radius: 10px; padding: 1.25rem 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 1.5rem; }
+  section.bloque h2 { font-size: 1.05rem; margin-top: 0; }
+  .interpretacion { white-space: pre-wrap; line-height: 1.5; }
+  .pagina { border-top: 1px solid #eee; padding-top: 1rem; margin-top: 1rem; }
+  .pagina:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+  .pagina h3 { font-size: 0.95rem; color: #333; margin: 0 0 0.5rem; }
+  .aviso { background: #fff8e1; border: 1px solid #ffe082; padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; margin-bottom: 0.5rem; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; background: #fafafa; padding: 0.75rem; border-radius: 6px; }
+  ul.relaciones { padding-left: 1.2rem; font-size: 0.92rem; line-height: 1.6; }
+  table.tabla-extraida { border-collapse: collapse; width: auto; margin: 0.5rem 0; }
+  table.tabla-extraida th, table.tabla-extraida td { border: 1px solid #999; padding: 0.35rem 0.6rem; font-size: 0.8rem; max-width: 420px; word-break: break-word; }
+  table.tabla-extraida th { background: #eef2ff; }
+  footer { text-align: center; color: #888; font-size: 0.8rem; padding: 1rem; }
+</style>
+</head>
+<body>
+${BANNER_MARCA_HTML}
+<main>
+  <div class="encabezado">
+    <h1>${escapeHtml(norma.document_key)}</h1>
+    <div class="meta">${escapeHtml(norma.titulo ?? "")}</div>
+    <div class="meta">Publicada: ${escapeHtml(norma.fecha_publicacion ?? "sin fecha")}</div>
+    <span class="estado ${norma.estado_vigencia === "vigente" ? "vigente" : "otro"}">
+      ${escapeHtml(norma.estado_vigencia ?? "sin estado registrado")}
+    </span>
+  </div>
+
+  <section class="bloque">
+    <h2>🤖 Interpretación</h2>
+    <div class="interpretacion">${formatConsultaAnswer(interpretacion)}</div>
+  </section>
+
+  <section class="bloque">
+    <h2>📚 Normas relacionadas</h2>
+    <ul class="relaciones">${filasRelaciones}</ul>
+  </section>
+
+  <section class="bloque">
+    <h2>📄 Contenido extraído (página por página)</h2>
+    ${filasPaginas}
+  </section>
+</main>
+<footer>
+  Generado automáticamente por RegAlert a partir de la extracción documental de DIGEMID.
+  No reemplaza al Director Técnico ni a la autoridad sanitaria.
+</footer>
+</body>
+</html>`;
+}
+
+/** Responde sobre UNA norma puntual citada por numero exacto, usando su
+ * contenido real (no busqueda difusa) y sus relaciones conocidas. Devuelve
+ * null si no se encontro esa norma exacta en digemid_normas: quien llama
+ * decide si sigue con la busqueda de texto como respaldo. */
+async function responderNormaPuntual(
+  documentKey: string,
+  question: string,
+): Promise<
+  { answer: string; sources: { documentKey: string; url: string }[]; reportHtml?: string; reportFileName?: string }
+  | null
+> {
+  const resultado = await getNormaConContenido(documentKey);
+  if (!resultado) return null;
+
+  const { norma, paginas, relaciones } = resultado;
+
+  if (!paginas.length) {
+    return {
+      answer: `Encontré <b>${norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
+        "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
+      sources: [{ documentKey: norma.document_key, url: norma.pdf_url ?? norma.source_url ?? "" }],
+    };
+  }
+
+  const chunks = paginas.map((pagina: any) => paginaComoChunk(pagina, norma));
+  const context = buildConsultaContext(chunks);
+  const userContent = `Contexto:\n\n${context}${formatRelacionesComoContexto(relaciones, norma)}` +
+    `\n\nPregunta: ${question}`;
+  const sources = consultaSources(chunks);
+  const relacionesTexto = formatRelacionesParaUsuario(relaciones, norma);
+  const reportFileName = `reporte_${norma.document_key}.html`;
+
+  // Si preguntan puntualmente por una tabla/cuadro/grafico, el texto ya
+  // extraido (aplanado por OCR/pdfplumber) es justo el menos confiable para
+  // eso: se complementa con una lectura del PDF real via un modelo con
+  // vision. Es un extra opcional (nunca lanza, nunca bloquea la respuesta
+  // de texto normal si falla o no hay GEMINI_API_KEY configurada).
+  const verificacionVisual = preguntaPideVerificacionVisual(question)
+    ? await intentarVerificacionVisual(norma, question)
+    : null;
+  const bloqueVisual = verificacionVisual
+    ? `\n\n<b>🔎 Verificación visual del PDF (tabla/gráfico)</b>:\n${verificacionVisual}`
+    : "";
+
+  if (DEEPSEEK_API_KEY) {
+    try {
+      const interpretacion = await callDeepseek(userContent);
+      return {
+        answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`,
+        sources,
+        reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
+        reportFileName,
+      };
+    } catch (error) {
+      console.error("DeepSeek falló, probando respaldo Gemini:", error);
+    }
+  }
+
+  if (GEMINI_API_KEY) {
+    const interpretacion = await callGemini(userContent);
+    return {
+      answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`,
+      sources,
+      reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
+      reportFileName,
+    };
+  }
+
+  throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
+}
+
 async function answerConsulta(
   question: string,
-): Promise<{ answer: string; sources: { documentKey: string; url: string }[] }> {
-  const chunks = await searchConsultaChunks(question);
+): Promise<
+  { answer: string; sources: { documentKey: string; url: string }[]; reportHtml?: string; reportFileName?: string }
+> {
+  // Si la pregunta cita una norma puntual por numero exacto ("Resolucion
+  // Ministerial 727-2025"), no se usa busqueda difusa: se va directo a esa
+  // norma en digemid_normas, con su contenido real y sus relaciones. La
+  // busqueda por relevancia puede devolver una norma distinta que "suena"
+  // parecida, que es justo lo que se quiere evitar aqui.
+  const referencia = extraerReferenciaNormativa(question);
+  if (referencia) {
+    const respuesta = await responderNormaPuntual(referencia.documentKey, question);
+    if (respuesta) return respuesta;
+    // No se encontro esa norma exacta: se cae al flujo normal de busqueda de
+    // texto como respaldo, en vez de fallar.
+  }
+
+  const consultaBusqueda = await reformularConsultaParaBusqueda(question);
+  const chunks = await searchConsultaChunks(consultaBusqueda);
 
   if (!chunks.length) {
-    const suggestions = await suggestSimilarAlerts(question);
+    const suggestions = await suggestSimilarAlerts(consultaBusqueda);
 
     if (!suggestions.length) {
       return {
@@ -4788,6 +5363,25 @@ async function handleCommand(
       return;
     }
 
+    if (esConsultaDeUltimaNormativa(question)) {
+      const rows = await getLatestNormativa(8);
+
+      await logConsulta({
+        chatId,
+        userId,
+        command: "/consulta",
+        queryText: question,
+        resultCount: rows.length,
+        status: "ok_redirigido_normativa",
+      });
+
+      await sendMessage(
+        chatId,
+        formatNormativaList("📜 <b>Últimas leyes, reglamentos y decretos</b>", rows),
+      );
+      return;
+    }
+
     try {
       const nivel = await getNivelUsuario(chatId);
       const limiteUsuario = NIVEL_LIMITES_DIARIOS[nivel] ?? NIVEL_LIMITES_DIARIOS.gratis;
@@ -4828,7 +5422,7 @@ async function handleCommand(
         );
       }
 
-      const { answer, sources } = await answerConsulta(question);
+      const { answer, sources, reportHtml, reportFileName } = await answerConsulta(question);
 
       const consultaId = await logConsulta({
         chatId,
@@ -4862,7 +5456,27 @@ async function handleCommand(
         }
       }
 
-      return await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
+      await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
+
+      // Cuando la pregunta cito una norma puntual (extraerReferenciaNormativa
+      // dentro de answerConsulta) hay un reporte HTML con el detalle completo
+      // pagina por pagina: se manda como documento aparte, sin bloquear la
+      // respuesta corta de arriba si esto llegara a fallar.
+      if (reportHtml && reportFileName) {
+        try {
+          await enviarDocumentoTexto(
+            chatId,
+            reportHtml,
+            reportFileName,
+            "text/html",
+            "📊 Reporte detallado (HTML) — contenido completo, página por página, y normas relacionadas.",
+          );
+        } catch (error) {
+          console.error("CONSULTA_REPORTE_ERROR:", error);
+        }
+      }
+
+      return new Response("OK", { status: 200 });
     } catch (error) {
       console.error("CONSULTA_ERROR:", error);
 

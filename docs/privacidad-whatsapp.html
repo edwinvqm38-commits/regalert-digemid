@@ -1,0 +1,321 @@
+<title>Privacidad DigemidAlert</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Source+Sans+3:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap');
+
+  :root {
+    --bg: #faf9f6;
+    --surface: #ffffff;
+    --text: #1c2422;
+    --text-muted: #5c6864;
+    --border: #e3e6e1;
+    --accent: #0f6e5c;
+    --accent-soft: #e6efec;
+    --code-bg: #f1f3f0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121613;
+      --surface: #181d1a;
+      --text: #eaeee9;
+      --text-muted: #9aa6a0;
+      --border: #2b332e;
+      --accent: #4fbfa2;
+      --accent-soft: #1c2e29;
+      --code-bg: #202722;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #121613;
+    --surface: #181d1a;
+    --text: #eaeee9;
+    --text-muted: #9aa6a0;
+    --border: #2b332e;
+    --accent: #4fbfa2;
+    --accent-soft: #1c2e29;
+    --code-bg: #202722;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Source Sans 3', system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+    padding: 0 20px;
+  }
+
+  .wrap {
+    max-width: 700px;
+    margin: 0 auto;
+    padding-block: 56px 80px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 8px;
+  }
+
+  .mark {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .brand {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+
+  h1 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 600;
+    font-size: clamp(2rem, 5vw, 2.6rem);
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 18px 0 6px;
+  }
+
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 1.02rem;
+    margin-bottom: 8px;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding-block: 12px;
+    margin: 28px 0 40px;
+  }
+
+  .meta span b { color: var(--text); font-weight: 500; }
+
+  .callout {
+    background: var(--accent-soft);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin-bottom: 44px;
+    font-size: 0.97rem;
+  }
+
+  .callout p { margin: 0; }
+  .callout strong { color: var(--accent); }
+
+  section {
+    margin-bottom: 40px;
+  }
+
+  h2 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-weight: 600;
+    font-size: 1.35rem;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 14px;
+    text-wrap: balance;
+  }
+
+  h2 .num {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.85rem;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  p, li { max-width: 62ch; }
+
+  p { margin: 0 0 12px; }
+
+  ul { margin: 0 0 12px; padding-left: 1.3em; }
+  li { margin-bottom: 6px; }
+
+  strong { font-weight: 600; }
+
+  .datatable {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 16px 0 4px;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: minmax(140px, 34%) 1fr;
+    gap: 4px 16px;
+    padding: 12px 16px;
+    font-size: 0.94rem;
+  }
+
+  .row + .row { border-top: 1px solid var(--border); }
+
+  .row dt {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding-top: 2px;
+  }
+
+  .row dd { margin: 0; }
+
+  code {
+    font-family: 'IBM Plex Mono', monospace;
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 5px;
+    font-size: 0.87em;
+  }
+
+  a { color: var(--accent); }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    margin-top: 56px;
+    font-size: 0.9rem;
+    color: var(--text-muted);
+  }
+
+  footer a { color: var(--text-muted); text-decoration-color: var(--border); }
+
+  @media (max-width: 480px) {
+    .row { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="mark">DA</div>
+    <span class="brand">DigemidAlert · RegAlert DIGEMID</span>
+  </header>
+
+  <h1>Política de privacidad</h1>
+  <p class="subtitle">Canal de consulta por WhatsApp sobre alertas y normativa de DIGEMID (Perú).</p>
+
+  <div class="meta">
+    <span>Vigente desde: <b>13 de septiembre de 2026</b></span>
+    <span>Servicio: <b>DigemidAlert (WhatsApp Business)</b></span>
+    <span>Contacto: <b>edwin.vqm.38@gmail.com</b></span>
+  </div>
+
+  <div class="callout">
+    <p><strong>En una frase:</strong> este bot solo responde cuando tú le escribes primero. Nunca te va a enviar un mensaje de WhatsApp por iniciativa propia — ni promociones, ni recordatorios, ni alertas automáticas.</p>
+  </div>
+
+  <section>
+    <h2><span class="num">01</span> Quiénes somos</h2>
+    <p>DigemidAlert es un servicio independiente que ayuda a farmacéuticos, químicos farmacéuticos y establecimientos farmacéuticos del Perú a consultar alertas y normativa publicadas por DIGEMID (Dirección General de Medicamentos, Insumos y Drogas). No es un servicio oficial de DIGEMID ni del Ministerio de Salud.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">02</span> Qué datos recibimos</h2>
+    <p>Cuando escribes al número de WhatsApp del bot, recibimos únicamente lo necesario para responderte:</p>
+    <div class="datatable">
+      <div class="row">
+        <dt>Identificador</dt>
+        <dd>Tu número de WhatsApp (formato internacional, sin el signo <code>+</code>), tal como lo entrega la plataforma de WhatsApp Business.</dd>
+      </div>
+      <div class="row">
+        <dt>Nombre de perfil</dt>
+        <dd>El nombre que tengas configurado en tu perfil de WhatsApp, si lo compartes.</dd>
+      </div>
+      <div class="row">
+        <dt>Contenido</dt>
+        <dd>El texto de los mensajes que nos escribes (comandos como <code>ultimas</code>, <code>buscar</code>, o preguntas para el asistente con IA).</dd>
+      </div>
+      <div class="row">
+        <dt>Uso del servicio</dt>
+        <dd>Cuántas consultas has hecho y cuándo, para aplicar el límite diario de tu plan.</dd>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">03</span> Para qué lo usamos</h2>
+    <ul>
+      <li>Responder exactamente lo que preguntaste: alertas de DIGEMID, normativa vigente, o una consulta puntual citando el documento fuente.</li>
+      <li>Cuando la pregunta requiere buscar en la base normativa, el texto de tu consulta se envía a un proveedor externo de inteligencia artificial (DeepSeek o, como respaldo, Google Gemini) únicamente para generar la respuesta — no se usa para entrenar esos modelos ni se comparte con nadie más.</li>
+      <li>Llevar el conteo de consultas de tu plan (gratis, básico, consultoría o empresarial).</li>
+    </ul>
+    <p>No usamos tus datos para publicidad, no los vendemos, y no armamos un perfil tuyo más allá de lo descrito aquí.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">04</span> Lo que este canal nunca hace</h2>
+    <p>Por diseño técnico, no solo por política, este número de WhatsApp:</p>
+    <ul>
+      <li>No te escribe primero, bajo ninguna circunstancia.</li>
+      <li>No envía campañas, promociones ni recordatorios.</li>
+      <li>No usa plantillas de mensajes ni mensajes iniciados por la empresa.</li>
+      <li>Solo responde dentro de la conversación que tú abriste.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="num">05</span> Con quién compartimos datos</h2>
+    <p>Con nadie fuera de lo estrictamente necesario para operar el servicio:</p>
+    <ul>
+      <li><strong>Meta / WhatsApp Business Platform</strong>, como operador de la infraestructura de mensajería.</li>
+      <li><strong>Supabase</strong>, donde se almacena la base de datos del servicio.</li>
+      <li><strong>DeepSeek y Google Gemini</strong>, solo para procesar el texto de una consulta y generar la respuesta cuando corresponde.</li>
+    </ul>
+    <p>No transferimos tu número ni tus mensajes a nadie más, ni con fines comerciales.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">06</span> Cuánto tiempo guardamos tus datos</h2>
+    <p>El historial de consultas se conserva mientras uses el servicio activamente, para poder aplicar tu límite diario y mejorar la calidad de las respuestas. Puedes pedir la eliminación de tu historial en cualquier momento (ver sección 8).</p>
+  </section>
+
+  <section>
+    <h2><span class="num">07</span> Menores de edad</h2>
+    <p>Este servicio está dirigido a profesionales y establecimientos farmacéuticos. No está diseñado para ser usado por menores de edad, y no solicitamos datos dirigidos a ellos de forma intencional.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">08</span> Tus derechos</h2>
+    <p>Puedes en cualquier momento:</p>
+    <ul>
+      <li>Pedir una copia de los datos que tenemos sobre tu número.</li>
+      <li>Pedir que eliminemos tu historial de consultas.</li>
+      <li>Dejar de usar el servicio simplemente dejando de escribirle — no necesitas "darte de baja" de nada, porque nunca te contactamos por iniciativa propia.</li>
+    </ul>
+    <p>Para cualquiera de estos pedidos, escribe a <a href="mailto:edwin.vqm.38@gmail.com">edwin.vqm.38@gmail.com</a>.</p>
+  </section>
+
+  <section>
+    <h2><span class="num">09</span> Cambios a esta política</h2>
+    <p>Si actualizamos esta política de forma sustancial, la fecha de vigencia al inicio de la página cambiará. El uso continuado del servicio después de una actualización implica la aceptación de los cambios.</p>
+  </section>
+
+  <footer>
+    Servicio operado de forma independiente. Fuente oficial de las alertas y normativa citadas: <a href="https://www.digemid.minsa.gob.pe" target="_blank" rel="noopener">digemid.minsa.gob.pe</a>.
+  </footer>
+</div>

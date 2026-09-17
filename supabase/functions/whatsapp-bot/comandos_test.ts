@@ -6,7 +6,7 @@
  */
 
 import { assertEquals } from "jsr:@std/assert@1";
-import { parsearComando } from "./comandos.ts";
+import { parsearComando, parsearComandoAdmin } from "./comandos.ts";
 
 Deno.test("'/menu' se normaliza a menu", () => {
   assertEquals(parsearComando("/menu").comando, "menu");
@@ -92,4 +92,31 @@ Deno.test("una palabra suelta desconocida NO consume cuota de IA", () => {
   // Se muestra el menú en vez de gastar una consulta del plan del usuario.
   assertEquals(parsearComando("paracetamol").comando, "desconocido");
   assertEquals(parsearComando("asdfgh").comando, "desconocido");
+});
+
+Deno.test("'admin usuarios' se reconoce como comando admin", () => {
+  assertEquals(parsearComandoAdmin("admin usuarios"), { tipo: "usuarios" });
+  assertEquals(parsearComandoAdmin("/admin usuarios"), { tipo: "usuarios" });
+  assertEquals(parsearComandoAdmin("ADMIN Usuarios"), { tipo: "usuarios" });
+});
+
+Deno.test("'admin vencen' usa 3 dias por defecto", () => {
+  assertEquals(parsearComandoAdmin("admin vencen"), { tipo: "vencen", dias: 3 });
+});
+
+Deno.test("'admin vencen 7' respeta los dias pedidos", () => {
+  assertEquals(parsearComandoAdmin("admin vencen 7"), { tipo: "vencen", dias: 7 });
+});
+
+Deno.test("'admin vencen' con un numero fuera de rango se acota", () => {
+  assertEquals(parsearComandoAdmin("admin vencen 0")?.dias, 1);
+  assertEquals(parsearComandoAdmin("admin vencen 999")?.dias, 30);
+});
+
+Deno.test("un texto que no es un comando admin devuelve null", () => {
+  assertEquals(parsearComandoAdmin("administracion"), null);
+  assertEquals(parsearComandoAdmin("admin"), null);
+  assertEquals(parsearComandoAdmin("admin borrartodo"), null);
+  assertEquals(parsearComandoAdmin("ultimas"), null);
+  assertEquals(parsearComandoAdmin(""), null);
 });

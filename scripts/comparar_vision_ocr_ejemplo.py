@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import requests
@@ -64,6 +65,35 @@ DEFAULT_OPENROUTER_MODEL = "openrouter/auto"
 DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 
 
+# Codigos que valen la pena reintentar: sobrecarga/rate-limit transitoria
+# del proveedor, no un error real de la request (esos no mejoran con un
+# retry). Confirmado en produccion: Gemini devolvio 503 Service Unavailable
+# 3 veces seguidas para la misma pagina, y la 4ta vez con este retry si
+# funciono -- era sobrecarga puntual, no un problema de la imagen/prompt.
+_CODIGOS_REINTENTABLES = {429, 500, 502, 503, 504}
+
+
+def _post_con_reintentos(url: str, intentos: int = 3, espera_base: float = 5.0, **kwargs) -> requests.Response:
+    ultimo_error: Exception | None = None
+    for intento in range(1, intentos + 1):
+        try:
+            response = requests.post(url, **kwargs)
+            if response.status_code not in _CODIGOS_REINTENTABLES:
+                return response
+            ultimo_error = requests.HTTPError(
+                f"{response.status_code} Server Error: {response.reason} for url: {url}", response=response,
+            )
+        except requests.RequestException as error:
+            ultimo_error = error
+
+        if intento < intentos:
+            espera = espera_base * intento
+            logger.warning("Intento %s/%s fallo (%s), reintentando en %ss...", intento, intentos, ultimo_error, espera)
+            time.sleep(espera)
+
+    raise ultimo_error
+
+
 def transcribe_page_gemini(
     api_key: str,
     model: str,
@@ -79,7 +109,7 @@ def transcribe_page_gemini(
         f"Documento: {document_key}\nTitulo: {title or ''}\nPagina: {page_number}\n\n"
         f"{PROMPT_TRANSCRIPCION}"
     )
-    response = requests.post(
+    response = _post_con_reintentos(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
         headers={"Content-Type": "application/json"},
         json={

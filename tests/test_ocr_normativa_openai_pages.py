@@ -20,6 +20,8 @@ from scripts.ocr_normativa_openai_pages import (  # noqa: E402
     _post_con_reintentos,
     aplicar_filtro_pendientes,
     contar_avance_catalogo,
+    contar_avance_norma,
+    elegir_norma_prioritaria,
     get_candidate_pages,
     transcribe_page_with_provider,
     update_page,
@@ -324,6 +326,123 @@ class TestContarAvanceCatalogo(unittest.TestCase):
         resultado = contar_avance_catalogo(supabase, 0.85)
 
         self.assertEqual(resultado, {"total": 100, "altas": 80, "bajas": 20})
+
+
+class FakePaginasQueryElegir:
+    """Distingue 3 consultas por su forma, no por orden de llamada: la
+    muestra de pendientes (sin count), el total por norma (count sin gte) y
+    las altas por norma (count con gte)."""
+
+    def __init__(self, muestra, conteos):
+        self._muestra = muestra
+        self._conteos = conteos
+        self._modo = "muestra"
+        self._norma_id = None
+        self._con_gte = False
+
+    def select(self, *_a, **kwargs):
+        if kwargs.get("count") == "exact":
+            self._modo = "conteo"
+        return self
+
+    def lt(self, *_a):
+        return self
+
+    def gte(self, *_a):
+        self._con_gte = True
+        return self
+
+    def order(self, *_a):
+        return self
+
+    def eq(self, campo, valor):
+        if campo == "norma_id":
+            self._norma_id = valor
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def execute(self):
+        if self._modo == "muestra":
+            return MagicMock(data=self._muestra)
+        conteo = self._conteos.get(self._norma_id, {"total": 0, "altas": 0})
+        valor = conteo["altas"] if self._con_gte else conteo["total"]
+        return MagicMock(count=valor)
+
+
+class FakeNormasQueryElegir:
+    def __init__(self, normas):
+        self._normas = normas
+        self._id = None
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, campo, valor):
+        if campo == "id":
+            self._id = valor
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def execute(self):
+        norma = self._normas.get(self._id)
+        return MagicMock(data=[norma] if norma else [])
+
+
+def _fake_supabase_elegir(muestra_norma_ids, conteos, normas):
+    def table(nombre):
+        if nombre == "digemid_normas":
+            return FakeNormasQueryElegir(normas)
+        return FakePaginasQueryElegir([{"norma_id": nid} for nid in muestra_norma_ids], conteos)
+
+    supabase = MagicMock()
+    supabase.table.side_effect = table
+    return supabase
+
+
+class TestElegirNormaPrioritaria(unittest.TestCase):
+    def test_prioriza_norma_con_avance_y_menos_pendientes(self):
+        conteos = {
+            "norma-a": {"total": 100, "altas": 90},  # con avance, 10 pendientes
+            "norma-b": {"total": 50, "altas": 0},  # sin avance, 50 pendientes
+            "norma-c": {"total": 40, "altas": 5},  # con avance, 35 pendientes
+        }
+        normas = {"norma-a": {"id": "norma-a", "document_key": "RM-A"}}
+        supabase = _fake_supabase_elegir(["norma-a", "norma-b", "norma-a", "norma-c"], conteos, normas)
+
+        resultado = elegir_norma_prioritaria(supabase, 0.85)
+
+        self.assertEqual(resultado["norma"]["document_key"], "RM-A")
+        self.assertEqual(resultado["bajas"], 10)
+
+    def test_sin_avance_previo_elige_la_con_menos_pendientes_en_total(self):
+        conteos = {
+            "norma-b": {"total": 50, "altas": 0},
+            "norma-d": {"total": 5, "altas": 0},
+        }
+        normas = {"norma-d": {"id": "norma-d", "document_key": "RM-D"}}
+        supabase = _fake_supabase_elegir(["norma-b", "norma-d"], conteos, normas)
+
+        resultado = elegir_norma_prioritaria(supabase, 0.85)
+
+        self.assertEqual(resultado["norma"]["document_key"], "RM-D")
+
+    def test_sin_paginas_pendientes_devuelve_none(self):
+        supabase = _fake_supabase_elegir([], {}, {})
+        self.assertIsNone(elegir_norma_prioritaria(supabase, 0.85))
+
+
+class TestContarAvanceNorma(unittest.TestCase):
+    def test_calcula_altas_bajas_de_una_sola_norma(self):
+        conteos = {"norma-x": {"total": 30, "altas": 12}}
+        supabase = _fake_supabase_elegir([], conteos, {})
+
+        resultado = contar_avance_norma(supabase, "norma-x", 0.85)
+
+        self.assertEqual(resultado, {"total": 30, "altas": 12, "bajas": 18})
 
 
 if __name__ == "__main__":

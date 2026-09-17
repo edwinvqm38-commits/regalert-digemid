@@ -133,6 +133,17 @@ def parse_args():
     )
     parser.add_argument("--min-confianza", type=float, default=0.85)
     parser.add_argument(
+        "--completar-un-reglamento",
+        action="store_true",
+        help=(
+            "En vez de tomar las N paginas de peor calidad de CUALQUIER norma (mezclando "
+            "reglamentos distintos cada dia), elige UNA norma para completar y procesa "
+            "hasta N paginas de esa misma norma. Prioriza terminar una norma que ya tiene "
+            "algo de avance (no dejar varias a medias) antes de empezar otra nueva. "
+            "Ignorado si --document-key ya especifica una norma puntual."
+        ),
+    )
+    parser.add_argument(
         "--telegram-digest",
         action="store_true",
         help="Al terminar, manda un resumen a Telegram (TELEGRAM_BOT_TOKEN + "
@@ -840,6 +851,80 @@ def contar_avance_catalogo(supabase, quality_below: float) -> dict:
     return {"total": total, "altas": altas, "bajas": total - altas}
 
 
+def contar_avance_norma(supabase, norma_id: str, quality_below: float) -> dict:
+    total = (
+        supabase.table(PAGE_TABLE).select("id", count="exact", head=True)
+        .eq("norma_id", norma_id).execute().count or 0
+    )
+    altas = (
+        supabase.table(PAGE_TABLE).select("id", count="exact", head=True)
+        .eq("norma_id", norma_id).gte("quality_score", quality_below).execute().count or 0
+    )
+    return {"total": total, "altas": altas, "bajas": total - altas}
+
+
+# Tope de norma_ids distintos a evaluar (2 conteos cada uno) al elegir que
+# reglamento completar hoy: una muestra de las paginas de peor calidad rara
+# vez trae mas de un puñado de normas distintas, y poner un tope evita
+# disparar decenas de conteos si la muestra sale muy dispersa.
+_TOPE_NORMAS_CANDIDATAS = 20
+_MUESTRA_PAGINAS_PENDIENTES = 300
+
+
+def elegir_norma_prioritaria(supabase, quality_below: float) -> dict | None:
+    """Elige QUE norma completar hoy en vez de mezclar paginas de reglamentos
+    distintos cada dia: prioriza terminar una que YA tiene algo de avance
+    (para no dejar varias normas a medio camino a la vez), y entre esas la
+    que le falten MENOS paginas (la mas rapida de cerrar del todo). Si
+    ninguna candidata tiene avance previo (son todas nuevas), toma la que
+    tenga menos paginas de baja calidad en total.
+
+    La muestra de paginas pendientes esta acotada (_MUESTRA_PAGINAS_PENDIENTES)
+    a proposito: no es una agregacion sobre toda la tabla (eso requeriria un
+    RPC), es solo para descubrir QUE normas tienen paginas pendientes; los
+    conteos reales por norma (total/altas) si son exactos via count=exact."""
+    muestra = (
+        supabase.table(PAGE_TABLE)
+        .select("norma_id")
+        .lt("quality_score", quality_below)
+        .order("quality_score")
+        .limit(_MUESTRA_PAGINAS_PENDIENTES)
+        .execute()
+        .data
+        or []
+    )
+    norma_ids: list[str] = []
+    for fila in muestra:
+        norma_id = fila.get("norma_id")
+        if norma_id and norma_id not in norma_ids:
+            norma_ids.append(norma_id)
+    if not norma_ids:
+        return None
+
+    candidatas = [
+        {"norma_id": norma_id, **contar_avance_norma(supabase, norma_id, quality_below)}
+        for norma_id in norma_ids[:_TOPE_NORMAS_CANDIDATAS]
+    ]
+
+    con_avance = [c for c in candidatas if c["altas"] > 0]
+    pool = con_avance or candidatas
+    elegida = min(pool, key=lambda c: c["bajas"])
+
+    normas = (
+        supabase.table(NORMAS_TABLE)
+        .select("id, document_key, titulo, pdf_url, file_storage_path")
+        .eq("id", elegida["norma_id"])
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not normas:
+        return None
+
+    return {**elegida, "norma": normas[0]}
+
+
 def main() -> None:
     args = parse_args()
     load_env()
@@ -865,6 +950,19 @@ def main() -> None:
         )
 
     supabase = get_supabase()
+
+    norma_prioritaria = None
+    if args.completar_un_reglamento and not args.document_key:
+        norma_prioritaria = elegir_norma_prioritaria(supabase, args.quality_below)
+        if not norma_prioritaria:
+            logger.info("No hay reglamentos con paginas de calidad baja pendientes.")
+            return
+        args.document_key = norma_prioritaria["norma"]["document_key"]
+        logger.info(
+            "Reglamento elegido para completar hoy: %s (%s/%s paginas con calidad alta, %s pendientes)",
+            args.document_key, norma_prioritaria["altas"], norma_prioritaria["total"], norma_prioritaria["bajas"],
+        )
+
     pages = get_candidate_pages(supabase, args)
     logger.info("Paginas candidatas (filtro=%s): %s", args.filtro, len(pages))
     if not pages:
@@ -990,6 +1088,21 @@ def main() -> None:
                 lineas.append(f"  • {f['document_key']} pág. {f['page_number']} (confianza {f['confianza_estimada']})")
         if errores:
             lineas.append(f"\n⚠️ {len(errores)} página(s) con error, se reintentan en la próxima corrida.")
+
+        if norma_prioritaria:
+            try:
+                avance_norma = contar_avance_norma(
+                    supabase, norma_prioritaria["norma"]["id"], args.quality_below,
+                )
+                porcentaje_norma = (avance_norma["altas"] / avance_norma["total"] * 100) if avance_norma["total"] else 0
+                lineas.append(
+                    f"\n📖 <b>{norma_prioritaria['norma']['document_key']}</b>: "
+                    f"{avance_norma['altas']}/{avance_norma['total']} páginas con calidad alta "
+                    f"({porcentaje_norma:.0f}%). Quedan {avance_norma['bajas']} página(s) pendiente(s) "
+                    "para completar este reglamento.",
+                )
+            except Exception as error:
+                logger.warning("No se pudo calcular el avance de %s: %s", args.document_key, error)
 
         try:
             avance = contar_avance_catalogo(supabase, args.quality_below)

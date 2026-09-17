@@ -66,5 +66,6 @@ jobs:
             --limit "$LIMIT" \
             --apply \
             --auto-solo-alta-confianza \
+            --completar-un-reglamento \
             --min-confianza "$MIN_CONFIANZA" \
             --telegram-digest

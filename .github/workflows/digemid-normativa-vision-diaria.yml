@@ -1,0 +1,70 @@
+name: DIGEMID - Vision OCR diaria (Gemini)
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Cuantas paginas de baja calidad procesar hoy (2, 4 o 6 recomendado)"
+        required: false
+        default: ""
+        type: string
+      min_confianza:
+        description: "Confianza minima del modelo para aplicar el reemplazo automaticamente"
+        required: false
+        default: ""
+        type: string
+
+  schedule:
+    # Hora Peru = UTC-5. 07:00 a.m. Peru = 12:00 UTC. Corre antes que el
+    # resto de los jobs de la mañana para que /consulta ya tenga el texto
+    # mejorado disponible durante el dia.
+    - cron: "0 12 * * *"
+
+jobs:
+  vision-diaria:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_OCR_MODEL: ${{ vars.GEMINI_OCR_MODEL || 'gemini-flash-latest' }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Procesar paginas de baja calidad con Gemini
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIMIT="${{ inputs.limit }}"
+          LIMIT="${LIMIT:-${{ vars.VISION_OCR_DAILY_LIMIT || 2 }}}"
+          MIN_CONFIANZA="${{ inputs.min_confianza }}"
+          MIN_CONFIANZA="${MIN_CONFIANZA:-${{ vars.VISION_OCR_MIN_CONFIANZA || '0.85' }}}"
+
+          echo "Procesando hasta $LIMIT pagina(s), min-confianza=$MIN_CONFIANZA"
+
+          python scripts/ocr_normativa_openai_pages.py \
+            --provider gemini \
+            --filtro calidad-baja \
+            --limit "$LIMIT" \
+            --apply \
+            --auto-solo-alta-confianza \
+            --min-confianza "$MIN_CONFIANZA" \
+            --telegram-digest

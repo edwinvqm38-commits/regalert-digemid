@@ -16,10 +16,13 @@ sys.path.insert(0, str(RAIZ))
 from unittest.mock import MagicMock, patch  # noqa: E402
 
 from scripts.ocr_normativa_openai_pages import (  # noqa: E402
+    _debe_reemplazar_texto,
     _post_con_reintentos,
     aplicar_filtro_pendientes,
+    contar_avance_catalogo,
     get_candidate_pages,
     transcribe_page_with_provider,
+    update_page,
 )
 
 
@@ -209,6 +212,118 @@ class TestTranscribePageWithProvider(unittest.TestCase):
                 api_key="clave", provider="inexistente", model="x", detail="x",
                 document_key="RM-1-2020", title=None, page_number=1, image_base64="abc",
             )
+
+
+class TestDebeReemplazarTexto(unittest.TestCase):
+    def test_replace_text_manual_siempre_reemplaza(self):
+        args = Namespace(replace_text=True, auto_solo_alta_confianza=False, min_confianza=0.85)
+        self.assertTrue(_debe_reemplazar_texto({"confianza_estimada": 0.1, "advertencias": ["x"]}, args))
+
+    def test_sin_ninguna_bandera_no_reemplaza(self):
+        args = Namespace(replace_text=False, auto_solo_alta_confianza=False, min_confianza=0.85)
+        self.assertFalse(_debe_reemplazar_texto({"confianza_estimada": 0.99}, args))
+
+    def test_auto_alta_confianza_reemplaza_solo_si_supera_el_minimo_y_sin_advertencias(self):
+        args = Namespace(replace_text=False, auto_solo_alta_confianza=True, min_confianza=0.85)
+        self.assertTrue(_debe_reemplazar_texto({"confianza_estimada": 0.9, "advertencias": []}, args))
+        self.assertFalse(_debe_reemplazar_texto({"confianza_estimada": 0.5, "advertencias": []}, args))
+        self.assertFalse(_debe_reemplazar_texto({"confianza_estimada": 0.9, "advertencias": ["ilegible"]}, args))
+        self.assertFalse(_debe_reemplazar_texto({"confianza_estimada": None, "advertencias": []}, args))
+        self.assertFalse(_debe_reemplazar_texto({"confianza_estimada": "alta", "advertencias": []}, args))
+
+
+class FakeQueryUpdate:
+    def __init__(self):
+        self.payload = None
+
+    def update(self, payload):
+        self.payload = payload
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def execute(self):
+        return MagicMock()
+
+
+class FakeSupabaseUpdate:
+    def __init__(self):
+        self.query = FakeQueryUpdate()
+
+    def table(self, _nombre):
+        return self.query
+
+
+class TestUpdatePage(unittest.TestCase):
+    def test_auto_alta_confianza_reemplaza_pero_no_toca_tabla_verificada_ni_revisado_manual(self):
+        supabase = FakeSupabaseUpdate()
+        page = {
+            "id": "pagina-1", "metadata": {}, "text_raw": "viejo", "text_normalized": "viejo",
+            "extraction_method": "pymupdf", "quality_score": 0.4,
+        }
+        ai_result = {"transcripcion": "nuevo", "confianza_estimada": 0.95, "advertencias": []}
+        args = Namespace(
+            replace_text=False, auto_solo_alta_confianza=True, min_confianza=0.85,
+            provider="gemini", model="gemini-flash-latest", detail="original", dpi=150,
+        )
+
+        reemplazado = update_page(supabase, page, ai_result, args)
+
+        self.assertTrue(reemplazado)
+        payload = supabase.query.payload
+        self.assertEqual(payload["quality_score"], 0.9)
+        self.assertEqual(payload["extraction_method"], "openai_vision_ocr")
+        self.assertNotIn("tabla_verificada", payload)
+        self.assertNotIn("revisado_manual", payload)
+        self.assertIn("previous_extraction_before_openai_vision", payload["metadata"])
+
+    def test_auto_baja_confianza_no_reemplaza_solo_guarda_metadata(self):
+        supabase = FakeSupabaseUpdate()
+        page = {"id": "pagina-1", "metadata": {}, "text_raw": "viejo", "text_normalized": "viejo"}
+        ai_result = {"transcripcion": "nuevo", "confianza_estimada": 0.5, "advertencias": []}
+        args = Namespace(
+            replace_text=False, auto_solo_alta_confianza=True, min_confianza=0.85,
+            provider="gemini", model="gemini-flash-latest", detail="original", dpi=150,
+        )
+
+        reemplazado = update_page(supabase, page, ai_result, args)
+
+        self.assertFalse(reemplazado)
+        payload = supabase.query.payload
+        self.assertNotIn("text_normalized", payload)
+        self.assertIn("openai_vision_ocr", payload["metadata"])
+
+
+class FakeCountResult:
+    def __init__(self, count):
+        self.count = count
+
+
+class FakeQueryConteo:
+    def __init__(self, resultado):
+        self._resultado = resultado
+
+    def select(self, *_a, **_k):
+        return self
+
+    def gte(self, *_a):
+        return self
+
+    def execute(self):
+        return self._resultado
+
+
+class TestContarAvanceCatalogo(unittest.TestCase):
+    def test_calcula_altas_y_bajas_a_partir_del_total(self):
+        respuestas = [FakeCountResult(100), FakeCountResult(80)]
+        supabase = MagicMock()
+        supabase.table.return_value.select.return_value.execute.side_effect = [respuestas[0]]
+        supabase.table.return_value.select.return_value.gte.return_value.execute.side_effect = [respuestas[1]]
+
+        resultado = contar_avance_catalogo(supabase, 0.85)
+
+        self.assertEqual(resultado, {"total": 100, "altas": 80, "bajas": 20})
 
 
 if __name__ == "__main__":

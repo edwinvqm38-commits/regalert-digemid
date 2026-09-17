@@ -119,6 +119,27 @@ def parse_args():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--replace-text", action="store_true")
     parser.add_argument(
+        "--auto-solo-alta-confianza",
+        action="store_true",
+        help=(
+            "Para corridas automaticas sin supervision (ej. el cron diario): en vez de "
+            "reemplazar SIEMPRE que --apply este presente (como --replace-text), solo "
+            "reemplaza el texto cuando el propio modelo reporta confianza_estimada >= "
+            "--min-confianza y no trae advertencias. Las paginas de baja confianza quedan "
+            "solo en metadata para revision humana (via /normarevisar), igual que sin este "
+            "flag. NUNCA marca tabla_verificada ni revisado_manual en true -- esos campos "
+            "significan 'un humano lo confirmo', y esto es una IA decidiendo sola."
+        ),
+    )
+    parser.add_argument("--min-confianza", type=float, default=0.85)
+    parser.add_argument(
+        "--telegram-digest",
+        action="store_true",
+        help="Al terminar, manda un resumen a Telegram (TELEGRAM_BOT_TOKEN + "
+             "TELEGRAM_ADMIN_CHAT_ID/TELEGRAM_CHAT_ID) con lo aplicado, lo pendiente de "
+             "revision, y el avance total del catalogo (paginas con calidad alta vs bajas).",
+    )
+    parser.add_argument(
         "--report-html",
         help=(
             "Ruta de salida para un reporte HTML con diff resaltado (actual vs transcripcion IA). "
@@ -727,7 +748,26 @@ def construir_reporte_html(filas_reporte: list[dict]) -> str:
 </html>"""
 
 
-def update_page(supabase, page: dict, ai_result: dict, args) -> None:
+def _debe_reemplazar_texto(ai_result: dict, args) -> bool:
+    """--replace-text (manual, quien lo corre ya reviso el reporte) siempre
+    reemplaza. --auto-solo-alta-confianza (corridas sin supervision) solo
+    reemplaza cuando el propio modelo se declara seguro: confianza_estimada
+    numerica >= --min-confianza y sin advertencias. Sin ninguno de los dos,
+    la transcripcion queda solo en metadata para revision humana."""
+    if args.replace_text:
+        return True
+    if not args.auto_solo_alta_confianza:
+        return False
+    confianza = ai_result.get("confianza_estimada")
+    if not isinstance(confianza, (int, float)):
+        return False
+    if ai_result.get("advertencias"):
+        return False
+    return confianza >= args.min_confianza
+
+
+def update_page(supabase, page: dict, ai_result: dict, args) -> bool:
+    """Devuelve True si se reemplazo el texto (para el resumen de Telegram)."""
     now = datetime.now(timezone.utc).isoformat()
     metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
     metadata["openai_vision_ocr"] = {
@@ -743,7 +783,8 @@ def update_page(supabase, page: dict, ai_result: dict, args) -> None:
         "updated_at": now,
     }
 
-    if args.replace_text:
+    reemplazar = _debe_reemplazar_texto(ai_result, args)
+    if reemplazar:
         metadata["previous_extraction_before_openai_vision"] = {
             "text_raw": page.get("text_raw"),
             "text_normalized": page.get("text_normalized"),
@@ -754,12 +795,49 @@ def update_page(supabase, page: dict, ai_result: dict, args) -> None:
             {
                 "text_raw": ai_result.get("transcripcion") or "",
                 "text_normalized": build_replacement_text(ai_result),
+                # NUNCA se toca tabla_verificada/revisado_manual aqui: esos
+                # campos significan "un humano lo confirmo", y esto lo decidio
+                # una IA sola (aunque con alta confianza declarada por ella
+                # misma). Quedan para el flujo de revision manual existente.
                 "extraction_method": "openai_vision_ocr",
                 "quality_score": 0.9,
             }
         )
 
     supabase.table(PAGE_TABLE).update(payload).eq("id", page["id"]).execute()
+    return reemplazar
+
+
+def enviar_mensaje_telegram(texto: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_ADMIN_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.warning("--telegram-digest pedido pero faltan TELEGRAM_BOT_TOKEN/TELEGRAM_ADMIN_CHAT_ID; se omite.")
+        return
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": texto, "parse_mode": "HTML"},
+            timeout=30,
+        )
+        response.raise_for_status()
+    except requests.RequestException as error:
+        logger.warning("No se pudo mandar el resumen a Telegram: %s", error)
+
+
+def contar_avance_catalogo(supabase, quality_below: float) -> dict:
+    """Avance total del catalogo (todas las normas, no solo las tocadas en
+    esta corrida): cuantas paginas ya tienen calidad alta vs cuantas siguen
+    bajas, para poder responder 'que reglamentos tienen avance con alto
+    nivel de confianza' sin tener que revisar norma por norma."""
+    # head=True: solo pide el conteo, no trae las filas -- con miles de
+    # paginas, pedir count sin head igual descarga datos de mas.
+    total = supabase.table(PAGE_TABLE).select("id", count="exact", head=True).execute().count or 0
+    altas = (
+        supabase.table(PAGE_TABLE).select("id", count="exact", head=True)
+        .gte("quality_score", quality_below).execute().count or 0
+    )
+    return {"total": total, "altas": altas, "bajas": total - altas}
 
 
 def main() -> None:
@@ -793,6 +871,7 @@ def main() -> None:
         return
 
     filas_reporte: list[dict] = []
+    resumen_digest: list[dict] = []
     pdf_cache: dict[str, Path] = {}
 
     def escribir_reporte_parcial() -> None:
@@ -856,8 +935,16 @@ def main() -> None:
                     )
 
                 if args.apply and not args.report_html:
-                    update_page(supabase, page, ai_result, args)
+                    reemplazado = update_page(supabase, page, ai_result, args)
                     logger.info("%s pagina %s actualizada con vision IA.", document_key, page_number)
+                    resumen_digest.append(
+                        {
+                            "document_key": document_key,
+                            "page_number": page_number,
+                            "reemplazado": reemplazado,
+                            "confianza_estimada": ai_result.get("confianza_estimada"),
+                        }
+                    )
             except Exception as error:  # no se pierde el lote entero por una pagina
                 logger.warning("%s pagina %s | error: %s", document_key, page_number, error)
                 if args.report_html:
@@ -868,6 +955,9 @@ def main() -> None:
                             "error": str(error),
                         }
                     )
+                resumen_digest.append(
+                    {"document_key": document_key, "page_number": page_number, "error": str(error)},
+                )
                 continue
             finally:
                 # Escritura periodica: si la corrida se corta (timeout del
@@ -883,6 +973,35 @@ def main() -> None:
     escribir_reporte_parcial()
     if args.report_html:
         logger.info("Reporte escrito en %s (%s paginas)", args.report_html, len(filas_reporte))
+
+    if args.telegram_digest and resumen_digest:
+        aplicadas = [f for f in resumen_digest if f.get("reemplazado")]
+        pendientes = [f for f in resumen_digest if "error" not in f and not f.get("reemplazado")]
+        errores = [f for f in resumen_digest if "error" in f]
+
+        lineas = [f"🔎 <b>Vision OCR ({args.provider}) — resumen del día</b>", ""]
+        if aplicadas:
+            lineas.append(f"✅ <b>{len(aplicadas)} página(s) aplicada(s)</b> (alta confianza, ya las usa /consulta):")
+            for f in aplicadas:
+                lineas.append(f"  • {f['document_key']} pág. {f['page_number']} (confianza {f['confianza_estimada']})")
+        if pendientes:
+            lineas.append(f"\n⏳ <b>{len(pendientes)} página(s) con confianza baja</b> (guardadas en metadata, esperan revisión con /normarevisar):")
+            for f in pendientes:
+                lineas.append(f"  • {f['document_key']} pág. {f['page_number']} (confianza {f['confianza_estimada']})")
+        if errores:
+            lineas.append(f"\n⚠️ {len(errores)} página(s) con error, se reintentan en la próxima corrida.")
+
+        try:
+            avance = contar_avance_catalogo(supabase, args.quality_below)
+            porcentaje = (avance["altas"] / avance["total"] * 100) if avance["total"] else 0
+            lineas.append(
+                f"\n📊 Avance total del catálogo: {avance['altas']}/{avance['total']} páginas "
+                f"con calidad alta ({porcentaje:.0f}%). Detalle por norma: /reportenormas",
+            )
+        except Exception as error:  # el digest de esta corrida no depende de esto
+            logger.warning("No se pudo calcular el avance del catalogo: %s", error)
+
+        enviar_mensaje_telegram("\n".join(lineas))
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,9 +42,41 @@ STORAGE_BUCKET = "digemid-documentos"
 DEFAULT_PROVIDER = "openrouter"
 DEFAULT_OPENAI_MODEL = "gpt-5.6"
 DEFAULT_OPENROUTER_MODEL = "openrouter/auto"
+# gemini-2.5-pro devolvia 404 Not Found con la GEMINI_API_KEY/version de API
+# de este proyecto; gemini-flash-latest es el que ya usa el resto del
+# proyecto (telegram-bot, _shared/consulta-ia.ts) con exito.
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 DEFAULT_DETAIL = "original"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Codigos que valen la pena reintentar: sobrecarga/rate-limit transitoria del
+# proveedor, no un error real de la request. Confirmado en produccion:
+# Gemini devolvio 503 Service Unavailable varias veces seguidas para la
+# misma pagina, y un reintento con espera si funciono -- era sobrecarga
+# puntual, no un problema de la imagen o el prompt.
+_CODIGOS_REINTENTABLES = {429, 500, 502, 503, 504}
+
+
+def _post_con_reintentos(url: str, intentos: int = 3, espera_base: float = 5.0, **kwargs) -> requests.Response:
+    ultimo_error: Exception | None = None
+    for intento in range(1, intentos + 1):
+        try:
+            response = requests.post(url, **kwargs)
+            if response.status_code not in _CODIGOS_REINTENTABLES:
+                return response
+            ultimo_error = requests.HTTPError(
+                f"{response.status_code} Server Error: {response.reason} for url: {url}", response=response,
+            )
+        except requests.RequestException as error:
+            ultimo_error = error
+
+        if intento < intentos:
+            espera = espera_base * intento
+            logger.warning("Intento %s/%s fallo (%s), reintentando en %ss...", intento, intentos, ultimo_error, espera)
+            time.sleep(espera)
+
+    raise ultimo_error
 
 
 def load_env() -> None:
@@ -63,6 +96,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--document-key")
+    parser.add_argument(
+        "--page-number", type=int,
+        help="Procesar SOLO esta pagina de --document-key (sin importar el filtro de pendientes), "
+             "para probar puntualmente un proveedor/modelo en una pagina conocida.",
+    )
     parser.add_argument("--quality-below", type=float, default=0.85)
     parser.add_argument("--all-pages", action="store_true")
     parser.add_argument(
@@ -90,7 +128,7 @@ def parse_args():
     )
     parser.add_argument(
         "--provider",
-        choices=["openai", "openrouter"],
+        choices=["openai", "openrouter", "gemini"],
         default=os.getenv("VISION_OCR_PROVIDER", DEFAULT_PROVIDER),
     )
     parser.add_argument("--model")
@@ -107,9 +145,13 @@ def parse_args():
         raise ValueError("--dpi debe ser mayor que cero")
     if args.replace_text and not args.apply:
         raise ValueError("--replace-text requiere --apply")
+    if args.page_number is not None and not args.document_key:
+        raise ValueError("--page-number requiere --document-key")
     if not args.model:
         if args.provider == "openai":
             args.model = os.getenv("OPENAI_OCR_MODEL", DEFAULT_OPENAI_MODEL)
+        elif args.provider == "gemini":
+            args.model = os.getenv("GEMINI_OCR_MODEL", DEFAULT_GEMINI_MODEL)
         else:
             args.model = os.getenv("OPENROUTER_OCR_MODEL", DEFAULT_OPENROUTER_MODEL)
     return args
@@ -166,7 +208,9 @@ def get_candidate_pages(supabase, args) -> list[dict]:
             .eq("norma_id", norma["id"])
             .order("page_number")
         )
-        if not args.all_pages:
+        if args.page_number is not None:
+            query = query.eq("page_number", args.page_number)
+        elif not args.all_pages:
             query = aplicar_filtro_pendientes(query, args)
         pages = query.limit(args.limit).execute().data or []
         for page in pages:
@@ -447,6 +491,53 @@ def transcribe_page_openrouter(
     }
 
 
+def transcribe_page_gemini(
+    api_key: str,
+    model: str,
+    document_key: str,
+    title: str | None,
+    page_number: int,
+    image_base64: str,
+) -> dict:
+    prompt = (
+        f"Documento: {document_key}\nTitulo: {title or ''}\nPagina: {page_number}\n\n"
+        f"{PROMPT_TRANSCRIPCION}"
+    )
+    response = _post_con_reintentos(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}",
+        headers={"Content-Type": "application/json"},
+        json={
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/png", "data": image_base64}},
+                ],
+            }],
+            # 4096 no alcanzaba para una pagina con tabla densa (confirmado
+            # en produccion: devolvio 200 pero el JSON venia truncado a
+            # mitad de un string -- se quedo sin tokens de salida).
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 8192},
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    data = response.json()
+    parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
+    output_text = "\n".join(p.get("text", "") for p in parts).strip()
+    if not output_text:
+        raise ValueError("Gemini no devolvio contenido")
+
+    parsed = extract_json(output_text)
+    return {
+        "transcripcion": parsed.get("transcripcion") or "",
+        "tablas_markdown": parsed.get("tablas_markdown") or "",
+        "graficos": parsed.get("graficos") or "",
+        "advertencias": parsed.get("advertencias") or [],
+        "confianza_estimada": parsed.get("confianza_estimada"),
+    }
+
+
 def transcribe_page_with_provider(
     api_key: str,
     provider: str,
@@ -469,6 +560,15 @@ def transcribe_page_with_provider(
         )
     if provider == "openrouter":
         return transcribe_page_openrouter(
+            api_key=api_key,
+            model=model,
+            document_key=document_key,
+            title=title,
+            page_number=page_number,
+            image_base64=image_base64,
+        )
+    if provider == "gemini":
+        return transcribe_page_gemini(
             api_key=api_key,
             model=model,
             document_key=document_key,
@@ -668,6 +768,9 @@ def main() -> None:
     if args.provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
         api_key_name = "OPENAI_API_KEY"
+    elif args.provider == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        api_key_name = "GEMINI_API_KEY"
     else:
         api_key = os.getenv("OPENROUTER_API_KEY")
         api_key_name = "OPENROUTER_API_KEY"

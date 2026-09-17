@@ -32,6 +32,11 @@ on:
         required: false
         default: ""
         type: string
+      page_number:
+        description: "Procesar SOLO esta pagina de document_key (opcional, requiere document_key; ignora el filtro)"
+        required: false
+        default: ""
+        type: string
       provider:
         description: "Proveedor de vision OCR"
         required: true
@@ -40,6 +45,7 @@ on:
         options:
           - openrouter
           - openai
+          - gemini
       model:
         description: "Modelo vision OCR (opcional; usa variable por defecto si queda vacio)"
         required: false
@@ -73,8 +79,10 @@ jobs:
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       OPENAI_OCR_MODEL: ${{ vars.OPENAI_OCR_MODEL || 'gpt-5.6' }}
       OPENROUTER_OCR_MODEL: ${{ vars.OPENROUTER_OCR_MODEL || 'openrouter/auto' }}
+      GEMINI_OCR_MODEL: ${{ vars.GEMINI_OCR_MODEL || 'gemini-flash-latest' }}
       VISION_OCR_DETAIL: ${{ vars.VISION_OCR_DETAIL || 'original' }}
 
     steps:
@@ -118,6 +126,9 @@ jobs:
 
           if [[ -n "${{ inputs.document_key }}" ]]; then
             CMD+=(--document-key "${{ inputs.document_key }}")
+          fi
+          if [[ -n "${{ inputs.page_number }}" ]]; then
+            CMD+=(--page-number "${{ inputs.page_number }}")
           fi
           if [[ -n "${{ inputs.model }}" ]]; then
             CMD+=(--model "${{ inputs.model }}")

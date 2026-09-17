@@ -57,7 +57,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6"
 DEFAULT_OPENROUTER_MODEL = "openrouter/auto"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-pro"
+# Mismo modelo que ya usa el resto del proyecto (telegram-bot/index.ts,
+# _shared/consulta-ia.ts) con esta misma GEMINI_API_KEY: "gemini-2.5-pro"
+# devolvia 404 Not Found con esta cuenta/API version.
+DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
 
 
 def transcribe_page_gemini(

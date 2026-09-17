@@ -120,7 +120,11 @@ def transcribe_page_gemini(
                     {"inline_data": {"mime_type": "image/png", "data": image_base64}},
                 ],
             }],
-            "generationConfig": {"temperature": 0, "maxOutputTokens": 4096},
+            # 4096 no alcanzaba para una pagina con tabla densa (confirmado en
+            # produccion: RM-431-2019 pag. 74 devolvio 200 pero el JSON venia
+            # truncado a mitad de un string -- se quedo sin tokens de salida,
+            # no fue un error de red).
+            "generationConfig": {"temperature": 0, "maxOutputTokens": 8192},
         },
         timeout=180,
     )

@@ -493,5 +493,127 @@ class TestIdempotenciaConForce(unittest.TestCase):
         self.assertEqual(len(self.db.relaciones), 2)
 
 
+# ---------------------------------------------------------------------------
+# FASE 1 · confidence_score / ai_reasoning / effective_date
+# ---------------------------------------------------------------------------
+class TestValidarConfianzaRelacion(unittest.TestCase):
+    def test_numero_valido_se_acepta(self):
+        self.assertEqual(D.validar_confianza_relacion(0.95), 0.95)
+        self.assertEqual(D.validar_confianza_relacion(0), 0.0)
+        self.assertEqual(D.validar_confianza_relacion(1), 1.0)
+
+    def test_ausente_o_nulo_es_none(self):
+        self.assertIsNone(D.validar_confianza_relacion(None))
+
+    def test_fuera_de_rango_es_none(self):
+        self.assertIsNone(D.validar_confianza_relacion(1.5))
+        self.assertIsNone(D.validar_confianza_relacion(-0.1))
+
+    def test_texto_o_booleano_es_none(self):
+        # bool es subclase de int en Python: se excluye explicitamente porque
+        # "confianza: true" no es un numero de confianza real.
+        self.assertIsNone(D.validar_confianza_relacion("alta"))
+        self.assertIsNone(D.validar_confianza_relacion(True))
+
+
+class TestValidarFechaVigencia(unittest.TestCase):
+    """"No aceptar fechas inferidas": la fecha solo se guarda si el propio
+    fragmento (ya verificado contra el documento) habla de vigencia y
+    menciona el mismo año."""
+
+    def test_fecha_explicita_y_mencionada_en_fragmento_se_acepta(self):
+        fragmento = "El presente Decreto entrara en vigencia el 1 de enero de 2027."
+        self.assertEqual(D.validar_fecha_vigencia("2027-01-01", fragmento), "2027-01-01")
+
+    def test_fecha_sin_mencion_de_vigencia_en_fragmento_se_descarta(self):
+        # El modelo "calculo" una fecha a partir de un plazo relativo, pero el
+        # fragmento no dice nada de vigencia: exactamente el caso que no hay
+        # que aceptar.
+        fragmento = "El presente Decreto entrara en vigor a los noventa (90) dias de su publicacion."
+        self.assertIsNone(D.validar_fecha_vigencia("2027-01-01", fragmento))
+
+    def test_fecha_con_anio_distinto_al_fragmento_se_descarta(self):
+        fragmento = "Entrara en vigencia el 1 de enero de 2026."
+        self.assertIsNone(D.validar_fecha_vigencia("2027-01-01", fragmento))
+
+    def test_formato_invalido_se_descarta(self):
+        self.assertIsNone(D.validar_fecha_vigencia("1 de enero de 2027", "vigencia 2027"))
+        self.assertIsNone(D.validar_fecha_vigencia("2027-13-01", "vigencia 2027"))
+
+    def test_ausente_es_none(self):
+        self.assertIsNone(D.validar_fecha_vigencia(None, "cualquier fragmento con vigencia 2027"))
+
+
+class TestProcesarNormaFase1(unittest.TestCase):
+    """Los 3 campos nuevos, de punta a punta a traves de procesar_norma."""
+
+    def setUp(self):
+        self.db = SupabaseFalso(
+            paginas=[{"page_number": 1, "text_normalized": TEXTO_NORMA, "text_raw": None}]
+        )
+
+    def _correr(self, relacion_ia):
+        original = D.call_deepseek
+        D.call_deepseek = lambda *a, **k: (D.ESTADO_OK, {"relaciones": [relacion_ia]})
+        try:
+            D.procesar_norma(
+                self.db,
+                {"id": "origen-1", "document_key": "RM-500-2025",
+                 "tipo_norma": "RM", "numero": "500", "anio": 2025},
+                "clave-falsa",
+                CATALOGO_FALSO,
+            )
+        finally:
+            D.call_deepseek = original
+        return self.db.relaciones[0]
+
+    def test_confianza_y_razonamiento_validos_se_guardan(self):
+        fila = self._correr({
+            "tipo_relacion": "deroga", "tipo_norma": "LEY", "numero": "29459", "anio": None,
+            "articulos_afectados": "10", "alcance": "parcial",
+            "descripcion": "Deroga el articulo 10 de la Ley 29459",
+            "fragmento": "Derogar el articulo 10 de la Ley N° 29459.",
+            "confianza_relacion": 0.9,
+            "razonamiento": "El verbo 'derogar' es explicito y la norma afectada esta identificada por numero.",
+            "fecha_vigencia": None,
+        })
+        self.assertEqual(fila["confidence_score"], 0.9)
+        self.assertIn("explicito", fila["ai_reasoning"])
+        self.assertIsNone(fila["effective_date"])
+
+    def test_fecha_vigencia_inventada_se_descarta_pero_la_relacion_se_guarda(self):
+        """Una fecha invalida NUNCA debe bloquear el registro de la relacion
+        misma -solo se descarta el campo effective_date."""
+        fila = self._correr({
+            "tipo_relacion": "deroga", "tipo_norma": "LEY", "numero": "29459", "anio": None,
+            "articulos_afectados": "10", "alcance": "parcial",
+            "descripcion": "Deroga el articulo 10 de la Ley 29459",
+            "fragmento": "Derogar el articulo 10 de la Ley N° 29459.",
+            "confianza_relacion": 0.9,
+            "razonamiento": "explicito",
+            "fecha_vigencia": "2099-01-01",
+        })
+        self.assertIsNone(fila["effective_date"])
+        self.assertEqual(fila["tipo_relacion"], "deroga")
+
+    def test_sin_los_campos_nuevos_no_falla_y_guarda_none(self):
+        """Compatibilidad: una respuesta del modelo sin estos 3 campos (ej. si
+        el prompt cambia de nuevo) no debe romper el pipeline."""
+        fila = self._correr({
+            "tipo_relacion": "deroga", "tipo_norma": "LEY", "numero": "29459", "anio": None,
+            "articulos_afectados": "10", "alcance": "parcial",
+            "descripcion": "Deroga el articulo 10 de la Ley 29459",
+            "fragmento": "Derogar el articulo 10 de la Ley N° 29459.",
+        })
+        self.assertIsNone(fila["confidence_score"])
+        self.assertIsNone(fila["ai_reasoning"])
+        self.assertIsNone(fila["effective_date"])
+
+
+class TestAnalyzerVersionFase1(unittest.TestCase):
+    def test_version_subio_a_3(self):
+        self.assertEqual(D.ANALYZER_VERSION, 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

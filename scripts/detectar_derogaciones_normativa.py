@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import sys
@@ -57,9 +57,14 @@ MAX_CHARS_TEXTO = 15000
 # deterministas, SUBIR este numero: las normas analizadas con una version
 # anterior vuelven a entrar en la cola automaticamente (antes quedaban
 # congeladas para siempre con el resultado viejo).
-ANALYZER_VERSION = 2
+ANALYZER_VERSION = 3
 
-MAX_TOKENS_RESPUESTA = 4096
+# FASE 1 subio esto de 4096: cada relacion ahora tambien trae "razonamiento"
+# (1-2 frases) y puede traer "fecha_vigencia", asi que el JSON es mas largo
+# por relacion. Sin este margen, la misma truncadura de ESTADO_RESPUESTA_INCOMPLETA
+# que forzo a subir el limite la primera vez (ver comentario en _una_llamada_deepseek)
+# volveria a aparecer justo en las normas con MAS relaciones.
+MAX_TOKENS_RESPUESTA = 6144
 TIMEOUT_DEEPSEEK = 120
 INTENTOS_DEEPSEEK = 3
 MIN_CHARS_ANALIZABLE = 200
@@ -154,9 +159,20 @@ explicaciones) con esta forma exacta:
     "descripcion": "texto tal cual aparece en el documento identificando la norma afectada",
     "articulos_afectados": "10 y 11" (articulos/numerales/anexos afectados tal como los nombra el texto, o null si no aplica/no se especifica),
     "alcance": "total" | "parcial" | null (si el texto permite saberlo; parcial si solo toca articulos/incisos puntuales),
-    "fragmento": "la frase u oracion exacta del documento que sustenta esta clasificacion (maximo 300 caracteres, cita textual, NO parafraseada)"
+    "fragmento": "la frase u oracion exacta del documento que sustenta esta clasificacion (maximo 300 caracteres, cita textual, NO parafraseada)",
+    "confianza_relacion": 0.95 (numero entre 0 y 1: que tan seguro estas de que el tipo_relacion elegido es el correcto. 1.0 = el texto lo dice explicitamente con un verbo juridico claro. 0.5-0.7 = interpretacion razonable pero el texto no es 100% explicito. Menor a 0.5 = muy incierto, deberia haber sido "pendiente_verificacion" en vez de forzar un tipo),
+    "razonamiento": "una o dos frases explicando POR QUE elegiste este tipo_relacion y esta norma afectada (no repitas el fragmento, explica tu inferencia)",
+    "fecha_vigencia": "2027-01-01" (formato YYYY-MM-DD) | null -SOLO si el texto declara una FECHA ABSOLUTA y EXPLICITA de entrada en vigencia de ESTE efecto (ej. "a partir del 1 de enero de 2027"). Si el texto solo da un plazo relativo ("a los noventa (90) dias de su publicacion", "al dia siguiente de su publicacion") y NO calcula la fecha resultante el mismo documento, usa null: NUNCA hagas tu el calculo ni asumas que la fecha de vigencia es la de publicacion.
   }
 ]}
+
+Reglas estrictas de "confianza_relacion" y "fecha_vigencia": NUNCA inventes \
+un numero de confianza ni una fecha para rellenar el campo. Si no puedes \
+fundamentar la confianza en el texto, usa un valor bajo (menor a 0.5) en vez \
+de omitir el campo. Si la fecha de vigencia no esta escrita de forma \
+explicita y absoluta en el documento, el valor DEBE ser null -un plazo \
+relativo sin fecha calculada, o el silencio del texto sobre el tema, no son \
+una fecha.
 
 Reglas estrictas:
 - Solo incluye relaciones donde el documento actual afecta a OTRA norma \
@@ -345,6 +361,54 @@ def fragmento_aparece_en_texto(fragmento: str, texto_completo: str) -> bool:
     if not fragmento:
         return False
     return normalizar_para_comparar(fragmento) in normalizar_para_comparar(texto_completo)
+
+
+def validar_confianza_relacion(valor) -> float | None:
+    """Solo acepta un numero real entre 0 y 1. Cualquier otra cosa (ausente,
+    texto, fuera de rango) se guarda como None: es preferible no tener
+    confianza a inventar una que no reporto el modelo."""
+    if not isinstance(valor, (int, float)) or isinstance(valor, bool):
+        return None
+    if not (0.0 <= float(valor) <= 1.0):
+        return None
+    return float(valor)
+
+
+# Palabras que suelen acompañar una fecha de vigencia EXPLICITA en tecnica
+# legislativa peruana ("entrara en vigencia el...", "rige a partir del...").
+# Es un chequeo deliberadamente barato (no un parser de fechas en lenguaje
+# natural): solo sirve para atrapar el caso mas peligroso, que el modelo
+# devuelva una fecha sin que el fragmento diga nada sobre vigencia.
+PATRON_MENCION_VIGENCIA = re.compile(r"vigen|vigor|rige|entrar[aá]", re.IGNORECASE)
+PATRON_FECHA_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validar_fecha_vigencia(fecha_iso, fragmento: str) -> str | None:
+    """Solo acepta 'fecha_vigencia' si (a) tiene formato de fecha real, y (b)
+    el fragmento citado -que ya se verifico contra el documento en
+    fragmento_aparece_en_texto- efectivamente habla de vigencia y contiene el
+    mismo año. Un plazo relativo ("a los 90 dias de publicada") sin fecha
+    absoluta calculada en el propio texto NUNCA pasa este chequeo: no se hace
+    aqui el calculo que el modelo tampoco debe hacer.
+
+    Esto es una defensa determinista, redundante con la instruccion del
+    prompt: el modelo puede alucinar una fecha igual que puede alucinar un
+    fragmento, y "no aceptar fechas inferidas" no puede depender solo de que
+    el modelo obedezca."""
+    if not fecha_iso or not isinstance(fecha_iso, str):
+        return None
+    if not PATRON_FECHA_ISO.match(fecha_iso):
+        return None
+    try:
+        fecha = date.fromisoformat(fecha_iso)
+    except ValueError:
+        return None
+
+    if not fragmento or not PATRON_MENCION_VIGENCIA.search(fragmento):
+        return None
+    if str(fecha.year) not in fragmento:
+        return None
+    return fecha_iso
 
 
 def load_env():
@@ -731,6 +795,18 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str, catalogo: list[dict
         if alcance not in ("total", "parcial"):
             alcance = None
 
+        # --- FASE 1 (confianza/razonamiento/fecha de vigencia): cada valor se
+        # revalida de forma determinista, nunca se guarda tal cual lo devolvio
+        # el modelo. Ver validar_confianza_relacion/validar_fecha_vigencia.
+        confidence_score = validar_confianza_relacion(relacion.get("confianza_relacion"))
+        ai_reasoning = (relacion.get("razonamiento") or "").strip()[:500] or None
+        effective_date = validar_fecha_vigencia(relacion.get("fecha_vigencia"), fragmento)
+        if relacion.get("fecha_vigencia") and not effective_date:
+            logger.warning(
+                "%s: fecha_vigencia '%s' descartada (no se pudo verificar textualmente en el fragmento).",
+                norma["document_key"], relacion.get("fecha_vigencia"),
+            )
+
         insercion = {
             "norma_origen_id": norma["id"],
             "norma_origen_document_key": norma["document_key"],
@@ -750,6 +826,9 @@ def procesar_norma(supabase, norma: dict, deepseek_key: str, catalogo: list[dict
             "identidad_candidatas": ", ".join(
                 c.get("document_key", "?") for c in resolucion.candidatas
             ) or None,
+            "confidence_score": confidence_score,
+            "ai_reasoning": ai_reasoning,
+            "effective_date": effective_date,
         }
 
         respuesta = supabase.table("digemid_norma_relaciones").insert(insercion).execute()

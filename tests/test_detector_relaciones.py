@@ -612,7 +612,158 @@ class TestProcesarNormaFase1(unittest.TestCase):
 
 class TestAnalyzerVersionFase1(unittest.TestCase):
     def test_version_subio_a_3(self):
-        self.assertEqual(D.ANALYZER_VERSION, 3)
+        self.assertGreaterEqual(D.ANALYZER_VERSION, 3)
+
+
+# ---------------------------------------------------------------------------
+# FASE 2 · taxonomia ampliada (complementa/reglamenta/aclara/anula_*)
+# ---------------------------------------------------------------------------
+class TestFase2NuevosTipos(unittest.TestCase):
+    def test_version_subio_a_4(self):
+        self.assertEqual(D.ANALYZER_VERSION, 4)
+
+    def test_los_5_tipos_nuevos_son_validos(self):
+        nuevos = {
+            "complementa", "reglamenta", "aclara",
+            "anula_acto_administrativo", "anula_disposicion_normativa",
+        }
+        self.assertTrue(nuevos.issubset(D.TIPOS_RELACION_VALIDOS))
+
+    def test_ninguno_de_los_5_nuevos_tiene_efecto_en_vigencia(self):
+        """Espejo de la regla real que vive en
+        supabase/functions/telegram-bot/index.ts::ESTADO_VIGENCIA_POR_RELACION.
+        No hay forma de importar TS desde este test; esto solo verifica que
+        el lado Python declara la misma intencion, para que un cambio futuro
+        en uno de los dos lados sin el otro se note en la revision de codigo."""
+        nuevos = {
+            "complementa", "reglamenta", "aclara",
+            "anula_acto_administrativo", "anula_disposicion_normativa",
+        }
+        self.assertTrue(nuevos.issubset(D.TIPOS_RELACION_SIN_EFECTO_EN_VIGENCIA))
+
+    def test_deroga_modifica_deja_sin_efecto_sustituye_si_tienen_efecto(self):
+        con_efecto = {"deroga", "modifica", "deja_sin_efecto", "sustituye"}
+        self.assertFalse(con_efecto & D.TIPOS_RELACION_SIN_EFECTO_EN_VIGENCIA)
+
+
+CATALOGO_REAL_FASE2 = CATALOGO_FALSO + [
+    {"id": "rd-59-2022", "document_key": "RD-59-2022", "tipo_norma": "RD", "numero": "59", "anio": 2022},
+    {"id": "rm-792-2024", "document_key": "RM-792-2024", "tipo_norma": "RM", "numero": "792", "anio": 2024},
+]
+
+
+class TestCasosRealesFase2(unittest.TestCase):
+    """Los 4 casos que pide la validacion de FASE 2, con texto verbatim de
+    normas DIGEMID reales (confirmado contra produccion: ver el reporte de
+    la corrida real del workflow digemid-normativa-detectar-derogaciones,
+    18-sep-2026). No son ejemplos inventados."""
+
+    def _correr(self, origen, relaciones_ia, texto_pagina, catalogo=None):
+        # El texto de la pagina DEBE contener el "fragmento" citado por cada
+        # relacion -igual que en produccion- para que fragmento_aparece_en_texto
+        # lo pueda verificar de verdad, no solo simular un happy path.
+        self.db = SupabaseFalso(
+            paginas=[{"page_number": 1, "text_normalized": texto_pagina, "text_raw": None}]
+        )
+        original = D.call_deepseek
+        D.call_deepseek = lambda *a, **k: (D.ESTADO_OK, {"relaciones": relaciones_ia})
+        try:
+            return D.procesar_norma(self.db, origen, "clave-falsa", catalogo or CATALOGO_REAL_FASE2)
+        finally:
+            D.call_deepseek = original
+
+    def test_caso_modificacion_real_rm_894_2024(self):
+        fragmento = (
+            "Artículo 1.- Modificar el rubro Autorización de Uso del Anexo de la "
+            "Resolución Ministerial N° 792-2024-MINSA, que aprueba lista complementaria "
+            "de medicamentos para el tratamiento de tuberculosis al Petitorio Nacional "
+            "Único de Medicamentos Esenciales del Sector Salud, respecto al medicamento "
+            "Pretomanid 200 mg tableta"
+        )
+        insertadas = self._correr(
+            {"id": "origen-1", "document_key": "RM-894-2024", "tipo_norma": "RM", "numero": "894", "anio": 2024},
+            [{
+                "tipo_relacion": "modifica", "tipo_norma": "RM", "numero": "792", "anio": 2024,
+                "articulos_afectados": "Anexo, rubro Autorización de Uso", "alcance": "parcial",
+                "descripcion": "Modifica el rubro Autorización de Uso del Anexo de la RM N° 792-2024-MINSA",
+                "fragmento": fragmento,
+                "confianza_relacion": 1.0,
+                "razonamiento": "Verbo 'Modificar' explicito sobre un rubro puntual del anexo de la RM 792-2024.",
+                "fecha_vigencia": None,
+            }],
+            texto_pagina=f"RESOLUCION MINISTERIAL N° 894-2024/MINSA\n\nSE RESUELVE:\n\n{fragmento}",
+        )
+        self.assertEqual(insertadas, 1)
+        fila = self.db.relaciones[0]
+        self.assertEqual(fila["tipo_relacion"], "modifica")
+        self.assertEqual(fila["alcance"], "parcial")
+        self.assertEqual(fila["norma_afectada_id"], "rm-792-2024")
+        self.assertTrue(fila["fragmento_verificado"])
+
+    def test_caso_derogacion_total_real_rm_63_2026(self):
+        fragmento = (
+            "Artículo 2.- Derogar la Resolución Directoral N° 059-2022-DIGEMID-DG-MINSA "
+            "de fecha 14 de junio de 2022."
+        )
+        insertadas = self._correr(
+            {"id": "origen-2", "document_key": "RM-63-2026", "tipo_norma": "RM", "numero": "63", "anio": 2026},
+            [{
+                "tipo_relacion": "deroga", "tipo_norma": "RD", "numero": "59", "anio": 2022,
+                "articulos_afectados": None, "alcance": "total",
+                "descripcion": "Deroga la RD N° 059-2022-DIGEMID-DG-MINSA",
+                "fragmento": fragmento,
+                "confianza_relacion": 1.0,
+                "razonamiento": "Verbo 'Derogar' explicito, norma identificada por numero completo, sin acotar articulos.",
+                "fecha_vigencia": None,
+            }],
+            texto_pagina=f"RESOLUCION MINISTERIAL N° 63-2026/MINSA\n\nSE RESUELVE:\n\n{fragmento}",
+        )
+        self.assertEqual(insertadas, 1)
+        fila = self.db.relaciones[0]
+        self.assertEqual(fila["tipo_relacion"], "deroga")
+        self.assertEqual(fila["alcance"], "total")
+        self.assertEqual(fila["norma_afectada_id"], "rd-59-2022")
+
+    def test_caso_deja_sin_efecto_real_ds_18_2020(self):
+        fragmento = "Artículo 2.- Dejar sin efecto la Resolución Ministerial N° 255-2020-MINSA."
+        insertadas = self._correr(
+            {"id": "origen-3", "document_key": "DS-18-2020", "tipo_norma": "DS", "numero": "18", "anio": 2020},
+            [{
+                "tipo_relacion": "deja_sin_efecto", "tipo_norma": "RM", "numero": "255", "anio": 2020,
+                "articulos_afectados": None, "alcance": "total",
+                "descripcion": "Deja sin efecto la RM N° 255-2020-MINSA",
+                "fragmento": fragmento,
+                "confianza_relacion": 1.0,
+                "razonamiento": "Verbo 'Dejar sin efecto' explicito sobre norma identificada por numero, sin acotar articulos.",
+                "fecha_vigencia": None,
+            }],
+            texto_pagina=f"DECRETO SUPREMO N° 18-2020-SA\n\nDECRETA:\n\n{fragmento}",
+        )
+        self.assertEqual(insertadas, 1)
+        fila = self.db.relaciones[0]
+        self.assertEqual(fila["tipo_relacion"], "deja_sin_efecto")
+        # RM-255-2020 no esta en el catalogo de prueba: no se inventa un vinculo.
+        self.assertIsNone(fila["norma_afectada_id"])
+
+    def test_caso_solo_cita_sin_modificar_no_genera_relacion(self):
+        """Una norma que solo cita a otra ('de conformidad con la Ley N°
+        26842, Ley General de Salud') sin verbo juridico de efecto: el
+        modelo (bien comportado) devuelve una lista vacia, y procesar_norma
+        no debe fabricar ninguna relacion ni fallar."""
+        insertadas = self._correr(
+            {"id": "origen-4", "document_key": "RM-100-2025", "tipo_norma": "RM", "numero": "100", "anio": 2025},
+            [],
+            texto_pagina=(
+                "RESOLUCION MINISTERIAL N° 100-2025/MINSA\n\nSE RESUELVE:\n\n"
+                "Articulo 1.- Aprobar el procedimiento X, de conformidad con lo dispuesto "
+                "en la Ley N° 26842, Ley General de Salud."
+            ),
+        )
+        self.assertEqual(insertadas, 0)
+        self.assertEqual(self.db.relaciones, [])
+        # Se marca analizada igual (no queda atascada reintentando para siempre).
+        actualizacion_normas = [u for u in self.db.updates if u[0] == "digemid_normas"]
+        self.assertTrue(any(u[1].get("derogacion_analizada") for u in actualizacion_normas))
 
 
 if __name__ == "__main__":

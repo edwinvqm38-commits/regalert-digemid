@@ -57,7 +57,7 @@ MAX_CHARS_TEXTO = 15000
 # deterministas, SUBIR este numero: las normas analizadas con una version
 # anterior vuelven a entrar en la cola automaticamente (antes quedaban
 # congeladas para siempre con el resultado viejo).
-ANALYZER_VERSION = 3
+ANALYZER_VERSION = 4
 
 # FASE 1 subio esto de 4096: cada relacion ahora tambien trae "razonamiento"
 # (1-2 frases) y puede traer "fecha_vigencia", asi que el JSON es mas largo
@@ -88,6 +88,28 @@ TIPOS_RELACION_VALIDOS = {
     "suspende",
     "prorroga",
     "pendiente_verificacion",
+    # --- FASE 2 (taxonomia ampliada) ---
+    "complementa",
+    "reglamenta",
+    "aclara",
+    "anula_acto_administrativo",
+    "anula_disposicion_normativa",
+}
+
+# FASE 2: ninguno de estos 5 tipos autoriza cambiar estado_vigencia (ver el
+# mismo criterio duplicado, a proposito, en ESTADO_VIGENCIA_POR_RELACION de
+# supabase/functions/telegram-bot/index.ts -son dos runtimes distintos, no
+# hay forma de compartir una sola constante entre Python y Deno). Sirve aqui
+# solo para el test de consistencia entre ambos lados.
+TIPOS_RELACION_SIN_EFECTO_EN_VIGENCIA = {
+    "exonera",
+    "prorroga",
+    "pendiente_verificacion",
+    "complementa",
+    "reglamenta",
+    "aclara",
+    "anula_acto_administrativo",
+    "anula_disposicion_normativa",
 }
 
 SYSTEM_PROMPT = """Eres un abogado especializado en tecnica legislativa \
@@ -141,6 +163,31 @@ tipo_relacion entre parentesis):
 aplicación..." → exonera
 - "Suspéndase..." → suspende
 - "Prorrógase el plazo..." → prorroga
+- "El presente Reglamento complementa...", "de manera complementaria a..." \
+→ complementa (norma que agrega desarrollo/procedimiento SIN alterar el \
+texto ni la aplicabilidad de la otra norma; ej. una directiva que \
+complementa una ley marco)
+- "El presente Decreto Supremo reglamenta la Ley N°...", "en aplicacion del \
+articulo N de la Ley..." (cuando el documento ENTERO es el reglamento de \
+otra norma superior, no solo la cita en un considerando) → reglamenta. \
+IMPORTANTE: reglamentar una ley NUNCA implica derogarla ni modificarla -son \
+instrumentos jerarquicamente distintos-, asi que jamas reclasifiques esto \
+como "deroga"/"modifica" solo porque el reglamento sea nuevo o extenso.
+- "Aclárase...", "precísase que...", "en los terminos del articulo X debe \
+entenderse que..." → aclara (SOLO si el texto dice explicitamente que esta \
+aclarando/precisando el sentido de una norma ya existente, sin cambiar su \
+texto). Si la "aclaracion" en realidad cambia una regla o un requisito \
+-no solo su interpretacion-, es "modifica", no "aclara".
+- "Declárase la nulidad de la Resolución N°... (acto administrativo \
+particular, ej. una resolucion que otorga o niega un registro sanitario a \
+un administrado especifico)" → anula_acto_administrativo.
+- "Declárase la nulidad de la Resolución N°... (disposicion normativa de \
+alcance general, ej. una resolucion que aprobo una directiva o un \
+reglamento)" → anula_disposicion_normativa. Para decidir entre las dos, \
+mira SI el acto anulado crea una regla general (normativa) o resuelve un \
+caso puntual de un administrado (administrativo); si el texto no da \
+elementos para distinguir, usa "pendiente_verificacion" en vez de adivinar \
+cual de las dos.
 
 Si el texto SI identifica una norma concreta afectada pero el efecto \
 juridico no es alguno de los anteriores, o es ambiguo, o requeriria \
@@ -152,7 +199,7 @@ Devuelve EXCLUSIVAMENTE un JSON (sin texto adicional, sin markdown, sin \
 explicaciones) con esta forma exacta:
 {"relaciones": [
   {
-    "tipo_relacion": "deroga" | "deja_sin_efecto" | "modifica" | "sustituye" | "incorpora" | "exonera" | "suspende" | "prorroga" | "pendiente_verificacion",
+    "tipo_relacion": "deroga" | "deja_sin_efecto" | "modifica" | "sustituye" | "incorpora" | "exonera" | "suspende" | "prorroga" | "complementa" | "reglamenta" | "aclara" | "anula_acto_administrativo" | "anula_disposicion_normativa" | "pendiente_verificacion",
     "tipo_norma": "RM" | "DS" | "LEY" | "RD" (abreviatura corta, o null si no se distingue),
     "numero": "920" (solo el numero, sin barras ni anio, o null),
     "anio": 2004 (numero entero de 4 digitos, o null si no se menciona),

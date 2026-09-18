@@ -1405,6 +1405,13 @@ const VERBOS_RELACION: Record<string, string> = {
   suspende: "suspendería",
   prorroga: "prorrogaría un plazo de",
   pendiente_verificacion: "posiblemente afectaría (efecto jurídico NO determinado con certeza) a",
+  // FASE 2 (taxonomia ampliada): estos 5 son deliberadamente descriptivos,
+  // ninguno altera vigencia (ver ESTADO_VIGENCIA_POR_RELACION mas abajo).
+  complementa: "complementaría",
+  reglamenta: "reglamentaría",
+  aclara: "aclararía",
+  anula_acto_administrativo: "anularía (acto administrativo) a",
+  anula_disposicion_normativa: "anularía (disposición normativa) a",
 };
 
 const VERBOS_CONFIRMACION: Record<string, string> = {
@@ -1417,6 +1424,11 @@ const VERBOS_CONFIRMACION: Record<string, string> = {
   suspende: "suspendió",
   prorroga: "prorrogó un plazo de",
   pendiente_verificacion: "posiblemente afectó (sin confirmar efecto jurídico) a",
+  complementa: "complementó",
+  reglamenta: "reglamentó",
+  aclara: "aclaró",
+  anula_acto_administrativo: "anuló (acto administrativo) a",
+  anula_disposicion_normativa: "anuló (disposición normativa) a",
 };
 
 // Solo los tipos que representan una afectacion real del TEXTO o la
@@ -1424,6 +1436,19 @@ const VERBOS_CONFIRMACION: Record<string, string> = {
 // norma no es lo mismo que modificarla": exonera/prorroga/
 // pendiente_verificacion dejan la norma citada como "vigente" (la relacion
 // igual queda registrada, para trazabilidad, pero sin alterar su estado).
+//
+// FASE 2 agrega complementa/reglamenta/aclara/anula_acto_administrativo/
+// anula_disposicion_normativa, TODOS con el mismo tratamiento (undefined):
+// - complementa/reglamenta/aclara son por diseño relaciones descriptivas
+//   (una norma reglamentaria no deroga automaticamente a la norma superior
+//   que reglamenta; una aclaracion no cambia vigencia salvo que el propio
+//   texto disponga otra cosa explicitamente, y eso se captura como una
+//   relacion "modifica" aparte, no reinterpretando "aclara").
+// - anula_* NUNCA cambia vigencia sola, ni siquiera anula_disposicion_normativa
+//   (que conceptualmente invalida una norma igual que "deroga"): una nulidad
+//   normativa suele venir de un fuero distinto (control de constitucionalidad,
+//   contencioso-administrativo) y amerita la misma cautela que "pendiente_verificacion",
+//   nunca el automatismo de "deroga".
 const ESTADO_VIGENCIA_POR_RELACION: Record<string, string | undefined> = {
   deroga: "derogada",
   deja_sin_efecto: "derogada",
@@ -1433,6 +1458,11 @@ const ESTADO_VIGENCIA_POR_RELACION: Record<string, string | undefined> = {
   suspende: "suspendida",
   exonera: undefined,
   prorroga: undefined,
+  complementa: undefined,
+  reglamenta: undefined,
+  aclara: undefined,
+  anula_acto_administrativo: undefined,
+  anula_disposicion_normativa: undefined,
   pendiente_verificacion: undefined,
 };
 

@@ -397,6 +397,19 @@ export async function suggestSimilarAlerts(
   }[];
 }
 
+// FASE 3: mismo mapa que supabase/functions/telegram-bot/index.ts (no hay
+// import compartido entre ambos bots hoy, asi que se duplica a proposito
+// para que este archivo no dependa de ese otro). "derogada_parcialmente" y
+// "suspendida" NO son lo mismo que "derogada": antes caian ambas en
+// "DEROGADA / SIN EFECTO" (H-11), y una norma con un solo articulo derogado
+// sigue vigente en todo lo demas.
+const ETIQUETAS_ESTADO_VIGENCIA: Record<string, string> = {
+  modificada: "MODIFICADA",
+  derogada: "DEROGADA / SIN EFECTO",
+  derogada_parcialmente: "VIGENTE, CON UN ARTÍCULO DEROGADO",
+  suspendida: "SUSPENDIDA",
+};
+
 /** Advertencias de confiabilidad de un bloque de contexto, a partir de las
  * senales que ya calcula la extraccion documental (estado_vigencia,
  * quality_score, has_tables, posible_formula, revisado_manual). Sin esto la
@@ -409,11 +422,12 @@ export function advertenciasDelBloque(chunk: any): string[] {
   // La vigencia es independiente de si la transcripcion fue revisada: una
   // norma derogada sigue derogada aunque su OCR ya este verificado.
   if (chunk.estado_vigencia && chunk.estado_vigencia !== "vigente") {
-    const etiqueta = chunk.estado_vigencia === "modificada" ? "MODIFICADA" : "DEROGADA / SIN EFECTO";
-    advertencias.push(
-      `⚠️ IMPORTANTE: esta norma fue marcada como ${etiqueta} por otra norma posterior. ` +
-        "No la presentes como norma vigente: dilo explícitamente en tu respuesta.",
-    );
+    const etiqueta = ETIQUETAS_ESTADO_VIGENCIA[chunk.estado_vigencia] ?? chunk.estado_vigencia.toUpperCase();
+    const instruccion = chunk.estado_vigencia === "derogada_parcialmente"
+      ? "Sigue vigente en todo lo demás; solo un artículo o disposición puntual fue derogado por otra " +
+        "norma posterior. Acláraselo así al usuario -no digas que la norma completa está derogada."
+      : "No la presentes como norma vigente sin esa aclaración: dilo explícitamente en tu respuesta.";
+    advertencias.push(`⚠️ IMPORTANTE: esta norma está marcada como ${etiqueta}. ${instruccion}`);
   }
 
   if (chunk.revisado_manual) return advertencias;

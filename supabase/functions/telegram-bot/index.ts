@@ -1431,39 +1431,58 @@ const VERBOS_CONFIRMACION: Record<string, string> = {
   anula_disposicion_normativa: "anuló (disposición normativa) a",
 };
 
-// Solo los tipos que representan una afectacion real del TEXTO o la
-// APLICABILIDAD de la norma cambian su estado_vigencia. "Mencion de una
-// norma no es lo mismo que modificarla": exonera/prorroga/
-// pendiente_verificacion dejan la norma citada como "vigente" (la relacion
-// igual queda registrada, para trazabilidad, pero sin alterar su estado).
+// FASE 3 (corrige el riesgo real detectado en produccion: repuntar
+// LEY-32319-2025 --deroga(parcial, articulo 9)--> LEY-29698 hubiera marcado
+// TODA la ley como "derogada" con el diccionario plano que existia antes,
+// cuando el texto solo deroga un articulo puntual). "estado_vigencia" ya NO
+// es una tabla fija tipo_relacion -> estado: depende tambien de si la
+// afectacion es total o parcial.
 //
-// FASE 2 agrega complementa/reglamenta/aclara/anula_acto_administrativo/
-// anula_disposicion_normativa, TODOS con el mismo tratamiento (undefined):
-// - complementa/reglamenta/aclara son por diseño relaciones descriptivas
-//   (una norma reglamentaria no deroga automaticamente a la norma superior
-//   que reglamenta; una aclaracion no cambia vigencia salvo que el propio
-//   texto disponga otra cosa explicitamente, y eso se captura como una
-//   relacion "modifica" aparte, no reinterpretando "aclara").
-// - anula_* NUNCA cambia vigencia sola, ni siquiera anula_disposicion_normativa
-//   (que conceptualmente invalida una norma igual que "deroga"): una nulidad
-//   normativa suele venir de un fuero distinto (control de constitucionalidad,
-//   contencioso-administrativo) y amerita la misma cautela que "pendiente_verificacion",
-//   nunca el automatismo de "deroga".
-const ESTADO_VIGENCIA_POR_RELACION: Record<string, string | undefined> = {
-  deroga: "derogada",
-  deja_sin_efecto: "derogada",
-  modifica: "modificada",
-  sustituye: "modificada",
-  incorpora: "modificada",
-  suspende: "suspendida",
-  exonera: undefined,
-  prorroga: undefined,
-  complementa: undefined,
-  reglamenta: undefined,
-  aclara: undefined,
-  anula_acto_administrativo: undefined,
-  anula_disposicion_normativa: undefined,
-  pendiente_verificacion: undefined,
+// alcance/articulos_afectados son la señal de si el efecto es total o
+// parcial -la misma señal que ya usa el detector (scripts/detectar_derogaciones_normativa.py)
+// para decidir "alcance". Cuando el modelo no reporto alcance pero SI dio
+// articulos_afectados, se trata igual como parcial (evidencia mas fuerte
+// que la ausencia de alcance): nunca al reves.
+//
+// - deroga/deja_sin_efecto TOTAL (sin articulos, alcance!=parcial) -> "derogada".
+// - deroga/deja_sin_efecto PARCIAL (alcance=parcial o hay articulos_afectados)
+//   -> "derogada_parcialmente" (la norma sigue vigente en lo demas; NUNCA
+//   "derogada" completa por un solo articulo).
+// - modifica/sustituye/incorpora -> "modificada" siempre (total o parcial):
+//   "modificar" ya es, por definicion, una afectacion a partes de la norma,
+//   no hace falta distinguir alcance aqui.
+// - suspende -> "suspendida" (sin cambios en esta fase; no estaba en el
+//   alcance de la validacion pedida).
+// - exonera/prorroga/pendiente_verificacion/complementa/reglamenta/aclara/
+//   anula_* -> undefined: "Mencion de una norma no es lo mismo que
+//   modificarla", y ninguno de estos altera vigencia sola (ver FASE 2).
+function calcularEstadoVigencia(
+  tipoRelacion: string,
+  alcance: string | null | undefined,
+  articulosAfectados: string | null | undefined,
+): string | undefined {
+  const esParcial = alcance === "parcial" || Boolean(articulosAfectados && articulosAfectados.trim());
+
+  if (tipoRelacion === "deroga" || tipoRelacion === "deja_sin_efecto") {
+    return esParcial ? "derogada_parcialmente" : "derogada";
+  }
+  if (tipoRelacion === "modifica" || tipoRelacion === "sustituye" || tipoRelacion === "incorpora") {
+    return "modificada";
+  }
+  if (tipoRelacion === "suspende") {
+    return "suspendida";
+  }
+  return undefined;
+}
+
+// Etiquetas para advertenciasDelBloque() (contexto de /consulta) y para
+// cualquier otro lugar que muestre estado_vigencia al usuario. "vigente" no
+// necesita etiqueta (es el default, no se avisa nada).
+const ETIQUETAS_ESTADO_VIGENCIA: Record<string, string> = {
+  modificada: "MODIFICADA",
+  derogada: "DEROGADA / SIN EFECTO",
+  derogada_parcialmente: "VIGENTE, CON UN ARTÍCULO DEROGADO",
+  suspendida: "SUSPENDIDA",
 };
 
 /** Genera un document_key para una norma que no existe en la base (solo se
@@ -1633,11 +1652,14 @@ async function resolverRelacionDerogacion(
   }
 
   let normaAfectadaId: string | null = relacion.norma_afectada_id;
-  // undefined = este tipo de relacion (exonera/prorroga/pendiente_verificacion)
-  // no altera el estado de vigencia de la norma citada: solo queda
-  // registrada la relacion para trazabilidad. "Mencion de una norma no es
-  // lo mismo que modificarla".
-  const estadoVigencia = ESTADO_VIGENCIA_POR_RELACION[relacion.tipo_relacion];
+  // undefined = este tipo de relacion no altera el estado de vigencia de la
+  // norma citada (solo queda registrada para trazabilidad), O SI la altera
+  // pero solo de forma parcial -ver calcularEstadoVigencia, FASE 3-.
+  // "Mencion de una norma no es lo mismo que modificarla", y "modificar un
+  // articulo no es lo mismo que derogar toda la norma".
+  const estadoVigencia = calcularEstadoVigencia(
+    relacion.tipo_relacion, relacion.alcance, relacion.articulos_afectados,
+  );
   let identidadAmbigua = false;
 
   if (!normaAfectadaId) {
@@ -2928,11 +2950,19 @@ function advertenciasDelBloque(chunk: any): string[] {
   const advertencias: string[] = [];
 
   if (chunk.estado_vigencia && chunk.estado_vigencia !== "vigente") {
-    const etiqueta = chunk.estado_vigencia === "modificada" ? "MODIFICADA" : "DEROGADA / SIN EFECTO";
-    advertencias.push(
-      `⚠️ IMPORTANTE: esta norma fue marcada como ${etiqueta} por otra norma posterior. ` +
-        "No la presentes como norma vigente: dilo explícitamente en tu respuesta.",
-    );
+    // FASE 3: antes, cualquier estado distinto de "modificada" caia en
+    // "DEROGADA / SIN EFECTO" -incluyendo "derogada_parcialmente" y
+    // "suspendida", que NO significan lo mismo. Una norma con un solo
+    // articulo derogado sigue vigente en todo lo demas: decirle a la IA que
+    // la trate igual que una derogacion total es exactamente el error que
+    // se queria corregir en el dato (calcularEstadoVigencia) y que aqui se
+    // hubiera vuelto a cometer, ahora en la respuesta al usuario.
+    const etiqueta = ETIQUETAS_ESTADO_VIGENCIA[chunk.estado_vigencia] ?? chunk.estado_vigencia.toUpperCase();
+    const instruccion = chunk.estado_vigencia === "derogada_parcialmente"
+      ? "Sigue vigente en todo lo demás; solo un artículo o disposición puntual fue derogado por otra " +
+        "norma posterior. Acláraselo así al usuario -no digas que la norma completa está derogada."
+      : "No la presentes como norma vigente sin esa aclaración: dilo explícitamente en tu respuesta.";
+    advertencias.push(`⚠️ IMPORTANTE: esta norma está marcada como ${etiqueta}. ${instruccion}`);
   }
 
   if (chunk.revisado_manual) return advertencias;

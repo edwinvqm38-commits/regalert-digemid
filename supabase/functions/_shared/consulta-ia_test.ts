@@ -178,6 +178,20 @@ Deno.test("una norma derogada se le advierte al modelo", () => {
   assertStringIncludes(advertencias.join(" "), "DEROGADA");
 });
 
+Deno.test("FASE 3: una derogacion parcial NO se anuncia como derogacion total", () => {
+  const advertencias = advertenciasDelBloque({
+    ...CHUNK_VERIFICADO,
+    estado_vigencia: "derogada_parcialmente",
+  });
+
+  const texto = advertencias.join(" ");
+  assert(advertencias.length > 0);
+  // No debe decir "DEROGADA / SIN EFECTO": ese es el error de H-11 que
+  // motivo esta fase (un solo articulo derogado no es la norma entera).
+  assert(!texto.includes("DEROGADA / SIN EFECTO"));
+  assertStringIncludes(texto, "vigente");
+});
+
 Deno.test("una transcripción no verificada baja la confianza del bloque", () => {
   const baja = advertenciasDelBloque({
     ...CHUNK_VERIFICADO,

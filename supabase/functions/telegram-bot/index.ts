@@ -259,6 +259,7 @@ const COMANDOS_ADMIN: { command: string; description: string }[] = [
   { command: "tablasrevisar", description: "Normas con tablas sin verificar" },
   { command: "tablarevisar", description: "Verificar las tablas de una norma" },
   { command: "normaestado", description: "Reporte de fidelidad (global o por norma)" },
+  { command: "normavigencia", description: "Cadena de trazabilidad de vigencia de una norma" },
   { command: "reportenormas", description: "Reporte maestro HTML de todas las normas" },
   { command: "actualizarcomandos", description: "Refrescar este menú de comandos" },
 ];
@@ -1607,6 +1608,258 @@ async function buscarNormaExistentePorIdentidad(
   return { id: null, ambigua: false };
 }
 
+// --- /normavigencia: cadena de trazabilidad de vigencia -------------------
+// Ver docs/ESTADO_VIGENCIA_CALCULO.md y el diseño aprobado para el detalle
+// de cada decision. Solo usa relaciones CONFIRMADAS; las pendientes se
+// reportan aparte, nunca entran en la cadena.
+
+const LIMITE_PROFUNDIDAD_VIGENCIA = 20;
+
+interface EslabonVigencia {
+  origenId: string;
+  origenDocumentKey: string;
+  afectadaId: string;
+  afectadaDocumentKey: string;
+  tipoRelacion: string;
+  alcance: string | null;
+  articulosAfectados: string | null;
+  resueltoEn: string | null;
+  effectiveDate: string | null;
+  fragmentoFuente: string | null;
+}
+
+interface CadenaVigencia {
+  eslabones: EslabonVigencia[];
+  idsVisitados: Set<string>;
+  ciclosDetectados: string[];
+  truncadoPorProfundidad: boolean;
+}
+
+/** Recorre, desde `normaRaizId`, quien afecto a quien via relaciones YA
+ * CONFIRMADAS (norma_afectada_id = nodo actual -> norma_origen_id es quien
+ * actuo sobre el). Cada norma visitada entra a `idsVisitados` ANTES de
+ * encolarse: si una relacion apunta a un id ya visitado, es un ciclo -se
+ * registra y esa rama se corta ahi, nunca se sigue-. Ademas de eso, un
+ * limite duro de profundidad (LIMITE_PROFUNDIDAD_VIGENCIA) corta cualquier
+ * cadena anormalmente larga que el corte de ciclos no hubiera detectado
+ * (ej. una cadena real, no ciclica, pero absurdamente extensa por un error
+ * de datos). NINGUNA rama se descarta por "elegir una sola": si dos
+ * relaciones confirmadas distintas afectan al mismo nodo, ambas quedan en
+ * `eslabones`. */
+async function construirCadenaVigencia(
+  normaRaizId: string,
+  normaRaizKey: string,
+): Promise<CadenaVigencia> {
+  const idsVisitados = new Set<string>([normaRaizId]);
+  const eslabones: EslabonVigencia[] = [];
+  const ciclosDetectados: string[] = [];
+  let truncadoPorProfundidad = false;
+
+  let cola: { id: string; key: string; profundidad: number }[] = [
+    { id: normaRaizId, key: normaRaizKey, profundidad: 0 },
+  ];
+
+  while (cola.length > 0) {
+    const nodo = cola.shift()!;
+
+    if (nodo.profundidad >= LIMITE_PROFUNDIDAD_VIGENCIA) {
+      truncadoPorProfundidad = true;
+      continue;
+    }
+
+    const { data: relaciones } = await supabase
+      .from("digemid_norma_relaciones")
+      .select(
+        "norma_origen_id, norma_origen_document_key, tipo_relacion, alcance, " +
+          "articulos_afectados, fragmento_fuente, resuelto_en, effective_date",
+      )
+      .eq("norma_afectada_id", nodo.id)
+      .eq("estado", "confirmada");
+
+    for (const rel of relaciones ?? []) {
+      eslabones.push({
+        origenId: rel.norma_origen_id,
+        origenDocumentKey: rel.norma_origen_document_key,
+        afectadaId: nodo.id,
+        afectadaDocumentKey: nodo.key,
+        tipoRelacion: rel.tipo_relacion,
+        alcance: rel.alcance ?? null,
+        articulosAfectados: rel.articulos_afectados ?? null,
+        resueltoEn: rel.resuelto_en ?? null,
+        effectiveDate: rel.effective_date ?? null,
+        fragmentoFuente: rel.fragmento_fuente ?? null,
+      });
+
+      if (idsVisitados.has(rel.norma_origen_id)) {
+        ciclosDetectados.push(rel.norma_origen_document_key);
+        continue;
+      }
+      idsVisitados.add(rel.norma_origen_id);
+      cola.push({ id: rel.norma_origen_id, key: rel.norma_origen_document_key, profundidad: nodo.profundidad + 1 });
+    }
+  }
+
+  return { eslabones, idsVisitados, ciclosDetectados, truncadoPorProfundidad };
+}
+
+/** Verbo para /normavigencia que SI distingue total de parcial en el texto
+ * -a diferencia de VERBOS_CONFIRMACION, pensado para el mensaje de
+ * confirmacion de UNA sola relacion, donde "derogó a" sin mas calificativo
+ * es ambiguo: se puede leer como derogacion total incluso cuando
+ * alcance="parcial". Mismo criterio esParcial que calcularEstadoVigencia,
+ * para que el texto nunca contradiga el estado_vigencia real que se guardo. */
+function describirEfectoConEscala(
+  tipoRelacion: string,
+  alcance: string | null | undefined,
+  articulosAfectados: string | null | undefined,
+): string {
+  const esParcial = alcance === "parcial" || Boolean(articulosAfectados && articulosAfectados.trim());
+
+  if (tipoRelacion === "deroga") return esParcial ? "derogó parcialmente" : "derogó totalmente";
+  if (tipoRelacion === "deja_sin_efecto") return esParcial ? "dejó sin efecto parcialmente" : "dejó sin efecto";
+  if (tipoRelacion === "modifica") return esParcial ? "modificó parcialmente" : "modificó";
+  if (tipoRelacion === "sustituye") return esParcial ? "sustituyó parcialmente el texto de" : "sustituyó el texto de";
+  if (tipoRelacion === "incorpora") return esParcial ? "incorporó contenido parcial en" : "incorporó contenido en";
+  return VERBOS_CONFIRMACION[tipoRelacion] ?? tipoRelacion;
+}
+
+/** Clave cronologica de un eslabon para ordenar la VISUALIZACION de mas
+ * antigua a mas reciente (el recorrido en si va "hacia atras" siguiendo
+ * norma_afectada_id -> norma_origen_id, que no es necesariamente el orden
+ * de lectura correcto si hay ramas). Prioriza effective_date (fecha de
+ * vigencia real declarada en el texto) sobre resuelto_en (fecha en que un
+ * humano confirmo la relacion, que puede ser mucho despues de que la norma
+ * se publico) -a falta de ambas, ordena al final sin garantia. */
+function claveCronologica(eslabon: EslabonVigencia): string {
+  return eslabon.effectiveDate ?? eslabon.resueltoEn ?? "9999-99-99";
+}
+
+/** Detecta, por norma afectada, si hay mas de una relacion confirmada con
+ * un efecto en estado_vigencia DISTINTO (ej. una dice "deroga total" y otra
+ * "modifica" sobre la misma norma). Nunca se resuelve solo: se reporta como
+ * conflicto para revision legal humana. */
+function detectarConflictos(eslabones: EslabonVigencia[]): Map<string, EslabonVigencia[]> {
+  const porAfectada = new Map<string, EslabonVigencia[]>();
+  for (const e of eslabones) {
+    const lista = porAfectada.get(e.afectadaId) ?? [];
+    lista.push(e);
+    porAfectada.set(e.afectadaId, lista);
+  }
+
+  const conflictos = new Map<string, EslabonVigencia[]>();
+  for (const [afectadaId, lista] of porAfectada) {
+    if (lista.length < 2) continue;
+    const efectos = new Set(
+      lista.map((e) => calcularEstadoVigencia(e.tipoRelacion, e.alcance, e.articulosAfectados) ?? "sin_efecto"),
+    );
+    if (efectos.size > 1) conflictos.set(afectadaId, lista);
+  }
+  return conflictos;
+}
+
+async function construirReporteVigenciaNorma(documentKey: string): Promise<string> {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, estado_vigencia, derogacion_analizada")
+    .eq("document_key", documentKey)
+    .maybeSingle();
+
+  if (!norma) {
+    return `⚠️ No encontré ninguna norma con document_key "${escapeHtml(documentKey)}".`;
+  }
+
+  if (!norma.derogacion_analizada) {
+    return (
+      `⚠️ <b>${escapeHtml(norma.document_key)}</b> todavía no fue analizada por el motor de relaciones ` +
+      "normativas. No hay evidencia suficiente para afirmar su vigencia -no se muestra ningún estado " +
+      "por defecto. Vuelve a intentar después de que corra el análisis, o revísala manualmente."
+    );
+  }
+
+  const cadena = await construirCadenaVigencia(norma.id, norma.document_key);
+  const conflictos = detectarConflictos(cadena.eslabones);
+
+  const lineas: string[] = [
+    `📜 <b>${escapeHtml(norma.document_key)}</b>${norma.titulo ? ` — ${escapeHtml(norma.titulo)}` : ""}`,
+  ];
+
+  const etiquetaActual = norma.estado_vigencia && norma.estado_vigencia !== "vigente"
+    ? (ETIQUETAS_ESTADO_VIGENCIA[norma.estado_vigencia] ?? norma.estado_vigencia.toUpperCase())
+    : "VIGENTE";
+  lineas.push(
+    `Estado confirmado según relaciones disponibles: <b>${etiquetaActual}</b> ` +
+      "(según la información cargada en el sistema; no descarta normas posteriores aún no ingresadas).",
+  );
+
+  if (cadena.eslabones.length === 0) {
+    lineas.push("", "No hay relaciones confirmadas que afecten a esta norma. Sin más eslabones que mostrar.");
+  } else {
+    const ordenados = [...cadena.eslabones].sort((a, b) => claveCronologica(a).localeCompare(claveCronologica(b)));
+    const ultima = ordenados[ordenados.length - 1];
+    lineas.push(
+      `Última modificación conocida: <b>${escapeHtml(ultima.origenDocumentKey)}</b> ` +
+        `${describirEfectoConEscala(ultima.tipoRelacion, ultima.alcance, ultima.articulosAfectados)} a ` +
+        `${escapeHtml(ultima.afectadaDocumentKey)}` +
+        (ultima.resueltoEn ? ` (confirmado ${ultima.resueltoEn.slice(0, 10)})` : ""),
+    );
+
+    lineas.push("", "Cadena de trazabilidad (de la más antigua a la más reciente):");
+    for (const e of ordenados) {
+      const verbo = describirEfectoConEscala(e.tipoRelacion, e.alcance, e.articulosAfectados);
+      const detalle = e.articulosAfectados ? ` (art./num. ${escapeHtml(e.articulosAfectados)})` : "";
+      const fecha = e.resueltoEn ? ` — confirmado ${e.resueltoEn.slice(0, 10)}` : "";
+      lineas.push(
+        `${escapeHtml(e.afectadaDocumentKey)} → ${verbo}${detalle} por <b>${escapeHtml(e.origenDocumentKey)}</b>${fecha}`,
+      );
+    }
+  }
+
+  if (cadena.ciclosDetectados.length > 0) {
+    lineas.push(
+      "",
+      `⚠️ Ciclo detectado en la cadena (${escapeHtml(cadena.ciclosDetectados.join(", "))} ya aparecía antes). ` +
+        "Esa rama se cortó ahí: revisar manualmente, probablemente hay un error de identidad en los datos.",
+    );
+  }
+  if (cadena.truncadoPorProfundidad) {
+    lineas.push(
+      "",
+      `⚠️ La cadena se cortó por longitud (más de ${LIMITE_PROFUNDIDAD_VIGENCIA} niveles). Revisar manualmente.`,
+    );
+  }
+
+  if (conflictos.size > 0) {
+    lineas.push(
+      "",
+      "⚗️ <b>Conflicto: hay ramas con efectos jurídicos distintos sobre la misma norma. " +
+        "No se resuelve automáticamente, requiere revisión legal humana:</b>",
+    );
+    for (const [, lista] of conflictos) {
+      for (const e of lista) {
+        const efecto = calcularEstadoVigencia(e.tipoRelacion, e.alcance, e.articulosAfectados) ?? "sin efecto en vigencia";
+        lineas.push(`  - ${escapeHtml(e.origenDocumentKey)} → ${e.tipoRelacion} (${efecto}) a ${escapeHtml(e.afectadaDocumentKey)}`);
+      }
+    }
+  }
+
+  const idsCadena = Array.from(cadena.idsVisitados);
+  const { count: totalPendientesRaw } = await supabase
+    .from("digemid_norma_relaciones")
+    .select("id", { count: "exact", head: true })
+    .eq("estado", "pendiente")
+    .in("norma_afectada_id", idsCadena);
+  const totalPendientes = totalPendientesRaw ?? 0;
+  if (totalPendientes > 0) {
+    lineas.push(
+      "",
+      `⚠️ Hay ${totalPendientes} relación(es) pendiente(s) de confirmar sobre normas de esta cadena que ` +
+        "podrían cambiar este resultado (usa /derogacionespendientes para revisarlas).",
+    );
+  }
+
+  return lineas.join("\n");
+}
+
 /** Resuelve (confirma o rechaza) una relacion de derogacion/modificacion
  * propuesta por la IA (scripts/detectar_derogaciones_normativa.py). Nunca se
  * aplica sola: siempre pasa por este flujo manual via botones porque un
@@ -2410,6 +2663,9 @@ function helpText(esAdmin = false) {
     "",
     "<b>/normaestado [document_key]</b>",
     "Reporte de fidelidad: calidad de texto, tablas, OCR, fórmulas y revisión manual. Sin argumento, resume toda la base; con document_key, el detalle de esa norma con un veredicto (confiable / usar con precaución / necesita revisión).",
+    "",
+    "<b>/normavigencia document_key</b>",
+    "Cadena de trazabilidad de vigencia: qué normas confirmadas (nunca pendientes) modificaron/derogaron/etc. a esta, ordenadas de la más antigua a la más reciente. Distingue la última modificación conocida del estado confirmado, avisa si hay ramas con efectos jurídicos distintos (no los resuelve solo) y si hay relaciones pendientes que podrían cambiar el resultado.",
     "",
     "<b>/reportenormas</b>",
     "Reporte maestro en HTML con TODAS las normas: PDF subido o no, páginas procesadas, calidad, tablas/fórmulas/gráficos pendientes, ordenado de más a menos urgente. Ábrelo en un navegador, no en un editor de texto.",
@@ -5221,6 +5477,24 @@ async function handleCommand(
       return await sendMessage(chatId, reporte);
     } catch (error) {
       return await sendMessage(chatId, `⚠️ Error al calcular el estado: ${escapeHtml(String(error))}`);
+    }
+  }
+
+  if (trimmed === "/normavigencia" || trimmed.startsWith("/normavigencia ")) {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    const documentKey = trimmed.replace("/normavigencia", "").trim();
+    if (!documentKey) {
+      return await sendMessage(chatId, "Escribe el document_key de la norma.\n\nEjemplo:\n<code>/normavigencia DS-16-2011</code>");
+    }
+
+    try {
+      const reporte = await construirReporteVigenciaNorma(documentKey);
+      return await sendMessage(chatId, reporte);
+    } catch (error) {
+      return await sendMessage(chatId, `⚠️ Error al calcular la cadena de vigencia: ${escapeHtml(String(error))}`);
     }
   }
 

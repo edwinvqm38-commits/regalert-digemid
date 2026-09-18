@@ -1456,6 +1456,108 @@ function construirDocumentKeyStub(
   return `NORM-${slug || crypto.randomUUID().slice(0, 8).toUpperCase()}`;
 }
 
+// --- H-08 (docs/AUDITORIA_RELACIONES_NORMATIVAS.md): antes de crear un
+// registro nuevo para la norma citada, hay que buscar si YA existe una con
+// la misma identidad (tipo+numero+a\u00f1o) -de lo contrario cada confirmacion
+// manual duplicaba normas reales bajo un "stub" con otro document_key (ej.
+// "Ley 29459" volvia a crearse aunque LEY-29459 ya estuviera en la base).
+// Misma tabla canonica y misma regla conservadora que
+// scripts/identidad_normativa.py::resolver_identidad: ante mas de una
+// candidata, JAMAS se elige "la primera" ni se crea un duplicado.
+const TIPOS_NORMA_CANONICOS: Record<string, string> = {
+  "rm": "RM",
+  "resolucion ministerial": "RM",
+  "ds": "DS",
+  "decreto supremo": "DS",
+  "rd": "RD",
+  "resolucion directoral": "RD",
+  "ley": "LEY",
+  "du": "DU",
+  "decreto de urgencia": "DU",
+  "rs": "RS",
+  "resolucion suprema": "RS",
+  "rvm": "RVM",
+  "resolucion viceministerial": "RVM",
+  "rj": "RJ",
+  "resolucion jefatural": "RJ",
+  "dl": "DL",
+  "decreto legislativo": "DL",
+  "rge": "RGE",
+  "resolucion de gerencia general": "RGE",
+};
+
+function normalizarTipoNormaCitado(valor: string | null): string | null {
+  if (!valor) return null;
+  const sinAcentos = valor.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const plano = sinAcentos.replace(/\./g, "").replace(/\s+/g, " ").trim();
+  return TIPOS_NORMA_CANONICOS[plano] ?? null;
+}
+
+function normalizarNumeroCitado(valor: string | null): string | null {
+  if (!valor) return null;
+  const match = valor.match(/\d+/);
+  return match ? String(parseInt(match[0], 10)) : null;
+}
+
+/** Busca, entre las normas YA existentes en digemid_normas, si alguna
+ * corresponde a la identidad citada (tipo+numero+a\u00f1o). Resolucion
+ * jerarquica: tipo+numero+a\u00f1o exacto -> tipo+numero sin a\u00f1o (ej. "Ley
+ * 29459") -> numero+a\u00f1o sin tipo SOLO si es unica en toda la base. Si en
+ * cualquier nivel hay mas de una candidata, devuelve `ambigua: true` y no
+ * elige ninguna -la vinculacion queda pendiente de un humano en vez de
+ * arriesgar un enlace o un duplicado incorrectos. */
+async function buscarNormaExistentePorIdentidad(
+  tipoNormaCitado: string | null,
+  numeroCitado: string | null,
+  anioCitado: number | null,
+): Promise<{ id: string | null; ambigua: boolean }> {
+  const numeroNorm = normalizarNumeroCitado(numeroCitado);
+  if (!numeroNorm) return { id: null, ambigua: false };
+
+  const tipoNorm = normalizarTipoNormaCitado(tipoNormaCitado);
+
+  const { data: candidatas } = await supabase
+    .from("digemid_normas")
+    .select("id, tipo_norma, numero, anio")
+    .not("numero", "is", null)
+    .range(0, 4999);
+
+  if (!candidatas || candidatas.length === 0) return { id: null, ambigua: false };
+
+  const porNumero = candidatas.filter(
+    (fila) => normalizarNumeroCitado(fila.numero) === numeroNorm,
+  );
+  const porTipoYNumero = tipoNorm
+    ? porNumero.filter((f) => normalizarTipoNormaCitado(f.tipo_norma) === tipoNorm)
+    : porNumero;
+
+  const elegirUnica = (candidatasNivel: typeof candidatas) => {
+    if (candidatasNivel.length === 1) return { id: candidatasNivel[0].id, ambigua: false };
+    if (candidatasNivel.length > 1) return { id: null, ambigua: true };
+    return null;
+  };
+
+  // Nivel 1: tipo + numero + a\u00f1o (cuando la cita trae a\u00f1o)
+  if (tipoNorm && anioCitado) {
+    const resultado = elegirUnica(porTipoYNumero.filter((f) => f.anio === anioCitado));
+    if (resultado) return resultado;
+  }
+
+  // Nivel 2: tipo + numero, sin a\u00f1o en la cita
+  if (tipoNorm) {
+    const resultado = elegirUnica(porTipoYNumero);
+    if (resultado) return resultado;
+  }
+
+  // Nivel 3: numero + a\u00f1o, sin tipo citado -solo si es unica en TODA la base
+  if (anioCitado) {
+    const resultado = elegirUnica(porNumero.filter((f) => f.anio === anioCitado));
+    if (resultado) return resultado;
+  }
+
+  return { id: null, ambigua: false };
+}
+
 /** Resuelve (confirma o rechaza) una relacion de derogacion/modificacion
  * propuesta por la IA (scripts/detectar_derogaciones_normativa.py). Nunca se
  * aplica sola: siempre pasa por este flujo manual via botones porque un
@@ -1506,27 +1608,34 @@ async function resolverRelacionDerogacion(
   // registrada la relacion para trazabilidad. "Mencion de una norma no es
   // lo mismo que modificarla".
   const estadoVigencia = ESTADO_VIGENCIA_POR_RELACION[relacion.tipo_relacion];
+  let identidadAmbigua = false;
 
   if (!normaAfectadaId) {
-    const documentKeyStub = construirDocumentKeyStub(
+    const encontrada = await buscarNormaExistentePorIdentidad(
       relacion.tipo_norma_afectada,
       relacion.numero_afectada,
       relacion.anio_afectada,
-      relacion.descripcion_afectada,
     );
 
-    const { data: normaExistente } = await supabase
-      .from("digemid_normas")
-      .select("id")
-      .eq("document_key", documentKeyStub)
-      .maybeSingle();
-
-    if (normaExistente) {
-      normaAfectadaId = normaExistente.id;
+    if (encontrada.ambigua) {
+      // H-08: mas de una norma existente coincide con la identidad citada.
+      // Igual que resolver_identidad() en el detector, nunca se elige "la
+      // primera": la relacion queda confirmada para trazabilidad pero SIN
+      // norma_afectada_id, a la espera de que un humano la vincule.
+      identidadAmbigua = true;
+    } else if (encontrada.id) {
+      normaAfectadaId = encontrada.id;
       if (estadoVigencia) {
         await supabase.from("digemid_normas").update({ estado_vigencia: estadoVigencia }).eq("id", normaAfectadaId);
       }
     } else {
+      const documentKeyStub = construirDocumentKeyStub(
+        relacion.tipo_norma_afectada,
+        relacion.numero_afectada,
+        relacion.anio_afectada,
+        relacion.descripcion_afectada,
+      );
+
       const { data: normaCreada, error: errorCreacion } = await supabase
         .from("digemid_normas")
         .insert({
@@ -1569,11 +1678,14 @@ async function resolverRelacionDerogacion(
 
   if (messageId) {
     const verbo = VERBOS_CONFIRMACION[relacion.tipo_relacion] ?? "afectó";
+    const aviso = identidadAmbigua
+      ? "\n\n⚠️ Hay más de una norma existente con ese tipo/número: quedó confirmada pero SIN vincular. Enlázala manualmente cuando identifiques cuál es."
+      : "";
     await editMessage(
       chatId,
       messageId,
       `✅ Confirmado: <b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a ` +
-        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>.`,
+        `<b>${escapeHtml(relacion.descripcion_afectada)}</b>.${aviso}`,
     );
   }
 }

@@ -1982,14 +1982,20 @@ async function resolverRelacionDerogacion(
     .eq("id", relacionId);
 
   if (messageId) {
-    const verbo = VERBOS_CONFIRMACION[relacion.tipo_relacion] ?? "afectó";
+    // Misma precision que /normavigencia: "derogó a" sin mas es ambiguo
+    // -se puede leer como derogacion total aunque alcance sea parcial-,
+    // justo en el mensaje que confirma el efecto sobre la norma real.
+    const verbo = describirEfectoConEscala(relacion.tipo_relacion, relacion.alcance, relacion.articulos_afectados);
+    const detalleArticulos = relacion.articulos_afectados
+      ? ` (art./num. ${escapeHtml(relacion.articulos_afectados)})`
+      : "";
     const aviso = identidadAmbigua
       ? "\n\n⚠️ Hay más de una norma existente con ese tipo/número: quedó confirmada pero SIN vincular. Enlázala manualmente cuando identifiques cuál es."
       : "";
     await editMessage(
       chatId,
       messageId,
-      `✅ Confirmado: <b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo} a ` +
+      `✅ Confirmado: <b>${escapeHtml(relacion.norma_origen_document_key)}</b> ${verbo}${detalleArticulos} a ` +
         `<b>${escapeHtml(relacion.descripcion_afectada)}</b>.${aviso}`,
     );
   }

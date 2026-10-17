@@ -1,0 +1,110 @@
+# Workflow de validación automática para RegAlert CI (sin deploy)
+# No requiere secrets ni realiza llamadas funcionales a servicios externos del proyecto durante los tests.
+name: RegAlert CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - "feature/**"
+      - "claude/**"
+
+jobs:
+  telegram-deno:
+    name: Telegram / Deno
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.6
+
+      - name: Verificar tipos con Deno
+        run: |
+          deno check --import-map=supabase/functions/import_map.json supabase/functions/telegram-bot/index.ts
+          deno check supabase/functions/telegram-bot/consulta_safety.ts
+          deno check supabase/functions/telegram-bot/revision_safety.ts
+          deno check supabase/functions/telegram-bot/consulta_runtime.ts
+
+      - name: Ejecutar pruebas de seguridad y runtime con Deno
+        run: |
+          deno test supabase/functions/telegram-bot/consulta_safety.test.ts
+          deno test supabase/functions/telegram-bot/revision_safety.test.ts
+          deno test supabase/functions/telegram-bot/consulta_runtime_safety.test.ts
+
+  python-tests:
+    name: Tests Python
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Instalar Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
+
+      - name: Ejecutar tests Python
+        run: python -m unittest discover -s tests
+
+  whitespace:
+    name: Whitespace / Git
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio con historial completo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verificar whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "Validando whitespace para pull_request entre commit base ($BASE_SHA) y HEAD (${HEAD_SHA:-HEAD})..."
+            git diff --check "$BASE_SHA" "${HEAD_SHA:-HEAD}"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            if [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$BEFORE_SHA" >/dev/null 2>&1; then
+              echo "Validando whitespace para push entre before ($BEFORE_SHA) y commit ($COMMIT_SHA)..."
+              git diff --check "$BEFORE_SHA" "$COMMIT_SHA"
+            else
+              echo "BEFORE_SHA no es válido o rama nueva; validando último commit (HEAD^ HEAD)..."
+              if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+                git diff --check HEAD^ HEAD
+              else
+                git diff --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
+              fi
+            fi
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "Validando whitespace para workflow_dispatch en el último commit (HEAD^ HEAD)..."
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              git diff --check HEAD^ HEAD
+            else
+              git diff --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
+            fi
+          else
+            echo "Evento ($EVENT_NAME); validando último commit (HEAD^ HEAD)..."
+            if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              git diff --check HEAD^ HEAD
+            fi
+          fi

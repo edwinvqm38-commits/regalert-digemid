@@ -5,10 +5,10 @@ Uso recomendado:
      resaltadas (actual vs transcripcion IA) SIN escribir nada en Supabase.
   2. Revisar el reporte; para las paginas que si conviene aplicar, correr de
      nuevo con --apply para guardar la transcripcion IA en metadata.
-  3. Agregar --replace-text solo cuando se quiere que /consulta use ese texto.
+  3. Verificar la propuesta contra el PDF mediante el flujo de revision humana.
 
-La salida del modelo no se trata como verdad absoluta: siempre queda guardada
-la extraccion previa en metadata cuando se reemplaza text_raw/text_normalized.
+Este script solo guarda propuestas: --replace-text esta bloqueado. La confianza
+del modelo no prueba fidelidad documental ni autoriza a reemplazar texto.
 """
 
 import argparse
@@ -117,21 +117,23 @@ def parse_args():
         ),
     )
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--replace-text", action="store_true")
+    parser.add_argument(
+        "--replace-text", action="store_true",
+        help="Bloqueado: el OCR IA solo puede guardar propuestas pendientes de revision.",
+    )
     parser.add_argument(
         "--auto-solo-alta-confianza",
         action="store_true",
         help=(
-            "Para corridas automaticas sin supervision (ej. el cron diario): en vez de "
-            "reemplazar SIEMPRE que --apply este presente (como --replace-text), solo "
-            "reemplaza el texto cuando el propio modelo reporta confianza_estimada >= "
-            "--min-confianza y no trae advertencias. Las paginas de baja confianza quedan "
-            "solo en metadata para revision humana (via /normarevisar), igual que sin este "
-            "flag. NUNCA marca tabla_verificada ni revisado_manual en true -- esos campos "
-            "significan 'un humano lo confirmo', y esto es una IA decidiendo sola."
+            "Opcion legacy aceptada por compatibilidad con el cron diario. "
+            "Con --apply guarda SOLO propuestas en metadata, incluso con confianza alta. "
+            "La confianza del modelo no autoriza reemplazos ni verifica fidelidad legal."
         ),
     )
-    parser.add_argument("--min-confianza", type=float, default=0.85)
+    parser.add_argument(
+        "--min-confianza", type=float, default=0.85,
+        help="Umbral legacy aceptado por compatibilidad; no autoriza promocion de texto.",
+    )
     parser.add_argument(
         "--completar-un-reglamento",
         action="store_true",
@@ -175,8 +177,8 @@ def parse_args():
         raise ValueError("--limit debe ser mayor que cero")
     if args.dpi <= 0:
         raise ValueError("--dpi debe ser mayor que cero")
-    if args.replace_text and not args.apply:
-        raise ValueError("--replace-text requiere --apply")
+    # Rechazar antes de cargar credenciales, descargar PDF o invocar OCR.
+    _debe_reemplazar_texto({}, args)
     if args.page_number is not None and not args.document_key:
         raise ValueError("--page-number requiere --document-key")
     if not args.model:
@@ -760,63 +762,51 @@ def construir_reporte_html(filas_reporte: list[dict]) -> str:
 
 
 def _debe_reemplazar_texto(ai_result: dict, args) -> bool:
-    """--replace-text (manual, quien lo corre ya reviso el reporte) siempre
-    reemplaza. --auto-solo-alta-confianza (corridas sin supervision) solo
-    reemplaza cuando el propio modelo se declara seguro: confianza_estimada
-    numerica >= --min-confianza y sin advertencias. Sin ninguno de los dos,
-    la transcripcion queda solo en metadata para revision humana."""
-    if args.replace_text:
-        return True
-    if not args.auto_solo_alta_confianza:
-        return False
-    confianza = ai_result.get("confianza_estimada")
-    if not isinstance(confianza, (int, float)):
-        return False
-    if ai_result.get("advertencias"):
-        return False
-    return confianza >= args.min_confianza
+    """F-03C: este escritor no tiene un gate de promocion documental.
+
+    Ni la confianza del modelo ni una bandera CLI acreditan revision de esta
+    propuesta contra el PDF. Conservar la firma y aceptar argumentos legacy
+    permite a los callers anteriores guardar propuestas sin promover texto.
+    """
+    if getattr(args, "replace_text", False):
+        raise ValueError(
+            "El OCR IA no puede reemplazar texto autoritativo; "
+            "solo puede guardar una propuesta pendiente de revision humana."
+        )
+    if getattr(args, "auto_solo_alta_confianza", False):
+        logger.warning(
+            "--auto-solo-alta-confianza es legacy: solo se guardan propuestas; "
+            "la confianza del modelo no verifica fidelidad documental."
+        )
+    return False
 
 
 def update_page(supabase, page: dict, ai_result: dict, args) -> bool:
-    """Devuelve True si se reemplazo el texto (para el resumen de Telegram)."""
+    """Guarda solo la propuesta; devuelve False (no hubo reemplazo).
+
+    Un intento de reemplazo falla antes de modificar metadata o llamar a la DB.
+    """
+    _debe_reemplazar_texto(ai_result, args)
     now = datetime.now(timezone.utc).isoformat()
-    metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
+    metadata = dict(page["metadata"]) if isinstance(page.get("metadata"), dict) else {}
     metadata["openai_vision_ocr"] = {
+        **ai_result,
+        # Estos campos los fija el escritor, nunca la respuesta del modelo.
         "provider": args.provider,
         "model": args.model,
         "detail": args.detail,
         "dpi": args.dpi,
         "generated_at": now,
-        **ai_result,
+        "evidence_status": "proposal_requires_human_review",
+        "verified": False,
     }
     payload: dict[str, Any] = {
         "metadata": metadata,
         "updated_at": now,
     }
 
-    reemplazar = _debe_reemplazar_texto(ai_result, args)
-    if reemplazar:
-        metadata["previous_extraction_before_openai_vision"] = {
-            "text_raw": page.get("text_raw"),
-            "text_normalized": page.get("text_normalized"),
-            "extraction_method": page.get("extraction_method"),
-            "quality_score": page.get("quality_score"),
-        }
-        payload.update(
-            {
-                "text_raw": ai_result.get("transcripcion") or "",
-                "text_normalized": build_replacement_text(ai_result),
-                # NUNCA se toca tabla_verificada/revisado_manual aqui: esos
-                # campos significan "un humano lo confirmo", y esto lo decidio
-                # una IA sola (aunque con alta confianza declarada por ella
-                # misma). Quedan para el flujo de revision manual existente.
-                "extraction_method": "openai_vision_ocr",
-                "quality_score": 0.9,
-            }
-        )
-
     supabase.table(PAGE_TABLE).update(payload).eq("id", page["id"]).execute()
-    return reemplazar
+    return False
 
 
 def enviar_mensaje_telegram(texto: str) -> None:
@@ -1034,7 +1024,7 @@ def main() -> None:
 
                 if args.apply and not args.report_html:
                     reemplazado = update_page(supabase, page, ai_result, args)
-                    logger.info("%s pagina %s actualizada con vision IA.", document_key, page_number)
+                    logger.info("%s pagina %s: propuesta OCR guardada, texto conservado.", document_key, page_number)
                     resumen_digest.append(
                         {
                             "document_key": document_key,
@@ -1083,7 +1073,7 @@ def main() -> None:
             for f in aplicadas:
                 lineas.append(f"  • {f['document_key']} pág. {f['page_number']} (confianza {f['confianza_estimada']})")
         if pendientes:
-            lineas.append(f"\n⏳ <b>{len(pendientes)} página(s) con confianza baja</b> (guardadas en metadata, esperan revisión con /normarevisar):")
+            lineas.append(f"\n⏳ <b>{len(pendientes)} propuesta(s) pendiente(s) de revisión</b> (guardadas en metadata, texto conservado; revisar con /normarevisar):")
             for f in pendientes:
                 lineas.append(f"  • {f['document_key']} pág. {f['page_number']} (confianza {f['confianza_estimada']})")
         if errores:

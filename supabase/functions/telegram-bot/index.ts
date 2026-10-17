@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
+import { answerConsultaRuntime, hydrateConsultaChunks } from "./consulta_runtime.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -1670,8 +1671,7 @@ async function construirCadenaVigencia(
     const { data: relaciones } = await supabase
       .from("digemid_norma_relaciones")
       .select(
-        "norma_origen_id, norma_origen_document_key, tipo_relacion, alcance, " +
-          "articulos_afectados, fragmento_fuente, resuelto_en, effective_date",
+        "norma_origen_id, norma_origen_document_key, tipo_relacion, alcance, articulos_afectados, fragmento_fuente, resuelto_en, effective_date",
       )
       .eq("norma_afectada_id", nodo.id)
       .eq("estado", "confirmada");
@@ -3110,7 +3110,7 @@ async function searchConsultaChunks(query: string, limit = 4) {
 
   if (error) throw error;
 
-  return data ?? [];
+  return await hydrateConsultaChunks(supabase, data ?? []);
 }
 
 // /consulta busca por relevancia de texto (buscar_paginas_texto), no por
@@ -3354,6 +3354,8 @@ function arrayBufferABase64(buffer: ArrayBuffer): string {
  * (nunca lanza) si el PDF no esta disponible, es muy grande, o la llamada
  * falla — es un complemento opcional a la respuesta de texto, no un
  * requisito. */
+// C-01: conservada, pero /consulta no la invoca. El PDF completo no permite
+// garantizar que el modelo reciba únicamente las páginas admitidas por safety.
 async function intentarVerificacionVisual(norma: any, question: string): Promise<string | null> {
   const pdfUrl = norma.pdf_url || norma.source_url;
   if (!pdfUrl || !GEMINI_API_KEY) return null;
@@ -3997,6 +3999,8 @@ const PROMPT_REFORMULACION_CONSULTA =
  * proveedor configurado), se sigue con la pregunta original: es una ayuda,
  * no un requisito. No reutiliza callDeepseek/callGemini porque esas usan
  * CONSULTA_SYSTEM_PROMPT fijo; esta llamada necesita su propio prompt. */
+// C-01: conservada, pero /consulta busca la pregunta original para no invocar
+// un modelo antes de recuperar y evaluar su evidencia documental.
 async function reformularConsultaParaBusqueda(question: string): Promise<string> {
   try {
     if (DEEPSEEK_API_KEY) {
@@ -4112,7 +4116,7 @@ async function getNormaConContenido(documentKey: string) {
 
   const { data: paginas, error: errorPaginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula")
+    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula, tabla_verificada, metadata")
     .eq("norma_id", norma.id)
     .order("page_number")
     .limit(MAX_PAGINAS_NORMA_PUNTUAL);
@@ -4142,6 +4146,8 @@ function paginaComoChunk(pagina: any, norma: any) {
     quality_score: pagina.quality_score,
     revisado_manual: pagina.revisado_manual,
     has_tables: pagina.has_tables,
+    tabla_verificada: pagina.tabla_verificada,
+    metadata: pagina.metadata,
     posible_formula: pagina.posible_formula,
     estado_vigencia: norma.estado_vigencia,
   };
@@ -4333,131 +4339,22 @@ ${BANNER_MARCA_HTML}
 </html>`;
 }
 
-/** Responde sobre UNA norma puntual citada por numero exacto, usando su
- * contenido real (no busqueda difusa) y sus relaciones conocidas. Devuelve
- * null si no se encontro esa norma exacta en digemid_normas: quien llama
- * decide si sigue con la busqueda de texto como respaldo. */
-async function responderNormaPuntual(
-  documentKey: string,
-  question: string,
-): Promise<
-  { answer: string; sources: { documentKey: string; url: string }[]; reportHtml?: string; reportFileName?: string }
-  | null
-> {
-  const resultado = await getNormaConContenido(documentKey);
-  if (!resultado) return null;
-
-  const { norma, paginas, relaciones } = resultado;
-
-  if (!paginas.length) {
-    return {
-      answer: `Encontré <b>${norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
-        "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
-      sources: [{ documentKey: norma.document_key, url: norma.pdf_url ?? norma.source_url ?? "" }],
-    };
-  }
-
-  const chunks = paginas.map((pagina: any) => paginaComoChunk(pagina, norma));
-  const context = buildConsultaContext(chunks);
-  const userContent = `Contexto:\n\n${context}${formatRelacionesComoContexto(relaciones, norma)}` +
-    `\n\nPregunta: ${question}`;
-  const sources = consultaSources(chunks);
-  const relacionesTexto = formatRelacionesParaUsuario(relaciones, norma);
-  const reportFileName = `reporte_${norma.document_key}.html`;
-
-  // Si preguntan puntualmente por una tabla/cuadro/grafico, el texto ya
-  // extraido (aplanado por OCR/pdfplumber) es justo el menos confiable para
-  // eso: se complementa con una lectura del PDF real via un modelo con
-  // vision. Es un extra opcional (nunca lanza, nunca bloquea la respuesta
-  // de texto normal si falla o no hay GEMINI_API_KEY configurada).
-  const verificacionVisual = preguntaPideVerificacionVisual(question)
-    ? await intentarVerificacionVisual(norma, question)
-    : null;
-  const bloqueVisual = verificacionVisual
-    ? `\n\n<b>🔎 Verificación visual del PDF (tabla/gráfico)</b>:\n${verificacionVisual}`
-    : "";
-
-  if (DEEPSEEK_API_KEY) {
-    try {
-      const interpretacion = await callDeepseek(userContent);
-      return {
-        answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`,
-        sources,
-        reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
-        reportFileName,
-      };
-    } catch (error) {
-      console.error("DeepSeek falló, probando respaldo Gemini:", error);
-    }
-  }
-
-  if (GEMINI_API_KEY) {
-    const interpretacion = await callGemini(userContent);
-    return {
-      answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`,
-      sources,
-      reportHtml: construirReporteEspecialNorma(norma, paginas, relaciones, interpretacion),
-      reportFileName,
-    };
-  }
-
-  throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
-}
-
-async function answerConsulta(
-  question: string,
-): Promise<
-  { answer: string; sources: { documentKey: string; url: string }[]; reportHtml?: string; reportFileName?: string }
-> {
-  // Si la pregunta cita una norma puntual por numero exacto ("Resolucion
-  // Ministerial 727-2025"), no se usa busqueda difusa: se va directo a esa
-  // norma en digemid_normas, con su contenido real y sus relaciones. La
-  // busqueda por relevancia puede devolver una norma distinta que "suena"
-  // parecida, que es justo lo que se quiere evitar aqui.
-  const referencia = extraerReferenciaNormativa(question);
-  if (referencia) {
-    const respuesta = await responderNormaPuntual(referencia.documentKey, question);
-    if (respuesta) return respuesta;
-    // No se encontro esa norma exacta: se cae al flujo normal de busqueda de
-    // texto como respaldo, en vez de fallar.
-  }
-
-  const consultaBusqueda = await reformularConsultaParaBusqueda(question);
-  const chunks = await searchConsultaChunks(consultaBusqueda);
-
-  if (!chunks.length) {
-    const suggestions = await suggestSimilarAlerts(consultaBusqueda);
-
-    if (!suggestions.length) {
-      return {
-        answer: "No encontré documentos relacionados con esa consulta en la base de datos.",
-        sources: [],
-      };
-    }
-
-    return {
-      answer: "No encontré una coincidencia exacta para tu pregunta. ¿Quizás te refieres a alguna de estas alertas?",
-      sources: suggestions.map((s) => ({ documentKey: s.document_key, url: s.detail_url })),
-    };
-  }
-
-  const context = buildConsultaContext(chunks);
-  const userContent = `Contexto:\n\n${context}\n\nPregunta: ${question}`;
-  const sources = consultaSources(chunks);
-
-  if (DEEPSEEK_API_KEY) {
-    try {
-      return { answer: await callDeepseek(userContent), sources };
-    } catch (error) {
-      console.error("DeepSeek falló, probando respaldo Gemini:", error);
-    }
-  }
-
-  if (GEMINI_API_KEY) {
-    return { answer: await callGemini(userContent), sources };
-  }
-
-  throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
+/** Ambas rutas de /consulta comparten el gate antes de cualquier proveedor. */
+async function answerConsulta(question: string) {
+  return await answerConsultaRuntime(question, {
+    searchChunks: searchConsultaChunks,
+    suggestSimilarAlerts,
+    extraerReferenciaNormativa,
+    getNormaConContenido,
+    paginaComoChunk,
+    buildContext: buildConsultaContext,
+    sources: consultaSources,
+    formatRelacionesComoContexto,
+    formatRelacionesParaUsuario,
+    construirReporte: construirReporteEspecialNorma,
+    deepseek: DEEPSEEK_API_KEY ? callDeepseek : undefined,
+    gemini: GEMINI_API_KEY ? callGemini : undefined,
+  });
 }
 
 async function enviarMiPerfil(chatId: string): Promise<void> {

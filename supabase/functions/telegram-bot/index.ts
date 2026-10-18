@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
 import { answerConsultaRuntime, hydrateConsultaChunks } from "./consulta_runtime.ts";
+import { resolverNormaPuntual } from "./norm_identity.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -3620,48 +3621,6 @@ async function reformularConsultaParaBusqueda(question: string): Promise<string>
   return question;
 }
 
-/** Prefijos de tipo de norma reconocidos en el texto libre de una pregunta,
- * hacia el mismo formato de document_key que usa digemid_normas ("RM-727-2025").
- * Las claves de mas de una palabra deben probarse antes que sus abreviaturas
- * (extraerReferenciaNormativa las ordena por longitud) para que "resolucion
- * ministerial" no quede capturado a medias por una entrada mas corta. */
-const PREFIJOS_NORMA: Record<string, string> = {
-  "ley": "LEY",
-  "decreto supremo": "DS",
-  "decreto legislativo": "DL",
-  "decreto de urgencia": "DU",
-  "resolucion ministerial": "RM",
-  "resolucion directoral": "RD",
-  "resolucion suprema": "RS",
-  "ds": "DS",
-  "dl": "DL",
-  "du": "DU",
-  "rm": "RM",
-  "rd": "RD",
-  "rs": "RS",
-};
-
-/** Detecta que el usuario esta preguntando por UNA norma puntual, citada por
- * su tipo + numero + año ("Resolución Ministerial 727-2025/MINSA", "DS
- * 020-2024"). Para estas preguntas buscar por texto libre es poco confiable
- * (puede traer una norma distinta que "suena" parecida); es mejor ir directo
- * al documento por su identificador exacto. */
-function extraerReferenciaNormativa(pregunta: string): { documentKey: string } | null {
-  const texto = normalizarTexto(pregunta);
-  const claves = Object.keys(PREFIJOS_NORMA).sort((a, b) => b.length - a.length);
-
-  for (const clave of claves) {
-    const escapado = clave.replace(/ /g, "\\s+");
-    const regex = new RegExp(`\\b${escapado}\\b\\s*(?:n[°ºo.]?\\s*)?(\\d{1,4})[\\s\\-/]+(\\d{4})\\b`);
-    const match = texto.match(regex);
-    if (match) {
-      return { documentKey: `${PREFIJOS_NORMA[clave]}-${match[1]}-${match[2]}` };
-    }
-  }
-
-  return null;
-}
-
 /** Tope de paginas que se envian al modelo para UNA norma puntual: evita que
  * una ley larga dispare un costo/latencia absurdos en una sola consulta. */
 const MAX_PAGINAS_NORMA_PUNTUAL = 25;
@@ -3911,7 +3870,7 @@ async function answerConsulta(question: string) {
   return await answerConsultaRuntime(question, {
     searchChunks: searchConsultaChunks,
     suggestSimilarAlerts,
-    extraerReferenciaNormativa,
+    resolverNormaPuntual: (question) => resolverNormaPuntual(supabase, question),
     getNormaConContenido,
     paginaComoChunk,
     buildContext: buildConsultaContext,
@@ -5356,7 +5315,7 @@ async function handleCommand(
 
       await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
 
-      // Cuando la pregunta cito una norma puntual (extraerReferenciaNormativa
+      // Cuando la pregunta cito una norma puntual (resolverNormaPuntual
       // dentro de answerConsulta) hay un reporte HTML con el detalle completo
       // pagina por pagina: se manda como documento aparte, sin bloquear la
       // respuesta corta de arriba si esto llegara a fallar.

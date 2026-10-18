@@ -1,0 +1,252 @@
+import {
+  type ConsultaEvidence,
+  evaluateConsultaSafety,
+  executeConsultaWithSafetyGate,
+} from "./consulta_safety.ts";
+
+// Orquestación exclusiva de Telegram, sin credenciales ni arranque del webhook.
+// Las reglas siguen teniendo una sola autoridad: consulta_safety/revision_safety.
+export type ConsultaChunk = ConsultaEvidence & Record<string, any>;
+export type ConsultaRespuesta = {
+  answer: string;
+  sources: { documentKey: string; url: string; page?: number }[];
+  reportHtml?: string;
+  reportFileName?: string;
+  blocked?: boolean;
+};
+
+export type ConsultaRuntimeDependencies = {
+  searchChunks: (question: string) => Promise<ConsultaChunk[]>;
+  suggestSimilarAlerts: (question: string) => Promise<any[]>;
+  extraerReferenciaNormativa: (
+    question: string,
+  ) => { documentKey: string } | null;
+  getNormaConContenido: (key: string) => Promise<
+    {
+      norma: any;
+      paginas: any[];
+      relaciones: any[];
+    } | null
+  >;
+  paginaComoChunk: (pagina: any, norma: any) => ConsultaChunk;
+  buildContext: (chunks: ConsultaChunk[]) => string;
+  sources: (chunks: ConsultaChunk[]) => ConsultaRespuesta["sources"];
+  formatRelacionesComoContexto: (relaciones: any[], norma: any) => string;
+  formatRelacionesParaUsuario: (relaciones: any[], norma: any) => string;
+  construirReporte: (
+    norma: any,
+    paginas: any[],
+    relaciones: any[],
+    answer: string,
+  ) => string;
+  deepseek?: (content: string) => Promise<string>;
+  gemini?: (content: string) => Promise<string>;
+};
+
+export function normalizeConsultaEvidence(chunk: ConsultaChunk): ConsultaChunk {
+  const metadata = chunk.metadata && typeof chunk.metadata === "object"
+    ? chunk.metadata
+    : {};
+  // Ausencia de señal no equivale a una constatación de ausencia de tablas.
+  // Se marca riesgo posible en memoria; nunca se inventa una verificación.
+  const unknownTablePresence = typeof chunk.has_tables !== "boolean" &&
+    typeof chunk.possible_table !== "boolean" &&
+    typeof metadata.possible_table !== "boolean";
+  return {
+    ...chunk,
+    possible_table:
+      chunk.possible_table === true || metadata.possible_table === true ||
+        unknownTablePresence
+        ? true
+        : chunk.possible_table,
+    table_requires_review: chunk.table_requires_review === true ||
+        metadata.table_requires_review === true
+      ? true
+      : chunk.table_requires_review,
+    table_quality_score: chunk.table_quality_score ??
+      (typeof metadata.table_quality_score === "number"
+        ? metadata.table_quality_score
+        : undefined),
+    tables_markdown: chunk.tables_markdown ??
+      (typeof metadata.tables_markdown === "string"
+        ? metadata.tables_markdown
+        : undefined),
+    metadata,
+  };
+}
+
+/** El RPC histórico omite metadata y coalesce oculta flags nulos. Recuperamos
+ * la página original por identidad, solo mediante lecturas existentes.
+ * Un resultado ausente/inconsistente conserva el texto pero queda pendiente. */
+export async function hydrateConsultaChunks(
+  db: { from: (table: string) => any },
+  chunks: ConsultaChunk[],
+): Promise<ConsultaChunk[]> {
+  return await Promise.all(chunks.map(async (chunk) => {
+    const unknown = () => ({
+      ...chunk,
+      possible_table: true,
+      table_requires_review: true,
+    });
+    if (!chunk.document_key || !Number.isInteger(chunk.page_number)) {
+      return unknown();
+    }
+    const { data: norma, error: normaError } = await db.from("digemid_normas")
+      .select("id").eq("document_key", chunk.document_key).maybeSingle();
+    if (normaError) return unknown();
+    let document = norma;
+    if (!document) {
+      const { data, error } = await db.from("digemid_documentos")
+        .select("id").eq("document_key", chunk.document_key).maybeSingle();
+      if (error || !data) return unknown();
+      document = data;
+    }
+    const { data: page, error } = await db
+      .from(norma ? "digemid_norma_paginas" : "digemid_documento_paginas")
+      // Alertas tienen variantes de columnas legacy; no presuponer metadata.
+      .select(
+        norma
+          ? "page_number, text_normalized, text_raw, has_tables, revisado_manual, tabla_verificada, metadata"
+          : "*",
+      )
+      .eq(norma ? "norma_id" : "document_id", document.id)
+      .eq("page_number", chunk.page_number).maybeSingle();
+    if (error || !page) return unknown();
+    const text = norma
+      ? page.text_normalized ?? page.text_raw
+      : page.text_content;
+    // No unir texto de una versión con la verificación de otra.
+    if (text !== chunk.text_content) return unknown();
+    const hasTables = norma
+      ? page.has_tables
+      : page.contiene_tablas === true || page.has_table === true
+      ? true
+      : page.contiene_tablas ?? page.has_table;
+    return normalizeConsultaEvidence({
+      ...chunk,
+      has_tables: chunk.has_tables === true ? true : hasTables,
+      possible_table:
+        chunk.possible_table === true || chunk.metadata?.possible_table === true
+          ? true
+          : page.possible_table,
+      table_requires_review: chunk.table_requires_review === true ||
+          chunk.metadata?.table_requires_review === true
+        ? true
+        : page.table_requires_review,
+      tabla_verificada: page.tabla_verificada,
+      revisado_manual: page.revisado_manual,
+      metadata: page.metadata,
+    });
+  }));
+}
+
+export async function answerConsultaRuntime(
+  question: string,
+  deps: ConsultaRuntimeDependencies,
+): Promise<ConsultaRespuesta> {
+  const reference = deps.extraerReferenciaNormativa(question);
+  const exact = reference
+    ? await deps.getNormaConContenido(reference.documentKey)
+    : null;
+  const chunks =
+    (exact
+      ? exact.paginas.map((page) => deps.paginaComoChunk(page, exact.norma))
+      // La búsqueda debe preceder a CUALQUIER llamada de IA, incluso reformulación.
+      : await deps.searchChunks(question)).map(normalizeConsultaEvidence);
+
+  if (!chunks.length) {
+    if (exact) {
+      return {
+        answer:
+          `Encontré <b>${exact.norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
+          "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
+        sources: [{
+          documentKey: exact.norma.document_key,
+          url: exact.norma.pdf_url ?? exact.norma.source_url ?? "",
+        }],
+      };
+    }
+    const suggestions = await deps.suggestSimilarAlerts(question);
+    return {
+      answer: suggestions.length
+        ? "No encontré una coincidencia exacta para tu pregunta. ¿Quizás te refieres a alguna de estas alertas?"
+        : "No encontré documentos relacionados con esa consulta en la base de datos.",
+      sources: suggestions.map((s) => ({
+        documentKey: s.document_key,
+        url: s.detail_url,
+      })),
+    };
+  }
+
+  const result = await executeConsultaWithSafetyGate(
+    question,
+    chunks,
+    async (permitted) => {
+      // No cerrar sobre chunks/paginas para construir contexto ni reintroducirlos
+      // a través del PDF completo o relaciones sin procedencia por página.
+      const safeChunks = permitted as ConsultaChunk[];
+      const allPermitted = safeChunks.length === chunks.length;
+      const relations = exact && allPermitted ? exact.relaciones : [];
+      const context = deps.buildContext(safeChunks);
+      const userContent = `Contexto:\n\n${context}${
+        exact ? deps.formatRelacionesComoContexto(relations, exact.norma) : ""
+      }\n\nPregunta: ${question}`;
+      let answer: string | undefined;
+      if (deps.deepseek) {
+        try {
+          answer = await deps.deepseek(userContent);
+        } catch {
+          // No imprimir respuestas de proveedores, URLs con keys ni prompts.
+          console.error("CONSULTA_DEEPSEEK_FALLBACK");
+        }
+      }
+      if (answer === undefined && deps.gemini) {
+        answer = await deps.gemini(
+          userContent,
+        );
+      }
+      if (answer === undefined) {
+        throw new Error(
+          "Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)",
+        );
+      }
+      const response: ConsultaRespuesta = {
+        answer,
+        sources: deps.sources(safeChunks),
+        blocked: false,
+      };
+      if (exact) {
+        const permittedPages = new Set(
+          safeChunks.map((chunk) => chunk.page_number),
+        );
+        response.reportHtml = deps.construirReporte(
+          exact.norma,
+          exact.paginas.filter((page) => permittedPages.has(page.page_number)),
+          relations,
+          answer,
+        );
+        response.reportFileName = `reporte_${exact.norma.document_key}.html`;
+        response.answer += deps.formatRelacionesParaUsuario(
+          relations,
+          exact.norma,
+        );
+      }
+      return response;
+    },
+  );
+  if (!result.blocked) return result.value;
+
+  const decision = evaluateConsultaSafety(question, chunks);
+  for (const chunk of result.evidence.length ? result.evidence : chunks) {
+    console.info("CONSULTA_SAFETY_BLOCK", {
+      reason: decision.reason,
+      document_key: chunk.document_key,
+      page_number: chunk.page_number,
+    });
+  }
+  return {
+    blocked: true,
+    answer: result.answer,
+    sources: deps.sources(result.evidence),
+  };
+}

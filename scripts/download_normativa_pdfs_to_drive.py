@@ -26,7 +26,7 @@ RESULT_JSON_PATH = REPORTS_DIR / "normativa_pdf_download_result.json"
 MIN_PDF_BYTES = 10 * 1024
 SUPABASE_SELECT_FIELDS = (
     "id, document_key, titulo, source_url, has_file, drive_folder_id, "
-    "drive_structure, raw, process_status, updated_at"
+    "drive_structure, raw, process_status, updated_at, pdf_url, fecha_publicacion, fuente_oficial"
 )
 
 logging.basicConfig(
@@ -480,6 +480,30 @@ def normalize_official_files(raw_value) -> list[dict]:
     return normalized
 
 
+def resolve_official_files(row: dict) -> tuple[list[dict], str]:
+    official_files = normalize_official_files(row.get("raw"))
+    if official_files:
+        return official_files, "raw.official_files"
+
+    if not normalize_text(row.get("pdf_url")):
+        return [], "none"
+
+    name_parts = [normalize_text(row.get("document_key"))]
+    if normalize_text(row.get("fecha_publicacion")):
+        name_parts.append(normalize_text(row["fecha_publicacion"]))
+    name_parts.append("original.pdf")
+    # Solo el PDF registrado. source_url es procedencia, nunca URL de descarga.
+    return [{
+        "url": row["pdf_url"],
+        "title": row.get("titulo"),
+        "source": row.get("fuente_oficial"),
+        "source_page": row.get("source_url"),
+        "status": "pending_download",
+        "asset_tipo": "pdf_original",
+        "file_name": "__".join(name_parts),
+    }], "digemid_normas.pdf_url"
+
+
 def make_asset_payload(norma_row: dict, official_item: dict, drive_file: dict, downloaded: dict, now_iso: str) -> dict:
     source_url = normalize_text(official_item.get("url")) or normalize_text(official_item.get("source_url"))
     file_name = normalize_text(official_item.get("file_name")) or normalize_text(drive_file.get("name"))
@@ -534,6 +558,7 @@ def write_report_files(mode: str, report_payload: dict):
         f"- Mode: `{mode}`",
         f"- Document key: `{report_payload.get('document_key')}`",
         f"- Force: `{report_payload.get('force')}`",
+        f"- Official files source: `{report_payload.get('official_files_source')}`",
         f"- Files total: **{summary.get('files_total', 0)}**",
         f"- Files selected: **{summary.get('files_selected', 0)}**",
         f"- Files downloaded: **{summary.get('files_downloaded', 0)}**",
@@ -627,17 +652,30 @@ def process_norma(
     operations: list[dict] = []
     file_results: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
-    raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
-    official_files = normalize_official_files(raw)
+    official_files, official_files_source = resolve_official_files(row)
+    if official_files_source == "digemid_normas.pdf_url":
+        operations.append({
+            "action": "synthesize_official_file_from_pdf_url",
+            "document_key": row.get("document_key"),
+            "file_name": official_files[0]["file_name"],
+            "url": official_files[0]["url"],
+        })
     updated_official_files = deepcopy(official_files)
-    existing_assets = get_existing_assets(supabase, row["id"])
-    original_folder = resolve_original_folder(
-        service=service,
-        row=row,
-        root_folder_id=root_folder_id,
-        apply_changes=apply_changes,
-        operations=operations,
-    )
+    drive_structure = row.get("drive_structure") if isinstance(row.get("drive_structure"), dict) else {}
+    subfolders = drive_structure.get("subfolders") if isinstance(drive_structure.get("subfolders"), dict) else {}
+    original_folder = subfolders.get("00_ORIGINAL") if isinstance(subfolders.get("00_ORIGINAL"), dict) else {}
+    existing_assets = []
+    # Dry-run valida el origen incluso si la carpeta de custodia aún no existe.
+    # No necesita acceder a Drive ni registrar assets para comprobar el PDF.
+    if apply_changes:
+        existing_assets = get_existing_assets(supabase, row["id"])
+        original_folder = resolve_original_folder(
+            service=service,
+            row=row,
+            root_folder_id=root_folder_id,
+            apply_changes=True,
+            operations=operations,
+        )
 
     assets_registered_count = 0
     for index, original_item in enumerate(official_files):
@@ -680,9 +718,13 @@ def process_norma(
             item_result["file_name"] = file_name
 
         try:
-            downloaded = None
-            if apply_changes:
-                downloaded = download_and_validate_pdf(url)
+            downloaded = download_and_validate_pdf(url)
+            item_result["file_size_bytes"] = downloaded["size_bytes"]
+            item_result["sha256"] = downloaded["sha256"]
+            if not apply_changes:
+                item_result["status_out"] = "would_force_download" if force else "would_download"
+                file_results.append(item_result)
+                continue
 
             drive_file = drive_upsert_pdf(
                 service=service,
@@ -731,12 +773,6 @@ def process_norma(
                 item_result["drive_file_id"] = drive_file.get("id")
                 item_result["file_size_bytes"] = downloaded.get("size_bytes")
                 item_result["sha256"] = downloaded.get("sha256")
-            else:
-                planned_status = "would_download"
-                if force:
-                    planned_status = "would_force_download"
-                item_result["status_out"] = planned_status
-                item_result["drive_file_id"] = drive_file.get("id")
         except Exception as exc:
             item_result["status_out"] = "download_error"
             item_result["error"] = str(exc)
@@ -793,6 +829,7 @@ def process_norma(
         "title": row.get("titulo"),
         "mode": "apply" if apply_changes else "dry-run",
         "force": force,
+        "official_files_source": official_files_source,
         "original_folder_id": original_folder.get("id"),
         "original_folder_url": build_drive_folder_url(original_folder.get("id")),
         "summary": summarize(file_results, operations),
@@ -806,11 +843,11 @@ def main():
     load_env()
 
     root_folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
-    if not root_folder_id:
+    if args.mode == "apply" and not root_folder_id:
         raise ValueError("Falta GOOGLE_DRIVE_FOLDER_ID")
 
     supabase = get_supabase()
-    drive_service = get_drive_service()
+    drive_service = get_drive_service() if args.mode == "apply" else None
     row = get_norma_by_document_key(supabase, args.document_key)
 
     result = process_norma(

@@ -23,9 +23,12 @@ logger = logging.getLogger(__name__)
 
 
 def run_step(name: str, command: list[str], failed_steps: list[str]) -> None:
-    """Ejecuta un paso del pipeline. Un fallo se registra pero no detiene
-    los pasos siguientes, ya que cada paso opera de forma independiente
-    sobre Supabase (consulta sus propios pendientes)."""
+    """Ejecuta un paso del pipeline.
+
+    Un fallo se registra pero no detiene los pasos siguientes, ya que cada
+    paso opera de forma independiente sobre Supabase y consulta sus propios
+    pendientes.
+    """
     logger.info("==================================================")
     logger.info("Iniciando paso: %s", name)
     logger.info("Comando: %s", " ".join(command))
@@ -47,18 +50,27 @@ def run_step(name: str, command: list[str], failed_steps: list[str]) -> None:
 
 def main():
     parser = argparse.ArgumentParser()
+
+    # Límites de procesamiento
     parser.add_argument("--enrich-limit", type=int, default=50)
     parser.add_argument("--storage-backup-limit", type=int, default=50)
     parser.add_argument("--text-limit", type=int, default=50)
     parser.add_argument("--layout-limit", type=int, default=50)
     parser.add_argument("--structured-limit", type=int, default=50)
+    parser.add_argument("--drive-custody-limit", type=int, default=10)
+
+    # Pasos opcionales
     parser.add_argument("--skip-monitor", action="store_true")
     parser.add_argument("--skip-enrich", action="store_true")
     parser.add_argument("--skip-storage-backup", action="store_true")
     parser.add_argument("--skip-text-extract", action="store_true")
     parser.add_argument("--skip-layout-extract", action="store_true")
     parser.add_argument("--skip-structured-extract", action="store_true")
+    parser.add_argument("--skip-drive-custody", action="store_true")
+
+    # Modos especiales
     parser.add_argument("--storage-backup-dry-run", action="store_true")
+
     args = parser.parse_args()
 
     python = sys.executable
@@ -138,6 +150,22 @@ def main():
             failed_steps,
         )
 
+    if not args.skip_drive_custody:
+        run_step(
+            "Custodiar PDFs oficiales de alertas en Google Drive",
+            [
+                python,
+                "scripts/migrate_drive_digemid_structure.py",
+                "--source-type",
+                "alerta",
+                "--pending-only",
+                "--limit",
+                str(args.drive_custody_limit),
+                "--apply",
+            ],
+            failed_steps,
+        )
+
     if failed_steps:
         logger.error(
             "Pipeline finalizado con %s paso(s) fallido(s): %s",
@@ -148,7 +176,9 @@ def main():
         try:
             NotifyAgent().send_pipeline_failure_alert(failed_steps)
         except Exception:
-            logger.exception("No se pudo inicializar NotifyAgent para la alerta de fallo.")
+            logger.exception(
+                "No se pudo inicializar NotifyAgent para la alerta de fallo."
+            )
 
         sys.exit(1)
 

@@ -852,7 +852,7 @@ def build_page_payload(norma_id: str, asset: dict, page: dict) -> dict:
         metadata_patch["ocr_dpi"] = page.get("ocr_dpi")
         metadata_patch["was_empty_embedded_text"] = True
     metadata = deep_merge_dicts(page["metadata"], metadata_patch)
-    return {
+    payload = {
         "norma_id": norma_id,
         "source_asset_id": asset["id"],
         "asset_subtipo": asset_subtipo,
@@ -865,6 +865,43 @@ def build_page_payload(norma_id: str, asset: dict, page: dict) -> dict:
         "has_tables": page["has_tables"],
         "metadata": metadata,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Las páginas pendientes de OCR necesitan calidad explícitamente baja para
+    # que el pipeline review-only pueda seleccionarlas. No alterar las páginas
+    # con texto, cuyo quality_score conserva el comportamiento previo.
+    if "quality_score" in page:
+        payload["quality_score"] = page["quality_score"]
+    return payload
+
+
+def build_pending_ocr_page(
+    page: dict,
+    source_asset_id: int,
+    source_asset_file_name: str,
+) -> dict:
+    """Representa una página física sin texto; no genera contenido ni OCR."""
+    metadata = deep_merge_dicts(
+        page.get("metadata") if isinstance(page.get("metadata"), dict) else {},
+        {
+            "physical_page_detected_from_official_pdf": True,
+            "pending_ocr": True,
+            "reason": "no_embedded_text",
+            "source_asset_id": source_asset_id,
+            "source_asset_file_name": source_asset_file_name,
+            "extraction_version": EXTRACTION_VERSION,
+        },
+    )
+    return {
+        **page,
+        "text_raw": "",
+        "text_normalized": "",
+        "extraction_method": "pending_ocr",
+        "ocr_used": False,
+        "ocr_attempted": False,
+        "ocr_error": None,
+        "has_tables": False,
+        "quality_score": 0.0,
+        "metadata": metadata,
     }
 
 
@@ -1043,7 +1080,10 @@ def process_asset(
         if has_useful_text(page["text_normalized"])
     )
 
-    if asset_result["pages_total"] > 0 and asset_result["total_text_chars"] == 0:
+    pending_ocr_pages = (
+        asset_result["pages_total"] > 0 and asset_result["total_text_chars"] == 0
+    )
+    if pending_ocr_pages:
         asset_result["requires_ocr"] = True
         asset_result["ocr_reason"] = (
             "PDF sin texto util despues de extraccion"
@@ -1051,8 +1091,6 @@ def process_asset(
             else "PDF sin capa de texto extraible"
         )
         asset_result["status"] = "ocr_required"
-        asset_result["skipped_empty_pages"] = asset_result["pages_total"]
-        return asset_result
 
     existing_pages = get_existing_pages_by_asset(
         supabase=supabase,
@@ -1061,7 +1099,13 @@ def process_asset(
     )
 
     for page in pages:
-        if not has_useful_text(page["text_normalized"]):
+        if pending_ocr_pages:
+            page = build_pending_ocr_page(
+                page=page,
+                source_asset_id=asset["id"],
+                source_asset_file_name=source_asset_file_name,
+            )
+        elif not has_useful_text(page["text_normalized"]):
             asset_result["skipped_empty_pages"] += 1
             operations.append(
                 {
@@ -1119,6 +1163,8 @@ def process_asset(
 
     if asset_result["errors"]:
         asset_result["status"] = "error"
+    elif pending_ocr_pages:
+        asset_result["status"] = "ocr_required"
     elif asset_result["pages_without_text"] == 0 and asset_result["pages_ocr_success"] > 0:
         asset_result["status"] = "text_extracted_ocr"
     elif asset_result["pages_with_text"] > 0 and asset_result["pages_without_text"] > 0:

@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -13,12 +14,16 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaInMemoryUpload
+import requests
 from supabase import create_client
 
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 MIGRATION_VERSION = "drive_structure_v1"
+DIRECT_CUSTODY_MODE = "direct_file_url_upload"
+MIN_PDF_SIZE_BYTES = 10 * 1024
+DOWNLOAD_TIMEOUT_SECONDS = 120
 REPORTS_DIR = Path("reports")
 DRY_RUN_REPORT_PATH = REPORTS_DIR / "drive_migration_dry_run.md"
 RESULT_REPORT_PATH = REPORTS_DIR / "drive_migration_result.md"
@@ -36,7 +41,8 @@ SUBFOLDERS = [
 SUPABASE_SELECT_FIELDS = (
     "id, source_type, source_section, document_key, title, published_date, "
     "file_url, file_name, drive_file_id, drive_file_url, drive_folder_id, "
-    "mime_type, file_size_bytes, raw"
+    "drive_download_url, uploaded_to_drive_at, mime_type, file_size_bytes, "
+    "file_hash, raw"
 )
 
 logging.basicConfig(
@@ -201,6 +207,58 @@ def make_pdf_copy_name(row: dict) -> str:
 
 def build_drive_folder_url(folder_id: str) -> str:
     return f"https://drive.google.com/drive/folders/{folder_id}"
+
+
+def build_drive_file_url(file_id: str) -> str:
+    return f"https://drive.google.com/file/d/{file_id}/view"
+
+
+def build_drive_download_url(file_id: str) -> str:
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def is_direct_file_url_custody(row: dict) -> bool:
+    raw = row.get("raw")
+    drive_structure = raw.get("drive_structure") if isinstance(raw, dict) else None
+    return not row.get("drive_file_id") or (
+        isinstance(drive_structure, dict)
+        and drive_structure.get("custody_mode") == DIRECT_CUSTODY_MODE
+    )
+
+
+def download_and_validate_pdf(file_url: str) -> dict:
+    if not normalize_text(file_url):
+        raise ValueError("El documento no tiene file_url para custodia directa")
+
+    response = requests.get(
+        file_url,
+        timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        headers={"User-Agent": "RegAlert-DIGEMID/drive-custody"},
+    )
+    if not 200 <= response.status_code < 300:
+        raise ValueError(
+            f"Descarga PDF fallo con HTTP {response.status_code}: {file_url}"
+        )
+
+    content = response.content or b""
+    if not content:
+        raise ValueError(f"Descarga PDF vacia: {file_url}")
+    if not content.startswith(b"%PDF"):
+        raise ValueError(f"La descarga no tiene firma PDF valida: {file_url}")
+    if len(content) <= MIN_PDF_SIZE_BYTES:
+        raise ValueError(
+            f"PDF demasiado pequeno ({len(content)} bytes; se requieren mas de "
+            f"{MIN_PDF_SIZE_BYTES}): {file_url}"
+        )
+
+    return {
+        "content": content,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "http_status": response.status_code,
+        "content_type": response.headers.get("Content-Type"),
+        "source_url": file_url,
+    }
 
 
 def build_document_paths(year: int, document_folder_name: str) -> dict[str, str]:
@@ -449,6 +507,97 @@ def drive_copy_file(
     )
 
 
+def drive_upload_pdf_direct(
+    service,
+    target_folder_id: str | None,
+    target_name: str,
+    downloaded_pdf: dict,
+    apply_changes: bool,
+    operations: list[dict],
+    planned_path: str | None = None,
+) -> dict:
+    existing = None
+    if target_folder_id:
+        existing = drive_find_child(service, target_folder_id, target_name)
+    if existing:
+        existing_bytes = (
+            service.files()
+            .get_media(
+                fileId=existing["id"],
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        existing_size = len(existing_bytes)
+        existing_sha256 = hashlib.sha256(existing_bytes).hexdigest()
+        if (
+            existing_size != downloaded_pdf["size_bytes"]
+            or existing_sha256 != downloaded_pdf["sha256"]
+        ):
+            raise ValueError(
+                f"Conflicto de integridad en Google Drive para {target_name}: "
+                "existe un archivo con el mismo nombre pero su SHA-256 o tamaño "
+                "no coincide con el PDF oficial descargado."
+            )
+
+        operations.append(
+            {
+                "action": "reuse_direct_upload",
+                "source_url": downloaded_pdf["source_url"],
+                "target_folder_id": target_folder_id,
+                "file_name": target_name,
+                "file_id": existing.get("id"),
+                "size_bytes": existing_size,
+                "sha256": existing_sha256,
+                "integrity_verified": True,
+                "planned_path": planned_path,
+            }
+        )
+        return existing
+
+    action = "direct_upload" if apply_changes else "planned_direct_upload"
+    operations.append(
+        {
+            "action": action,
+            "source_url": downloaded_pdf["source_url"],
+            "target_folder_id": target_folder_id,
+            "file_name": target_name,
+            "size_bytes": downloaded_pdf["size_bytes"],
+            "sha256": downloaded_pdf["sha256"],
+            "planned_path": planned_path,
+        }
+    )
+    if not apply_changes:
+        return {
+            "id": None,
+            "name": target_name,
+            "mimeType": "application/pdf",
+            "webViewLink": None,
+            "webContentLink": None,
+            "size": str(downloaded_pdf["size_bytes"]),
+            "pending_upload": True,
+        }
+
+    if not target_folder_id:
+        raise ValueError("No se pudo resolver la carpeta 00_ORIGINAL para la carga")
+
+    media = MediaInMemoryUpload(
+        downloaded_pdf["content"],
+        mimetype="application/pdf",
+        resumable=False,
+    )
+    return (
+        service.files()
+        .create(
+            body={"name": target_name, "parents": [target_folder_id]},
+            media_body=media,
+            fields="id, name, mimeType, size, parents, webViewLink, webContentLink",
+            supportsAllDrives=True,
+        )
+        .execute()
+    )
+
+
 def drive_upsert_json_file(
     service,
     folder_id: str,
@@ -552,15 +701,17 @@ def get_documents(
         .select(SUPABASE_SELECT_FIELDS)
         .eq("source_type", source_type)
         .eq("has_file", True)
-        .not_.is_("drive_file_id", "null")
         .order("published_date", desc=False)
     )
     if document_key:
         query = query.eq("document_key", document_key)
-    if limit and not (pending_only and not document_key):
-        query = query.limit(limit)
     response = query.execute()
-    rows = response.data or []
+    rows = [
+        row
+        for row in (response.data or [])
+        if normalize_text(row.get("drive_file_id"))
+        or normalize_text(row.get("file_url"))
+    ]
 
     if pending_only:
         total_candidates = len(rows)
@@ -570,8 +721,8 @@ def get_documents(
             len(rows),
             total_candidates,
         )
-        if limit:
-            rows = rows[:limit]
+    if limit:
+        rows = rows[:limit]
 
     return rows
 
@@ -684,8 +835,9 @@ def build_manifest(
     original_drive_file: dict,
     copied_pdf: dict,
     created_at_iso: str,
+    direct_download: dict | None = None,
 ) -> dict:
-    return {
+    manifest = {
         "document_id": row["id"],
         "document_key": row["document_key"],
         "source_type": row.get("source_type"),
@@ -700,6 +852,21 @@ def build_manifest(
         "created_at": created_at_iso,
         "migration_version": MIGRATION_VERSION,
     }
+    if direct_download:
+        manifest.update(
+            {
+                "custody_mode": DIRECT_CUSTODY_MODE,
+                "custody_source": "digemid_documentos.file_url",
+                "source_file_url": direct_download["source_url"],
+                "source_http_status": direct_download["http_status"],
+                "source_content_type": direct_download.get("content_type"),
+                "source_size_bytes": direct_download["size_bytes"],
+                "source_sha256": direct_download["sha256"],
+                "original_drive_file_id": None,
+                "direct_upload_drive_file_id": copied_pdf.get("id"),
+            }
+        )
+    return manifest
 
 
 def make_pdf_asset_payload(
@@ -707,33 +874,58 @@ def make_pdf_asset_payload(
     document_folder_id: str,
     original_drive_file: dict,
     copied_pdf: dict,
+    direct_download: dict | None = None,
 ) -> dict:
-    return {
+    is_direct = direct_download is not None
+    payload = {
         "document_id": row["id"],
         "page_id": None,
         "block_id": None,
         "asset_tipo": "pdf_original",
-        "asset_subtipo": "copied_to_document_folder",
+        "asset_subtipo": (
+            "direct_from_file_url" if is_direct else "copied_to_document_folder"
+        ),
         "storage_backend": "google_drive",
         "storage_path": None,
         "drive_file_id": copied_pdf.get("id"),
-        "source_url": copied_pdf.get("webViewLink"),
+        "source_url": (
+            direct_download["source_url"] if is_direct else copied_pdf.get("webViewLink")
+        ),
         "mime_type": "application/pdf",
         "file_name": copied_pdf.get("name"),
-        "sha256": None,
-        "size_bytes": int(copied_pdf["size"]) if copied_pdf.get("size") else None,
+        "sha256": direct_download["sha256"] if is_direct else None,
+        "size_bytes": (
+            direct_download["size_bytes"]
+            if is_direct
+            else int(copied_pdf["size"])
+            if copied_pdf.get("size")
+            else None
+        ),
         "width_px": None,
         "height_px": None,
         "page_number": None,
         "bbox": {},
         "metadatos": {
-            "original_drive_file_id": row.get("drive_file_id"),
+            "original_drive_file_id": None if is_direct else row.get("drive_file_id"),
             "document_folder_id": document_folder_id,
             "original_drive_file_url": original_drive_file.get("webViewLink"),
             "copied_drive_file_url": copied_pdf.get("webViewLink"),
             "migration_version": MIGRATION_VERSION,
         },
     }
+    if is_direct:
+        payload["metadatos"].update(
+            {
+                "custody_mode": DIRECT_CUSTODY_MODE,
+                "custody_source": "digemid_documentos.file_url",
+                "source_file_url": direct_download["source_url"],
+                "source_http_status": direct_download["http_status"],
+                "source_size_bytes": direct_download["size_bytes"],
+                "source_sha256": direct_download["sha256"],
+                "direct_upload_drive_file_id": copied_pdf.get("id"),
+            }
+        )
+    return payload
 
 
 def make_manifest_asset_payload(row: dict, manifest_file: dict) -> dict:
@@ -768,6 +960,7 @@ def build_document_update_payload(
     copied_pdf: dict,
     manifest_file: dict,
     migrated_at_iso: str,
+    direct_download: dict | None = None,
 ) -> dict:
     existing_raw = row.get("raw") if isinstance(row.get("raw"), dict) else {}
     document_folder_id = document_folder.get("id")
@@ -789,12 +982,40 @@ def build_document_update_payload(
             "migrated_at": migrated_at_iso,
         }
     }
+    if direct_download:
+        drive_structure_patch["drive_structure"].update(
+            {
+                "custody_mode": DIRECT_CUSTODY_MODE,
+                "custody_source": "digemid_documentos.file_url",
+                "source_file_url": direct_download["source_url"],
+                "source_size_bytes": direct_download["size_bytes"],
+                "source_sha256": direct_download["sha256"],
+                "original_drive_file_id": None,
+                "direct_upload_drive_file_id": copied_pdf.get("id"),
+            }
+        )
     merged_raw = deep_merge_dicts(existing_raw, drive_structure_patch)
-    return {
+    payload = {
         "drive_folder_id": document_folder_id or row.get("drive_folder_id"),
         "raw": merged_raw,
         "updated_at": migrated_at_iso,
     }
+    if direct_download:
+        drive_file_id = copied_pdf.get("id")
+        payload.update(
+            {
+                "drive_file_id": drive_file_id,
+                "drive_file_url": copied_pdf.get("webViewLink")
+                or (build_drive_file_url(drive_file_id) if drive_file_id else None),
+                "drive_download_url": copied_pdf.get("webContentLink")
+                or (build_drive_download_url(drive_file_id) if drive_file_id else None),
+                "uploaded_to_drive_at": row.get("uploaded_to_drive_at")
+                or migrated_at_iso,
+                "file_size_bytes": direct_download["size_bytes"],
+                "file_hash": direct_download["sha256"],
+            }
+        )
+    return payload
 
 
 def ensure_reports_dir():
@@ -821,6 +1042,9 @@ def write_report_files(mode: str, report_payload: dict):
         f"- Errors: **{summary['errors']}**",
         f"- Folders to create/reused: **{summary['folders_created_or_planned']} / {summary['folders_reused']}**",
         f"- Files to copy/reused: **{summary['pdf_copies_created_or_planned']} / {summary['pdf_copies_reused']}**",
+        "- Direct uploads to create/reused: "
+        f"**{summary['direct_uploads_created_or_planned']} / "
+        f"{summary['direct_uploads_reused']}**",
         f"- Manifest files to create/update: **{summary['manifests_created_or_updated']}**",
         f"- Assets to insert: **{summary['assets_inserted_or_planned']}**",
         f"- Documents to update: **{summary['documents_updated_or_planned']}**",
@@ -835,6 +1059,11 @@ def write_report_files(mode: str, report_payload: dict):
         lines.append(f"- Year: `{item.get('year')}`")
         lines.append(f"- Title: `{item.get('title') or ''}`")
         lines.append(f"- Original drive_file_id: `{item.get('original_drive_file_id')}`")
+        lines.append(f"- Custody mode: `{item.get('custody_mode') or ''}`")
+        if item.get("source_size_bytes") is not None:
+            lines.append(f"- Source PDF size: `{item['source_size_bytes']}` bytes")
+        if item.get("source_sha256"):
+            lines.append(f"- Source PDF SHA-256: `{item['source_sha256']}`")
         lines.append(f"- Planned document path: `{item.get('planned_document_path') or ''}`")
         lines.append(f"- Planned PDF name: `{item.get('planned_pdf_name') or ''}`")
         lines.append(f"- Planned manifest path: `{item.get('planned_manifest_path') or ''}`")
@@ -854,6 +1083,9 @@ def write_report_files(mode: str, report_payload: dict):
                 "asset_tipo",
                 "asset_subtipo",
                 "drive_file_id",
+                "size_bytes",
+                "sha256",
+                "integrity_verified",
                 "planned_path",
             ):
                 if op.get(key):
@@ -881,7 +1113,13 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
     planned_paths = build_document_paths(year, document_folder_name)
     migrated_at_iso = datetime.now(timezone.utc).isoformat()
 
-    original_drive_file = drive_get_file(service, row["drive_file_id"])
+    direct_custody = is_direct_file_url_custody(row)
+    direct_download = (
+        download_and_validate_pdf(row.get("file_url")) if direct_custody else None
+    )
+    original_drive_file = (
+        {} if direct_custody else drive_get_file(service, row["drive_file_id"])
+    )
     document_folder, subfolders = ensure_folder_path(
         service,
         root_folder_id,
@@ -894,15 +1132,29 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
     original_subfolder = subfolders["00_ORIGINAL"]
     manifest_subfolder = subfolders["99_MANIFEST"]
 
-    copied_pdf = drive_copy_file(
-        service,
-        row["drive_file_id"],
-        original_subfolder["id"],
-        copied_pdf_name,
-        apply_changes,
-        operations,
-        planned_path=f"{planned_paths['planned_original_folder_path']}/{copied_pdf_name}",
+    planned_pdf_path = (
+        f"{planned_paths['planned_original_folder_path']}/{copied_pdf_name}"
     )
+    if direct_custody:
+        copied_pdf = drive_upload_pdf_direct(
+            service,
+            original_subfolder["id"],
+            copied_pdf_name,
+            direct_download,
+            apply_changes,
+            operations,
+            planned_path=planned_pdf_path,
+        )
+    else:
+        copied_pdf = drive_copy_file(
+            service,
+            row["drive_file_id"],
+            original_subfolder["id"],
+            copied_pdf_name,
+            apply_changes,
+            operations,
+            planned_path=planned_pdf_path,
+        )
     manifest_payload = build_manifest(
         row,
         document_folder,
@@ -910,6 +1162,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         original_drive_file,
         copied_pdf,
         migrated_at_iso,
+        direct_download=direct_download,
     )
     manifest_file = drive_upsert_json_file(
         service,
@@ -927,6 +1180,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         document_folder.get("id"),
         original_drive_file,
         copied_pdf,
+        direct_download=direct_download,
     )
     manifest_asset_payload = make_manifest_asset_payload(row, manifest_file)
     insert_asset_if_needed(
@@ -951,6 +1205,7 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         copied_pdf,
         manifest_file,
         migrated_at_iso,
+        direct_download=direct_download,
     )
     update_document_record(
         supabase,
@@ -967,6 +1222,10 @@ def process_document(service, supabase, root_folder_id: str, row: dict, apply_ch
         "status": "applied" if apply_changes else "planned",
         "title": row.get("title"),
         "original_drive_file_id": row.get("drive_file_id"),
+        "custody_mode": DIRECT_CUSTODY_MODE if direct_custody else "drive_file_copy",
+        "source_file_url": direct_download["source_url"] if direct_download else None,
+        "source_size_bytes": direct_download["size_bytes"] if direct_download else None,
+        "source_sha256": direct_download["sha256"] if direct_download else None,
         "planned_document_path": planned_paths["planned_document_path"],
         "planned_original_folder_path": planned_paths["planned_original_folder_path"],
         "planned_manifest_path": planned_paths["planned_manifest_path"],
@@ -988,6 +1247,8 @@ def summarize_documents(items: list[dict]) -> dict:
         "folders_reused": 0,
         "pdf_copies_created_or_planned": 0,
         "pdf_copies_reused": 0,
+        "direct_uploads_created_or_planned": 0,
+        "direct_uploads_reused": 0,
         "manifests_created_or_updated": 0,
         "assets_inserted_or_planned": 0,
         "documents_updated_or_planned": 0,
@@ -1010,6 +1271,10 @@ def summarize_documents(items: list[dict]) -> dict:
                 summary["pdf_copies_created_or_planned"] += 1
             elif action == "reuse_file_copy":
                 summary["pdf_copies_reused"] += 1
+            elif action in {"planned_direct_upload", "direct_upload"}:
+                summary["direct_uploads_created_or_planned"] += 1
+            elif action == "reuse_direct_upload":
+                summary["direct_uploads_reused"] += 1
             elif action in {"create_manifest", "update_manifest"}:
                 summary["manifests_created_or_updated"] += 1
             elif action == "insert_asset":

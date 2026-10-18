@@ -3,6 +3,7 @@ import {
   evaluateConsultaSafety,
   executeConsultaWithSafetyGate,
 } from "./consulta_safety.ts";
+import type { NormaResolution } from "./norm_identity.ts";
 
 // Orquestación exclusiva de Telegram, sin credenciales ni arranque del webhook.
 // Las reglas siguen teniendo una sola autoridad: consulta_safety/revision_safety.
@@ -18,9 +19,9 @@ export type ConsultaRespuesta = {
 export type ConsultaRuntimeDependencies = {
   searchChunks: (question: string) => Promise<ConsultaChunk[]>;
   suggestSimilarAlerts: (question: string) => Promise<any[]>;
-  extraerReferenciaNormativa: (
+  resolverNormaPuntual: (
     question: string,
-  ) => { documentKey: string } | null;
+  ) => Promise<NormaResolution>;
   getNormaConContenido: (key: string) => Promise<
     {
       norma: any;
@@ -144,10 +145,42 @@ export async function answerConsultaRuntime(
   question: string,
   deps: ConsultaRuntimeDependencies,
 ): Promise<ConsultaRespuesta> {
-  const reference = deps.extraerReferenciaNormativa(question);
-  const exact = reference
-    ? await deps.getNormaConContenido(reference.documentKey)
-    : null;
+  const resolution = await deps.resolverNormaPuntual(question);
+  const unavailable = (): ConsultaRespuesta => ({
+    answer:
+      "No pude verificar la norma exacta por un problema técnico. Inténtalo nuevamente más tarde.",
+    sources: [],
+  });
+  if (resolution.status === "error") return unavailable();
+  if (resolution.status === "ambiguous") {
+    return {
+      answer: resolution.reason === "incomplete"
+        ? "Indica una sola norma con su tipo y, si corresponde, año y sector; por ejemplo RM 554-2022/MINSA."
+        : resolution.reason === "multiple"
+        ? "Encontré más de una norma que coincide con la referencia. Indica el tipo, año y sector para precisar la norma solicitada."
+        : "La identidad de esa norma está incompleta o tiene un registro histórico pendiente de aclarar en la biblioteca. Necesito una referencia inequívoca antes de interpretar su contenido.",
+      sources: [],
+    };
+  }
+  const notFound = (): ConsultaRespuesta => ({
+    answer:
+      "No encontré la norma exacta en la biblioteca normativa. No usaré documentos que solo la mencionan como sustituto de la norma solicitada.",
+    sources: [],
+  });
+  if (resolution.status === "not_found") return notFound();
+  let exact = null;
+  if (resolution.status === "resolved") {
+    try {
+      exact = await deps.getNormaConContenido(resolution.documentKey);
+    } catch {
+      return unavailable();
+    }
+    // Una eliminación o inconsistencia entre las dos lecturas nunca habilita RPC.
+    if (!exact) return notFound();
+    if (exact.norma.document_key !== resolution.documentKey) {
+      return unavailable();
+    }
+  }
   const chunks =
     (exact
       ? exact.paginas.map((page) => deps.paginaComoChunk(page, exact.norma))

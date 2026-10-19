@@ -258,6 +258,9 @@ FORCE_EXTRA_STATUSES = [
 HEADER_ALIASES = {
     "product_name": [
         "NOMBRE DEL PRODUCTO",
+        "NOMBRE DEL DISPOSITIVO",
+        "NOMBRE DEL DISPOSITIVO MEDICO",
+        "NOMBRE DEL DISPOSITIVO MÉDICO",
         "PRODUCTO",
     ],
     "lot_number": [
@@ -269,6 +272,7 @@ HEADER_ALIASES = {
         "LOTE",
     ],
     "sanitary_registration": [
+        "CERTIFICADO DE REGISTRO SANITARIO",
         "REGISTRO SANITARIO",
         "R.S.",
         "R S",
@@ -281,6 +285,7 @@ HEADER_ALIASES = {
         "PAÍS",
     ],
     "registration_holder": [
+        "TITULAR DEL CERTIFICADO DE REGISTRO SANITARIO",
         "TITULAR DEL REGISTRO SANITARIO",
     ],
     "analytical_result": [
@@ -399,14 +404,22 @@ PERU_DEPARTMENTS = {
 
 CONTROL_QUALITY_HEADER_PATTERNS = [
     "NOMBRE DEL PRODUCTO",
+    "NOMBRE DEL DISPOSITIVO",
+    "NOMBRE DEL DISPOSITIVO MEDICO",
     "Nº DE LOTE",
     "N° DE LOTE",
     "LOTE",
+    "CERTIFICADO DE REGISTRO SANITARIO",
+    "REGISTRO SANITARIO",
     "REGISTRO",
     "SANITARIO",
     "FABRICANTE",
     "PAIS",
     "PAÍS",
+    "TITULAR DEL CERTIFICADO DE REGISTRO SANITARIO",
+    "TITULAR DEL REGISTRO SANITARIO",
+    "RESULTADO ANALITICO",
+    "RESULTADO ANALÍTICO",
     "RESULTADOS ANALITICOS",
     "RESULTADOS ANALÍTICOS",
 ]
@@ -669,9 +682,21 @@ def looks_like_lot(line: str) -> bool:
 
 def looks_like_sanitary_registration(line: str) -> bool:
     normalized_line = normalize_text(line).upper()
-    if len(normalized_line) < 4 or len(normalized_line) > 40:
+
+    if len(normalized_line) < 4 or len(normalized_line) > 60:
         return False
-    return bool(re.fullmatch(r"[A-Z]{1,4}-[A-Z0-9\-]+", normalized_line))
+
+    patterns = [
+        r"[A-Z]{1,4}-[A-Z0-9\-]+",
+        r"DM\d+[A-Z]?",
+        r"CRS\s*N[°ºO]?\s*\d+",
+        r"\(?R\.S\.\s*DM\d+[A-Z]?\)?",
+    ]
+
+    return any(
+        re.fullmatch(pattern, normalized_line, flags=re.IGNORECASE)
+        for pattern in patterns
+    )
 
 
 def normalize_lines(full_text: str) -> list[str]:
@@ -683,9 +708,15 @@ def normalize_lines(full_text: str) -> list[str]:
 
 
 def find_control_quality_header_start(lines: list[str]) -> int | None:
+    product_header_markers = [
+        "NOMBRE DEL PRODUCTO",
+        "NOMBRE DEL DISPOSITIVO",
+        "NOMBRE DEL DISPOSITIVO MEDICO",
+    ]
+
     for index, line in enumerate(lines):
         normalized_line = normalize_header(line)
-        if "NOMBRE DEL PRODUCTO" not in normalized_line:
+        if not any(marker in normalized_line for marker in product_header_markers):
             continue
 
         window = lines[index:index + 12]
@@ -702,13 +733,39 @@ def find_control_quality_header_start(lines: list[str]) -> int | None:
 
 def has_control_quality_markers(lines: list[str]) -> bool:
     normalized_lines = [normalize_for_matching(line) for line in lines]
-    markers = [
-        "NOMBRE DEL PRODUCTO",
-        "LOTE",
-        "REGISTRO SANITARIO",
-        "RESULTADOS ANALITICOS",
-    ]
-    return all(any(marker in line for line in normalized_lines) for marker in markers)
+
+    has_product_name = any(
+        any(
+            marker in line
+            for marker in [
+                "NOMBRE DEL PRODUCTO",
+                "NOMBRE DEL DISPOSITIVO",
+                "NOMBRE DEL DISPOSITIVO MEDICO",
+            ]
+        )
+        for line in normalized_lines
+    )
+
+    has_lot = any("LOTE" in line for line in normalized_lines)
+
+    has_registration = any(
+        "REGISTRO SANITARIO" in line
+        or "CERTIFICADO DE REGISTRO SANITARIO" in line
+        for line in normalized_lines
+    )
+
+    has_analytical_result = any(
+        "RESULTADO ANALITICO" in line
+        or "RESULTADOS ANALITICOS" in line
+        for line in normalized_lines
+    )
+
+    return (
+        has_product_name
+        and has_lot
+        and has_registration
+        and has_analytical_result
+    )
 
 
 def find_falsified_header_start(lines: list[str]) -> int | None:
@@ -3249,12 +3306,29 @@ def extract_falsified_products_from_layout(
 
 
 def looks_like_registration_holder_line(line: str) -> bool:
-    normalized_line = normalize_header(line)
-    if is_country_line(line):
+    raw_line = normalize_text(line)
+    normalized_line = normalize_header(raw_line)
+
+    if is_country_line(raw_line):
         return False
-    if any(token in normalized_line for token in ["S.A.C", "S.A.", "E.I.R.L", "LABORATORIO", "DROGUERIA", "DROGUERÍA"]):
+
+    if any(
+        token in normalized_line
+        for token in [
+            "S.A.C",
+            "S.A.",
+            "S.R.L",
+            "E.I.R.L",
+            "LABORATORIO",
+            "DROGUERIA",
+        ]
+    ):
         return True
-    return normalized_line == line.upper() and len(normalized_line.split()) <= 8
+
+    return (
+        raw_line == raw_line.upper()
+        and len(normalized_line.split()) <= 8
+    )
 
 
 def build_partial_product(
@@ -3404,9 +3478,15 @@ def extract_control_quality_products(
 
     data_start = header_start
     while data_start < len(lines):
-        if "RESULTADOS ANALITICOS" in normalize_header(lines[data_start]) or "RESULTADOS ANALÍTICOS" in normalize_header(lines[data_start]):
+        normalized_header_line = normalize_header(lines[data_start])
+
+        if (
+            "RESULTADO ANALITICO" in normalized_header_line
+            or "RESULTADOS ANALITICOS" in normalized_header_line
+        ):
             data_start += 1
             break
+
         data_start += 1
 
     if data_start >= len(lines):
@@ -3437,10 +3517,18 @@ def extract_control_quality_products(
     lot_number = lines[index]
     index += 1
 
-    sanitary_registration = None
-    if index < len(lines) and looks_like_sanitary_registration(lines[index]):
-        sanitary_registration = lines[index]
+    sanitary_registration_lines = []
+
+    while (
+        index < len(lines)
+        and looks_like_sanitary_registration(lines[index])
+    ):
+        sanitary_registration_lines.append(lines[index])
         index += 1
+
+    sanitary_registration = join_lines(
+        sanitary_registration_lines
+    )
 
     manufacturer_lines, index = collect_until(lines, index, is_country_line)
     manufacturer_country = None

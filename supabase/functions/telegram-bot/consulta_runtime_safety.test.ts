@@ -461,7 +461,8 @@ Deno.test("norma exacta con filas pending_ocr vacías no invoca IA", async () =>
     deps,
   );
 
-  assert.match(result.answer, /contenido todavía no fue extraído\/revisado/);
+  assert.match(result.answer, /no pude localizar con suficiente confianza/);
+  assert.match(result.answer, /No enviaré la norma completa al modelo/);
   assert.equal(calls.deepseek + calls.gemini, 0);
   assert.equal(calls.contexts.length, 0);
 });
@@ -804,7 +805,8 @@ Deno.test("LEY-29459 sin páginas: identidad resuelta no sustituye contenido", a
     deps,
   );
   assert.deepEqual(loaded, ["LEY-29459"]);
-  assert.match(result.answer, /contenido todavía no fue/);
+  assert.match(result.answer, /no pude localizar con suficiente confianza/);
+  assert.match(result.answer, /No enviaré la norma completa al modelo/);
   assert.equal(result.sources[0].documentKey, "LEY-29459");
   assert.equal(calls.search.length + calls.deepseek + calls.gemini, 0);
 });

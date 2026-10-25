@@ -2,6 +2,11 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
 import { answerConsultaRuntime, hydrateConsultaChunks } from "./consulta_runtime.ts";
 import { resolverNormaPuntual } from "./norm_identity.ts";
+import { type ConsultaIntent, interpretConsultaIntent } from "./consulta_intent.ts";
+import {
+  MAX_ARTICLE_EVIDENCE_PAGES,
+  selectArticleEvidence,
+} from "./consulta_article.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -3637,7 +3642,7 @@ const MAX_PAGINAS_NORMA_PUNTUAL = 25;
  * (digemid_norma_relaciones, en ambos sentidos) para que el modelo pueda
  * responder tambien "que mas debo tener en cuenta" y no solo "que dice este
  * articulo". */
-async function getNormaConContenido(documentKey: string) {
+async function getNormaConContenido(documentKey: string, intent?: ConsultaIntent) {
   const { data: norma, error: errorNorma } = await supabase
     .from("digemid_normas")
     .select("id, document_key, titulo, fecha_publicacion, source_url, pdf_url, estado_vigencia")
@@ -3647,25 +3652,90 @@ async function getNormaConContenido(documentKey: string) {
   if (errorNorma) throw errorNorma;
   if (!norma) return null;
 
-  const { data: paginas, error: errorPaginas } = await supabase
-    .from("digemid_norma_paginas")
-    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula, tabla_verificada, extraction_method, ocr_used, metadata")
-    .eq("norma_id", norma.id)
-    .order("page_number")
-    .limit(MAX_PAGINAS_NORMA_PUNTUAL);
+  const pageColumns = "page_number, source_asset_id, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula, tabla_verificada, extraction_method, ocr_used, metadata";
+  let paginas: any[] = [];
 
-  if (errorPaginas) throw errorPaginas;
+  if (intent?.intent === "article_lookup" && intent.article) {
+    // El valor viene de un modelo: solo se interpola un identificador simple.
+    const article = intent.article.toLowerCase().replace(/[^0-9a-z]/g, "").slice(0, 12);
+    if (article) {
+      // El espacio evita que el artículo 5 coincida con 15, 25, etc.
+      const headings = [
+        `%artículo ${article}%`,
+        `%articulo ${article}%`,
+        `%art1culo ${article}%`,
+        `%artlculo ${article}%`,
+      ];
+      const { data: matches, error: matchError } = await supabase
+        .from("digemid_norma_paginas")
+        .select(pageColumns)
+        .eq("norma_id", norma.id)
+        .or(
+          headings.flatMap((heading) => [
+            `text_normalized.ilike.${heading}`,
+            `text_raw.ilike.${heading}`,
+          ]).join(","),
+        )
+        .order("page_number")
+        .limit(12);
 
-  const { data: relaciones, error: errorRelaciones } = await supabase
-    .from("digemid_norma_relaciones")
-    .select(
-      "tipo_relacion, tipo_norma_afectada, numero_afectada, anio_afectada, descripcion_afectada, estado, norma_origen_id, norma_afectada_id, norma_origen_document_key",
-    )
-    .or(`norma_origen_id.eq.${norma.id},norma_afectada_id.eq.${norma.id}`);
+      if (matchError) throw matchError;
 
-  if (errorRelaciones) throw errorRelaciones;
+      for (const match of matches ?? []) {
+        let windowQuery = supabase
+          .from("digemid_norma_paginas")
+          .select(pageColumns)
+          .eq("norma_id", norma.id)
+          .gte("page_number", match.page_number)
+          .order("page_number")
+          .limit(MAX_ARTICLE_EVIDENCE_PAGES + 1);
 
-  return { norma, paginas: paginas ?? [], relaciones: relaciones ?? [] };
+        if (match.source_asset_id != null) {
+          windowQuery = windowQuery.eq("source_asset_id", match.source_asset_id);
+        }
+        const { data, error } = await windowQuery;
+
+        if (error) throw error;
+        const selection = selectArticleEvidence(
+          data ?? [],
+          article,
+          MAX_ARTICLE_EVIDENCE_PAGES,
+        );
+        if (selection.status === "found") {
+          paginas = selection.pages;
+          break;
+        }
+        // Si una coincidencia estructural válida supera el máximo, no probar
+        // otra repetición posterior del mismo encabezado y entregar solo la cola.
+        if (selection.status === "limit_exceeded") break;
+      }
+    }
+  } else {
+    const { data, error } = await supabase
+      .from("digemid_norma_paginas")
+      .select(pageColumns)
+      .eq("norma_id", norma.id)
+      .order("page_number")
+      .limit(MAX_PAGINAS_NORMA_PUNTUAL);
+
+    if (error) throw error;
+    paginas = data ?? [];
+  }
+
+  let relaciones: any[] = [];
+  if (intent?.intent !== "article_lookup") {
+    const { data, error } = await supabase
+      .from("digemid_norma_relaciones")
+      .select(
+        "tipo_relacion, tipo_norma_afectada, numero_afectada, anio_afectada, descripcion_afectada, estado, norma_origen_id, norma_afectada_id, norma_origen_document_key",
+      )
+      .or(`norma_origen_id.eq.${norma.id},norma_afectada_id.eq.${norma.id}`);
+
+    if (error) throw error;
+    relaciones = data ?? [];
+  }
+
+  return { norma, paginas, relaciones };
 }
 
 function paginaComoChunk(pagina: any, norma: any) {
@@ -3680,6 +3750,7 @@ function paginaComoChunk(pagina: any, norma: any) {
     revisado_manual: pagina.revisado_manual,
     extraction_method: pagina.extraction_method,
     ocr_used: pagina.ocr_used,
+    source_asset_id: pagina.source_asset_id,
     has_tables: pagina.has_tables,
     tabla_verificada: pagina.tabla_verificada,
     metadata: pagina.metadata,
@@ -3877,6 +3948,11 @@ ${BANNER_MARCA_HTML}
 /** Ambas rutas de /consulta comparten el gate antes de cualquier proveedor. */
 async function answerConsulta(question: string) {
   return await answerConsultaRuntime(question, {
+    interpretIntent: (question) => interpretConsultaIntent(question, {
+      deepseekApiKey: DEEPSEEK_API_KEY,
+      geminiApiKey: GEMINI_API_KEY,
+      geminiModel: GEMINI_MODEL,
+    }),
     searchChunks: searchConsultaChunks,
     suggestSimilarAlerts,
     resolverNormaPuntual: (question) => resolverNormaPuntual(supabase, question),

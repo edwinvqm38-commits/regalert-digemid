@@ -4,6 +4,10 @@ import {
   executeConsultaWithSafetyGate,
 } from "./consulta_safety.ts";
 import type { NormaResolution } from "./norm_identity.ts";
+import {
+  type ConsultaIntent,
+  deterministicConsultaIntent,
+} from "./consulta_intent.ts";
 
 // Orquestación exclusiva de Telegram, sin credenciales ni arranque del webhook.
 // Las reglas siguen teniendo una sola autoridad: consulta_safety/revision_safety.
@@ -30,12 +34,13 @@ function unreviewedOcrPages(chunks: ConsultaChunk[]): number[] {
 }
 
 export type ConsultaRuntimeDependencies = {
+  interpretIntent?: (question: string) => Promise<ConsultaIntent>;
   searchChunks: (question: string) => Promise<ConsultaChunk[]>;
   suggestSimilarAlerts: (question: string) => Promise<any[]>;
   resolverNormaPuntual: (
     question: string,
   ) => Promise<NormaResolution>;
-  getNormaConContenido: (key: string) => Promise<
+  getNormaConContenido: (key: string, intent?: ConsultaIntent) => Promise<
     {
       norma: any;
       paginas: any[];
@@ -160,6 +165,15 @@ export async function answerConsultaRuntime(
   question: string,
   deps: ConsultaRuntimeDependencies,
 ): Promise<ConsultaRespuesta> {
+  let intent: ConsultaIntent;
+  try {
+    intent = deps.interpretIntent
+      ? await deps.interpretIntent(question)
+      : deterministicConsultaIntent(question);
+  } catch {
+    // Un router externo defectuoso nunca rompe /consulta ni evita el parser local.
+    intent = deterministicConsultaIntent(question);
+  }
   const resolution = await deps.resolverNormaPuntual(question);
   const unavailable = (): ConsultaRespuesta => ({
     answer:
@@ -186,7 +200,7 @@ export async function answerConsultaRuntime(
   let exact = null;
   if (resolution.status === "resolved") {
     try {
-      exact = await deps.getNormaConContenido(resolution.documentKey);
+      exact = await deps.getNormaConContenido(resolution.documentKey, intent);
     } catch {
       return unavailable();
     }
@@ -199,16 +213,17 @@ export async function answerConsultaRuntime(
   const chunks = (
     (exact
       ? exact.paginas.map((page) => deps.paginaComoChunk(page, exact.norma))
-      // La búsqueda debe preceder a CUALQUIER llamada de IA, incluso reformulación.
-      : await deps.searchChunks(question)).map(normalizeConsultaEvidence)
+      : await deps.searchChunks(intent.search_query || question)).map(normalizeConsultaEvidence)
   ).filter(hasRecoverableText);
 
   if (!chunks.length) {
     if (exact) {
       return {
-        answer:
-          `Encontré <b>${exact.norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
-          "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
+        answer: intent.intent === "article_lookup"
+          ? `Encontré <b>${exact.norma.document_key}</b>, pero no pude localizar con suficiente confianza ` +
+            `los límites del artículo ${intent.article ?? "solicitado"}. No enviaré la norma completa al modelo; verifica directamente con el PDF oficial.`
+          : `Encontré <b>${exact.norma.document_key}</b> en la base, pero su contenido todavía no fue ` +
+            "extraído/revisado, así que no puedo interpretarla todavía. Verifica directamente con el PDF oficial.",
         sources: [{
           documentKey: exact.norma.document_key,
           url: exact.norma.pdf_url ?? exact.norma.source_url ?? "",
@@ -227,15 +242,20 @@ export async function answerConsultaRuntime(
     };
   }
 
+  const safetyQuestion = intent.needs_structured_table
+    ? `${question} tabla`
+    : question;
   const result = await executeConsultaWithSafetyGate(
-    question,
+    safetyQuestion,
     chunks,
     async (permitted) => {
       // No cerrar sobre chunks/paginas para construir contexto ni reintroducirlos
       // a través del PDF completo o relaciones sin procedencia por página.
       const safeChunks = permitted as ConsultaChunk[];
       const allPermitted = safeChunks.length === chunks.length;
-      const relations = exact && allPermitted ? exact.relaciones : [];
+      const relations = exact && allPermitted && intent.intent !== "article_lookup"
+        ? exact.relaciones
+        : [];
       const context = deps.buildContext(safeChunks);
       const userContent = `Contexto:\n\n${context}${
         exact ? deps.formatRelacionesComoContexto(relations, exact.norma) : ""
@@ -290,7 +310,7 @@ export async function answerConsultaRuntime(
   );
   if (!result.blocked) return result.value;
 
-  const decision = evaluateConsultaSafety(question, chunks);
+  const decision = evaluateConsultaSafety(safetyQuestion, chunks);
   for (const chunk of result.evidence.length ? result.evidence : chunks) {
     console.info("CONSULTA_SAFETY_BLOCK", {
       reason: decision.reason,

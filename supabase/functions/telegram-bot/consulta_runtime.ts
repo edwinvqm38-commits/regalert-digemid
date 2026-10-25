@@ -16,6 +16,19 @@ export type ConsultaRespuesta = {
   blocked?: boolean;
 };
 
+export function hasRecoverableText(chunk: ConsultaChunk): boolean {
+  return typeof chunk.text_content === "string" && chunk.text_content.trim().length > 0;
+}
+
+function unreviewedOcrPages(chunks: ConsultaChunk[]): number[] {
+  return [...new Set(chunks.filter((chunk) =>
+    chunk.revisado_manual !== true &&
+    (chunk.ocr_used === true ||
+      String(chunk.extraction_method ?? "").toLowerCase().includes("ocr"))
+  ).map((chunk) => Number(chunk.page_number)).filter(Number.isInteger))]
+    .sort((a, b) => a - b);
+}
+
 export type ConsultaRuntimeDependencies = {
   searchChunks: (question: string) => Promise<ConsultaChunk[]>;
   suggestSimilarAlerts: (question: string) => Promise<any[]>;
@@ -107,7 +120,7 @@ export async function hydrateConsultaChunks(
       // Alertas tienen variantes de columnas legacy; no presuponer metadata.
       .select(
         norma
-          ? "page_number, text_normalized, text_raw, has_tables, revisado_manual, tabla_verificada, metadata"
+          ? "page_number, text_normalized, text_raw, has_tables, revisado_manual, tabla_verificada, extraction_method, ocr_used, metadata"
           : "*",
       )
       .eq(norma ? "norma_id" : "document_id", document.id)
@@ -137,6 +150,8 @@ export async function hydrateConsultaChunks(
       tabla_verificada: page.tabla_verificada,
       revisado_manual: page.revisado_manual,
       metadata: page.metadata,
+      extraction_method: page.extraction_method,
+      ocr_used: page.ocr_used,
     });
   }));
 }
@@ -181,11 +196,12 @@ export async function answerConsultaRuntime(
       return unavailable();
     }
   }
-  const chunks =
+  const chunks = (
     (exact
       ? exact.paginas.map((page) => deps.paginaComoChunk(page, exact.norma))
       // La búsqueda debe preceder a CUALQUIER llamada de IA, incluso reformulación.
-      : await deps.searchChunks(question)).map(normalizeConsultaEvidence);
+      : await deps.searchChunks(question)).map(normalizeConsultaEvidence)
+  ).filter(hasRecoverableText);
 
   if (!chunks.length) {
     if (exact) {
@@ -263,6 +279,11 @@ export async function answerConsultaRuntime(
           relations,
           exact.norma,
         );
+      }
+      const ocrPages = unreviewedOcrPages(safeChunks);
+      if (ocrPages.length) {
+        response.answer +=
+          `\n\n⚠️ La evidencia de la(s) página(s) ${ocrPages.join(", ")} proviene de OCR y aún no fue revisada por una persona.`;
       }
       return response;
     },

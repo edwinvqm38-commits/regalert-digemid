@@ -447,6 +447,42 @@ Deno.test("sin evidencia devuelve sugerencias sin IA", async () => {
   assert.equal(calls.deepseek + calls.gemini, 0);
 });
 
+Deno.test("norma exacta con filas pending_ocr vacías no invoca IA", async () => {
+  const placeholder: ConsultaChunk = {
+    ...safe,
+    text_content: "   ",
+    extraction_method: "pending_ocr",
+    ocr_used: false,
+  };
+  const { deps, calls } = setup([placeholder], true);
+
+  const result = await answerConsultaRuntime(
+    "Resume el artículo 5 de la Ley 29459",
+    deps,
+  );
+
+  assert.match(result.answer, /contenido todavía no fue extraído\/revisado/);
+  assert.equal(calls.deepseek + calls.gemini, 0);
+  assert.equal(calls.contexts.length, 0);
+});
+
+Deno.test("evidencia OCR no revisada añade advertencia determinística", async () => {
+  const ocr: ConsultaChunk = {
+    ...safe,
+    page_number: 7,
+    extraction_method: "tesseract_pymupdf_render",
+    ocr_used: true,
+    revisado_manual: false,
+  };
+  const { deps, calls } = setup([ocr], true);
+
+  const result = await answerConsultaRuntime("Resume el artículo 5.", deps);
+
+  assert.equal(calls.deepseek, 1);
+  assert.match(result.answer, /página\(s\) 7 proviene de OCR/);
+  assert.match(result.answer, /aún no fue revisada por una persona/);
+});
+
 Deno.test("log de bloqueo solo contiene motivo e identidad de página", async () => {
   const originalInfo = console.info;
   const logs: unknown[][] = [];

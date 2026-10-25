@@ -1,0 +1,31 @@
+name: DIGEMID - Consultabilidad Normativa MVP
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 11 * * *"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Clasificar las siete normas MVP
+        run: python scripts/report_normativa_consultability.py --dry-run
+      - name: Subir reporte
+        uses: actions/upload-artifact@v4
+        with:
+          name: normativa-consultability
+          path: |
+            reports/normativa_consultability.json
+            reports/normativa_consultability.md
+          if-no-files-found: error

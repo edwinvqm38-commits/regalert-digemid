@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import io
 import importlib
 import json
@@ -6,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +20,20 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from supabase import create_client
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from agents.custodia_documental import SenalesBlanco, evaluar_pagina_en_blanco
+from agents.pdf_extract import quality_score
+
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 EXTRACTION_VERSION = "normativa_text_extraction_v2"
+MIN_EMBEDDED_TEXT_CHARS = 24
+MIN_EMBEDDED_TEXT_WORDS = 4
+DEFAULT_MAX_OCR_PAGES = 100
+SOURCE_VALIDATION_STATUSES = {"quarantine", "needs_source_validation"}
 REPORTS_DIR = Path("reports")
 DRY_RUN_REPORT_PATH = REPORTS_DIR / "normativa_text_extraction_dry_run.md"
 RESULT_REPORT_PATH = REPORTS_DIR / "normativa_text_extraction_result.md"
@@ -109,7 +122,8 @@ def parse_args():
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--ocr", action="store_true")
-    parser.add_argument("--max-pages", type=int)
+    parser.add_argument("--start-page", type=int, default=1)
+    parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_OCR_PAGES)
     parser.add_argument("--ocr-lang", default="spa")
     parser.add_argument("--ocr-dpi", type=int, default=200)
     parser.add_argument("--update-existing-normalized", action="store_true")
@@ -117,8 +131,10 @@ def parse_args():
 
     if args.dry_run and args.apply:
         raise ValueError("No puedes usar --dry-run y --apply al mismo tiempo")
-    if args.max_pages is not None and args.max_pages < 0:
-        raise ValueError("--max-pages no puede ser negativo")
+    if args.start_page <= 0:
+        raise ValueError("--start-page debe ser mayor que cero")
+    if args.ocr and (args.max_pages is None or args.max_pages <= 0):
+        raise ValueError("--max-pages debe ser un entero positivo cuando OCR esta habilitado")
     if args.ocr_dpi <= 0:
         raise ValueError("--ocr-dpi debe ser mayor que cero")
     if args.force and args.update_existing_normalized:
@@ -165,6 +181,39 @@ def cautious_normalize_page_text(raw_text: str) -> str:
 
 def has_useful_text(text: str) -> bool:
     return bool(normalize_text(text))
+
+
+def has_sufficient_embedded_text(text: str) -> bool:
+    """Evita aceptar como capa digital útil unos pocos glifos o un sello.
+
+    La decisión es deliberadamente conservadora: una página con prosa real
+    supera cualquiera de los dos umbrales, mientras que una página sin capa
+    de texto o con ruido mínimo queda registrada para OCR.
+    """
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+    return (
+        len(normalized) >= MIN_EMBEDDED_TEXT_CHARS
+        or len(normalized.split()) >= MIN_EMBEDDED_TEXT_WORDS
+    )
+
+
+def page_has_usable_text(page: dict) -> bool:
+    return has_useful_text(page.get("text_normalized")) and (
+        bool(page.get("ocr_used"))
+        or bool(page.get("embedded_text_sufficient"))
+        or bool(page.get("persisted_text_reused"))
+    )
+
+
+def page_is_verified_blank(page: dict) -> bool:
+    metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
+    return metadata.get("verified_blank") is True
+
+
+def page_is_resolved(page: dict) -> bool:
+    return page_has_usable_text(page) or page_is_verified_blank(page)
 
 
 def classify_line_kind(line: str) -> tuple[str, str | None]:
@@ -360,6 +409,7 @@ def build_ocr_config(args) -> dict | None:
         "engine": OCR_ENGINE_NAME,
         "lang": normalize_text(args.ocr_lang) or "spa",
         "dpi": args.ocr_dpi,
+        "start_page": args.start_page,
         "max_pages": args.max_pages,
         "dependencies_ok": True,
         "tesseract_version": tesseract_version,
@@ -424,7 +474,10 @@ def get_norma_by_document_key(supabase, document_key: str) -> dict:
 def get_pdf_assets(supabase, norma_id: str) -> list[dict]:
     response = (
         supabase.table(ASSET_TABLE_NAME)
-        .select("id, norma_id, asset_tipo, asset_subtipo, drive_file_id, file_name, mime_type")
+        .select(
+            "id, norma_id, asset_tipo, asset_subtipo, drive_file_id, file_name, "
+            "mime_type, source_url, file_size_bytes, metadata"
+        )
         .eq("norma_id", norma_id)
         .eq("asset_tipo", "pdf_original")
         .not_.is_("drive_file_id", "null")
@@ -437,7 +490,10 @@ def get_pdf_assets(supabase, norma_id: str) -> list[dict]:
 def get_existing_pages_by_asset(supabase, norma_id: str, source_asset_id: int) -> dict[int, dict]:
     response = (
         supabase.table(PAGE_TABLE_NAME)
-        .select("id, page_number, source_asset_id")
+        .select(
+            "id, page_number, source_asset_id, text_raw, text_normalized, "
+            "extraction_method, ocr_used, quality_score, revisado_manual, metadata"
+        )
         .eq("norma_id", norma_id)
         .eq("source_asset_id", source_asset_id)
         .execute()
@@ -468,12 +524,95 @@ def validate_pdf_bytes(content: bytes):
         raise ValueError("Magic bytes invalidos: no inicia con %PDF")
 
 
-def can_attempt_ocr_page(ocr_config: dict | None) -> bool:
+def validate_asset_hash(content: bytes, asset: dict) -> str:
+    digest = hashlib.sha256(content).hexdigest()
+    metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    expected = normalize_text(metadata.get("sha256")).lower()
+    if expected and expected != digest:
+        raise ValueError(
+            f"SHA-256 del PDF no coincide con el asset {asset.get('id')}: "
+            f"esperado {expected}, obtenido {digest}"
+        )
+    return digest
+
+
+def can_attempt_ocr_page(ocr_config: dict | None, page_number: int) -> bool:
     if not ocr_config or not ocr_config.get("enabled"):
+        return False
+    if page_number < int(ocr_config.get("start_page") or 1):
         return False
     max_pages = ocr_config.get("max_pages")
     attempted = ocr_config.get("runtime", {}).get("pages_attempted", 0)
-    return max_pages is None or attempted < max_pages
+    return max_pages is not None and attempted < max_pages
+
+
+def page_source_sha256(page: dict | None) -> str:
+    if not page:
+        return ""
+    metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
+    return normalize_text(metadata.get("source_pdf_sha256")).lower()
+
+
+def existing_page_has_current_text(existing: dict | None, pdf_sha256: str) -> bool:
+    if not existing or page_source_sha256(existing) != pdf_sha256:
+        return False
+    if existing.get("extraction_method") == "pending_ocr":
+        return False
+    return has_useful_text(existing.get("text_normalized") or "")
+
+
+def existing_page_is_current_verified_blank(existing: dict | None, pdf_sha256: str) -> bool:
+    if not existing or page_source_sha256(existing) != pdf_sha256:
+        return False
+    metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+    return metadata.get("verified_blank") is True
+
+
+def source_needs_validation(record: dict | None) -> bool:
+    if not record:
+        return False
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    raw = record.get("raw") if isinstance(record.get("raw"), dict) else {}
+    status = normalize_text(
+        metadata.get("source_validation_status")
+        or raw.get("source_validation_status")
+        or record.get("process_status")
+    ).lower()
+    return (
+        status in SOURCE_VALIDATION_STATUSES
+        or metadata.get("quarantine") is True
+        or metadata.get("needs_source_validation") is True
+        or raw.get("quarantine") is True
+        or raw.get("needs_source_validation") is True
+    )
+
+
+def detect_verified_blank(page, page_number: int, total_pages: int) -> tuple[bool, dict]:
+    """Confirma una hoja blanca con señales conservadoras del PDF renderizado."""
+    pix = page.get_pixmap(matrix=fitz.Matrix(1, 1), colorspace=fitz.csGRAY, alpha=False)
+    samples = pix.samples or b""
+    ratio_nonwhite = (
+        sum(1 for value in samples if value < 245) / len(samples)
+        if samples
+        else 0.0
+    )
+    signals = SenalesBlanco(
+        texto_embebido=page.get_text("text") or "",
+        ratio_pixeles_no_blancos=ratio_nonwhite,
+        bloques_texto=len(page.get_text("blocks") or []),
+        objetos_dibujo=len(page.get_drawings() or []),
+        imagenes=len(page.get_images(full=True) or []),
+        es_ultima_pagina=page_number == total_pages,
+    )
+    is_blank, confidence, reason = evaluar_pagina_en_blanco(signals)
+    verified = is_blank and confidence == "alta"
+    return verified, {
+        "verified_blank": verified,
+        "confidence": confidence,
+        "reason": reason,
+        "ratio_nonwhite_pixels": ratio_nonwhite,
+        "detector": "custodia_documental_v1",
+    }
 
 
 def render_page_for_ocr(page, dpi: int, pil_image_module):
@@ -715,7 +854,7 @@ def run_ocr_on_page(page, ocr_config: dict, source_asset_id: int, page_number: i
         text_normalized = layout_result["text_normalized"] or cautious_normalize_page_text(text_raw)
         text_chars = len(text_normalized)
 
-        if has_useful_text(text_normalized):
+        if has_sufficient_embedded_text(text_normalized):
             runtime["pages_success"] += 1
             runtime["ocr_text_chars"] += text_chars
             return {
@@ -754,11 +893,15 @@ def extract_pages_from_pdf_bytes(
     source_asset_file_name: str,
     source_asset_subtipo: str | None,
     ocr_config: dict | None = None,
+    existing_pages: dict[int, dict] | None = None,
+    pdf_sha256: str = "",
 ) -> list[dict]:
     extracted_at = datetime.now(timezone.utc).isoformat()
     pages: list[dict] = []
+    existing_pages = existing_pages or {}
 
     with fitz.open(stream=pdf_bytes, filetype="pdf") as pdf:
+        total_pages = pdf.page_count
         for page_number, page in enumerate(pdf, start=1):
             embedded_text_raw = normalize_page_text(page.get_text("text") or "")
             embedded_text_normalized = cautious_normalize_page_text(embedded_text_raw)
@@ -769,9 +912,48 @@ def extract_pages_from_pdf_bytes(
             ocr_error = None
             ocr_attempted = False
             layout_signals = None
+            embedded_text_sufficient = has_sufficient_embedded_text(
+                embedded_text_normalized
+            )
             was_empty_embedded_text = not has_useful_text(embedded_text_normalized)
+            existing = existing_pages.get(page_number)
+            existing_current_text = existing_page_has_current_text(existing, pdf_sha256)
+            existing_current_blank = existing_page_is_current_verified_blank(existing, pdf_sha256)
+            skip_existing_review = bool(existing and existing.get("revisado_manual") is True)
+            verified_blank = False
+            blank_metadata = None
 
-            if was_empty_embedded_text and can_attempt_ocr_page(ocr_config):
+            if not embedded_text_sufficient:
+                verified_blank, blank_metadata = detect_verified_blank(
+                    page, page_number, total_pages
+                )
+
+            if existing_current_blank:
+                verified_blank = True
+                existing_metadata = (
+                    existing.get("metadata")
+                    if isinstance(existing.get("metadata"), dict)
+                    else {}
+                )
+                blank_metadata = existing_metadata.get("blank_detection") or {
+                    "verified_blank": True,
+                    "confidence": "persisted",
+                    "reason": "blanco verificado previamente para el mismo SHA-256",
+                }
+
+            if existing_current_text:
+                text_raw = existing.get("text_raw") or existing.get("text_normalized") or ""
+                text_normalized = existing.get("text_normalized") or ""
+                extraction_method = existing.get("extraction_method") or "persisted"
+                ocr_used = existing.get("ocr_used") is True
+
+            if (
+                not embedded_text_sufficient
+                and not verified_blank
+                and not existing_current_text
+                and not skip_existing_review
+                and can_attempt_ocr_page(ocr_config, page_number)
+            ):
                 ocr_attempted = True
                 ocr_result = run_ocr_on_page(
                     page=page,
@@ -804,14 +986,23 @@ def extract_pages_from_pdf_bytes(
                 "extracted_at": extracted_at,
                 "extraction_version": EXTRACTION_VERSION,
                 "review": page_review,
+                "embedded_text_sufficient": embedded_text_sufficient,
             }
+            if blank_metadata:
+                metadata["blank_detection"] = blank_metadata
+            if verified_blank:
+                metadata["verified_blank"] = True
+                text_raw = ""
+                text_normalized = ""
+                extraction_method = "verified_blank"
+                ocr_used = False
             if ocr_attempted:
                 metadata["ocr"] = {
                     "ocr_engine": OCR_ENGINE_NAME,
                     "ocr_lang": ocr_config["lang"] if ocr_config else None,
                     "ocr_dpi": ocr_config["dpi"] if ocr_config else None,
                     "text_chars": page_text_length,
-                    "was_empty_embedded_text": True,
+                    "was_empty_embedded_text": was_empty_embedded_text,
                 }
                 if layout_signals:
                     metadata["ocr"]["layout"] = layout_signals
@@ -830,6 +1021,8 @@ def extract_pages_from_pdf_bytes(
                     "ocr_attempted": ocr_attempted,
                     "ocr_error": ocr_error,
                     "had_embedded_text": not was_empty_embedded_text,
+                    "embedded_text_sufficient": embedded_text_sufficient,
+                    "persisted_text_reused": existing_current_text,
                 }
             )
 
@@ -862,13 +1055,13 @@ def build_page_payload(norma_id: str, asset: dict, page: dict) -> dict:
         "text_normalized": page["text_normalized"],
         "extraction_method": page.get("extraction_method") or "pymupdf",
         "ocr_used": bool(page.get("ocr_used")),
+        "quality_score": quality_score(page["text_normalized"]),
         "has_tables": page["has_tables"],
         "metadata": metadata,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     # Las páginas pendientes de OCR necesitan calidad explícitamente baja para
-    # que el pipeline review-only pueda seleccionarlas. No alterar las páginas
-    # con texto, cuyo quality_score conserva el comportamiento previo.
+    # que el pipeline review-only pueda seleccionarlas.
     if "quality_score" in page:
         payload["quality_score"] = page["quality_score"]
     return payload
@@ -885,7 +1078,11 @@ def build_pending_ocr_page(
         {
             "physical_page_detected_from_official_pdf": True,
             "pending_ocr": True,
-            "reason": "no_embedded_text",
+            "reason": (
+                "no_embedded_text"
+                if not has_useful_text(page.get("text_normalized"))
+                else "insufficient_embedded_text"
+            ),
             "source_asset_id": source_asset_id,
             "source_asset_file_name": source_asset_file_name,
             "extraction_version": EXTRACTION_VERSION,
@@ -893,16 +1090,50 @@ def build_pending_ocr_page(
     )
     return {
         **page,
-        "text_raw": "",
+        # Conservar la captura embebida, aunque sea insuficiente. La versión
+        # normalizada queda vacía para que nunca sea evidencia consultable.
+        "text_raw": page.get("text_raw") or "",
         "text_normalized": "",
         "extraction_method": "pending_ocr",
         "ocr_used": False,
-        "ocr_attempted": False,
-        "ocr_error": None,
+        "ocr_attempted": bool(page.get("ocr_attempted")),
+        "ocr_error": page.get("ocr_error"),
         "has_tables": False,
         "quality_score": 0.0,
         "metadata": metadata,
     }
+
+
+def validate_prepared_pages(pages: list[dict], expected_total: int) -> None:
+    numbers = [int(page["page_number"]) for page in pages]
+    expected = list(range(1, expected_total + 1))
+    if len(pages) != expected_total or numbers != expected:
+        raise ValueError(
+            "Extraccion incompleta antes de escribir: "
+            f"PDF={expected_total} paginas, preparadas={numbers}"
+        )
+
+
+def should_preserve_existing_page(existing: dict, payload: dict) -> str | None:
+    """Devuelve el motivo para conservar la fila actual, si corresponde."""
+    if existing.get("revisado_manual") is True:
+        return "manual_review"
+
+    existing_text = existing.get("text_normalized") or existing.get("text_raw") or ""
+    candidate_text = payload.get("text_normalized") or payload.get("text_raw") or ""
+    if has_useful_text(existing_text) and not has_useful_text(candidate_text):
+        return "candidate_without_text"
+
+    if has_useful_text(existing_text) and has_useful_text(candidate_text):
+        existing_quality = existing.get("quality_score")
+        candidate_quality = payload.get("quality_score")
+        if existing_quality is None:
+            existing_quality = quality_score(existing_text)
+        if candidate_quality is None:
+            candidate_quality = quality_score(candidate_text)
+        if float(candidate_quality) < float(existing_quality):
+            return "candidate_lower_quality"
+    return None
 
 
 def write_page_record(
@@ -916,6 +1147,20 @@ def write_page_record(
 ) -> str:
     page_number = payload["page_number"]
     source_asset_id = payload["source_asset_id"]
+
+    if existing:
+        preserve_reason = should_preserve_existing_page(existing, payload)
+        if preserve_reason:
+            operations.append(
+                {
+                    "action": "preserve_existing_page",
+                    "reason": preserve_reason,
+                    "page_id": existing.get("id"),
+                    "source_asset_id": source_asset_id,
+                    "page_number": page_number,
+                }
+            )
+            return "reused"
 
     if existing and update_existing_normalized:
         operations.append(
@@ -937,6 +1182,28 @@ def write_page_record(
         return "updated_normalized"
 
     if existing and not force:
+        existing_text = existing.get("text_normalized") or ""
+        candidate_text = payload.get("text_normalized") or ""
+        if (
+            existing.get("revisado_manual") is not True
+            and (
+                existing.get("extraction_method") == "pending_ocr"
+                or not has_useful_text(existing_text)
+            )
+            and has_useful_text(candidate_text)
+        ):
+            operations.append(
+                {
+                    "action": "upgrade_pending_page",
+                    "page_id": existing.get("id"),
+                    "source_asset_id": source_asset_id,
+                    "page_number": page_number,
+                }
+            )
+            if not apply_changes:
+                return "planned_update"
+            supabase.table(PAGE_TABLE_NAME).update(payload).eq("id", existing["id"]).execute()
+            return "updated"
         operations.append(
             {
                 "action": "reuse_page",
@@ -1016,6 +1283,7 @@ def process_asset(
         "pages_total": 0,
         "pages_with_text": 0,
         "pages_without_text": 0,
+        "verified_blank_pages": 0,
         "skipped_empty_pages": 0,
         "pages_inserted": 0,
         "pages_updated": 0,
@@ -1024,6 +1292,10 @@ def process_asset(
         "pages_planned_insert": 0,
         "pages_planned_update": 0,
         "pages_planned_update_normalized": 0,
+        "pages_persisted": None,
+        "missing_pages_after_write": [],
+        "unexpected_pages_after_write": [],
+        "source_hash_mismatch_pages_after_write": [],
         "pages_ocr_attempted": 0,
         "pages_ocr_success": 0,
         "pages_ocr_failed": 0,
@@ -1031,6 +1303,11 @@ def process_asset(
         "total_text_chars": 0,
         "errors": [],
     }
+
+    if source_needs_validation(asset):
+        asset_result["status"] = "needs_source_validation"
+        asset_result["ocr_reason"] = "Fuente en cuarentena; validar antes de extraer u OCR"
+        return asset_result
 
     drive_file_id = normalize_text(asset.get("drive_file_id"))
     if not drive_file_id:
@@ -1040,10 +1317,17 @@ def process_asset(
 
     pdf_bytes = download_drive_file_bytes(service, drive_file_id)
     validate_pdf_bytes(pdf_bytes)
+    pdf_sha256 = validate_asset_hash(pdf_bytes, asset)
     asset_result["pdf_size_bytes"] = len(pdf_bytes)
+    asset_result["pdf_sha256"] = pdf_sha256
 
     source_asset_file_name = normalize_text(asset.get("file_name")) or f"asset_{asset['id']}.pdf"
     source_asset_subtipo = normalize_text(asset.get("asset_subtipo")) or None
+    existing_pages = get_existing_pages_by_asset(
+        supabase=supabase,
+        norma_id=norma_id,
+        source_asset_id=asset["id"],
+    )
     ocr_runtime_before = deepcopy(ocr_config.get("runtime", {})) if ocr_config else None
     pages = extract_pages_from_pdf_bytes(
         pdf_bytes=pdf_bytes,
@@ -1051,6 +1335,8 @@ def process_asset(
         source_asset_file_name=source_asset_file_name,
         source_asset_subtipo=source_asset_subtipo,
         ocr_config=ocr_config,
+        existing_pages=existing_pages,
+        pdf_sha256=pdf_sha256,
     )
     if ocr_config and ocr_runtime_before is not None:
         runtime_after = ocr_config["runtime"]
@@ -1068,56 +1354,75 @@ def process_asset(
         )
 
     asset_result["pages_total"] = len(pages)
-    asset_result["pages_with_text"] = sum(
-        1 for page in pages if has_useful_text(page["text_normalized"])
+    asset_metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    identity_metadata = deep_merge_dicts(
+        asset_metadata,
+        {
+            "sha256": pdf_sha256,
+            "pdf_physical_page_count": asset_result["pages_total"],
+        },
     )
-    asset_result["pages_without_text"] = (
-        asset_result["pages_total"] - asset_result["pages_with_text"]
+    asset["metadata"] = identity_metadata
+    operations.append({
+        "action": "persist_asset_identity",
+        "asset_id": asset["id"],
+        "source_pdf_sha256": pdf_sha256,
+        "pdf_physical_page_count": asset_result["pages_total"],
+    })
+    if apply_changes:
+        try:
+            supabase.table(ASSET_TABLE_NAME).update({
+                "metadata": identity_metadata,
+                "file_size_bytes": len(pdf_bytes),
+            }).eq("id", asset["id"]).execute()
+        except Exception as exc:
+            asset_result["errors"].append(f"identidad del asset: {exc}")
+    asset_result["pages_with_text"] = sum(
+        1 for page in pages if page_has_usable_text(page)
+    )
+    asset_result["verified_blank_pages"] = sum(
+        1 for page in pages if page_is_verified_blank(page)
+    )
+    asset_result["pages_without_text"] = sum(
+        1 for page in pages if not page_is_resolved(page)
     )
     asset_result["total_text_chars"] = sum(
         len(page["text_normalized"])
         for page in pages
-        if has_useful_text(page["text_normalized"])
+        if page_has_usable_text(page)
     )
 
-    pending_ocr_pages = (
-        asset_result["pages_total"] > 0 and asset_result["total_text_chars"] == 0
-    )
+    validate_prepared_pages(pages, asset_result["pages_total"])
+    pending_ocr_pages = [
+        page for page in pages if not page_is_resolved(page)
+    ]
     if pending_ocr_pages:
         asset_result["requires_ocr"] = True
         asset_result["ocr_reason"] = (
-            "PDF sin texto util despues de extraccion"
+            "PDF con paginas sin texto util despues de extraccion"
             if ocr_config
-            else "PDF sin capa de texto extraible"
+            else "PDF con paginas sin capa de texto suficiente"
         )
-        asset_result["status"] = "ocr_required"
-
-    existing_pages = get_existing_pages_by_asset(
-        supabase=supabase,
-        norma_id=norma_id,
-        source_asset_id=asset["id"],
-    )
 
     for page in pages:
-        if pending_ocr_pages:
+        page_metadata = page.get("metadata") if isinstance(page.get("metadata"), dict) else {}
+        page["metadata"] = deep_merge_dicts(
+            page_metadata,
+            {
+                "source_pdf_sha256": pdf_sha256,
+                "source_pdf_url": asset.get("source_url"),
+                "source_drive_file_id": drive_file_id,
+                "pdf_physical_page_count": asset_result["pages_total"],
+            },
+        )
+        if page in pending_ocr_pages:
             page = build_pending_ocr_page(
                 page=page,
                 source_asset_id=asset["id"],
                 source_asset_file_name=source_asset_file_name,
             )
-        elif not has_useful_text(page["text_normalized"]):
-            asset_result["skipped_empty_pages"] += 1
-            operations.append(
-                {
-                    "action": "skip_empty_page",
-                    "source_asset_id": asset["id"],
-                    "page_number": page["page_number"],
-                    "reason": "empty_text_after_ocr" if page.get("ocr_attempted") else "empty_text",
-                }
-            )
             if page.get("ocr_error"):
                 asset_result["errors"].append(page["ocr_error"])
-            continue
 
         page_number = page["page_number"]
         if page.get("ocr_used") and isinstance(page.get("metadata"), dict):
@@ -1161,9 +1466,49 @@ def process_asset(
                 f"pagina {page_number}: {exc}"
             )
 
+    if apply_changes:
+        persisted = get_existing_pages_by_asset(
+            supabase=supabase,
+            norma_id=norma_id,
+            source_asset_id=asset["id"],
+        )
+        persisted_numbers = sorted(persisted)
+        expected_numbers = list(range(1, asset_result["pages_total"] + 1))
+        missing_numbers = [
+            number for number in expected_numbers if number not in persisted
+        ]
+        unexpected_numbers = [
+            number for number in persisted_numbers if number not in expected_numbers
+        ]
+        hash_mismatch_numbers = [
+            number
+            for number in expected_numbers
+            if number in persisted
+            and page_source_sha256(persisted[number]) != pdf_sha256
+        ]
+        asset_result["pages_persisted"] = len(persisted_numbers)
+        asset_result["missing_pages_after_write"] = missing_numbers
+        asset_result["unexpected_pages_after_write"] = unexpected_numbers
+        asset_result["source_hash_mismatch_pages_after_write"] = hash_mismatch_numbers
+        if missing_numbers:
+            asset_result["errors"].append(
+                "Persistencia incompleta: faltan paginas "
+                + ", ".join(str(number) for number in missing_numbers)
+            )
+        if unexpected_numbers:
+            asset_result["errors"].append(
+                "Persistencia no reconciliada: sobran paginas "
+                + ", ".join(str(number) for number in unexpected_numbers)
+            )
+        if hash_mismatch_numbers:
+            asset_result["errors"].append(
+                "Persistencia de version anterior: SHA-256 distinto en paginas "
+                + ", ".join(str(number) for number in hash_mismatch_numbers)
+            )
+
     if asset_result["errors"]:
         asset_result["status"] = "error"
-    elif pending_ocr_pages:
+    elif pending_ocr_pages and asset_result["pages_with_text"] == 0:
         asset_result["status"] = "ocr_required"
     elif asset_result["pages_without_text"] == 0 and asset_result["pages_ocr_success"] > 0:
         asset_result["status"] = "text_extracted_ocr"
@@ -1189,6 +1534,7 @@ def summarize_results(asset_results: list[dict]) -> dict:
         "total_text_chars": 0,
         "pages_with_text": 0,
         "pages_without_text": 0,
+        "verified_blank_pages": 0,
         "skipped_empty_pages": 0,
         "pages_inserted": 0,
         "pages_updated": 0,
@@ -1211,12 +1557,16 @@ def summarize_results(asset_results: list[dict]) -> dict:
     }
     for item in asset_results:
         has_errors = bool(item.get("errors"))
-        if not has_errors and item.get("status") != "ocr_required":
+        if not has_errors and item.get("status") not in {
+            "ocr_required",
+            "needs_source_validation",
+        }:
             summary["pdf_assets_processed"] += 1
         summary["total_pages_extracted"] += item.get("pages_total", 0)
         summary["total_text_chars"] += item.get("total_text_chars", 0)
         summary["pages_with_text"] += item.get("pages_with_text", 0)
         summary["pages_without_text"] += item.get("pages_without_text", 0)
+        summary["verified_blank_pages"] += item.get("verified_blank_pages", 0)
         summary["skipped_empty_pages"] += item.get("skipped_empty_pages", 0)
         summary["pages_inserted"] += item.get("pages_inserted", 0)
         summary["pages_updated"] += item.get("pages_updated", 0)
@@ -1253,6 +1603,7 @@ def build_norma_update_payload(norma_row: dict, summary: dict, text_extracted_at
         "total_text_chars": summary["total_text_chars"],
         "pages_with_text": summary["pages_with_text"],
         "pages_without_text": summary["pages_without_text"],
+        "verified_blank_pages": summary.get("verified_blank_pages", 0),
         "ocr_required": summary["requires_ocr"],
         "pages_ocr_attempted": summary.get("pages_ocr_attempted", 0),
         "pages_ocr_success": summary.get("pages_ocr_success", 0),
@@ -1310,6 +1661,7 @@ def build_dependency_failure_report(args, error_message: str) -> dict:
             "ocr_engine": OCR_ENGINE_NAME,
             "ocr_lang": normalize_text(args.ocr_lang) or "spa",
             "ocr_dpi": args.ocr_dpi,
+            "start_page": args.start_page,
             "max_pages": args.max_pages,
             "ocr_dependencies_ok": False,
         },
@@ -1434,6 +1786,33 @@ def process_norma(
     ocr_config: dict | None = None,
 ) -> dict:
     operations: list[dict] = []
+    if source_needs_validation(norma_row):
+        summary = summarize_results([])
+        status = "needs_source_validation"
+        operations.append({
+            "action": "skip_source_validation_required",
+            "norma_id": norma_row["id"],
+            "document_key": norma_row.get("document_key"),
+        })
+        if apply_changes:
+            payload = build_norma_update_payload(
+                norma_row=norma_row,
+                summary=summary,
+                text_extracted_at=datetime.now(timezone.utc).isoformat(),
+                status=status,
+            )
+            supabase.table(NORMA_TABLE_NAME).update(payload).eq("id", norma_row["id"]).execute()
+        return {
+            "norma_id": norma_row["id"],
+            "document_key": norma_row.get("document_key"),
+            "title": norma_row.get("titulo"),
+            "force": force,
+            "update_existing_normalized": update_existing_normalized,
+            "assets": [],
+            "summary": summary,
+            "operations": operations,
+            "planned_process_status": status,
+        }
     assets = get_pdf_assets(supabase, norma_row["id"])
     if not assets:
         raise ValueError(
@@ -1484,14 +1863,21 @@ def process_norma(
     summary = summarize_results(asset_results)
     text_extracted_at = datetime.now(timezone.utc).isoformat()
     assets_with_text = sum(1 for item in asset_results if item.get("pages_with_text", 0) > 0)
-    assets_without_text = sum(
-        1
-        for item in asset_results
-        if item.get("pages_total", 0) > 0 and item.get("total_text_chars", 0) == 0
+    assets_without_text = sum(1 for item in asset_results if item.get("pages_without_text", 0) > 0)
+    all_assets_ok = (
+        summary["errors_count"] == 0
+        and summary["pdf_assets_processed"] == summary["pdf_assets_total"]
+        and summary["pages_without_text"] == 0
+        and summary["pages_with_text"] > 0
     )
-    all_assets_ok = summary["errors_count"] == 0 and assets_with_text == summary["pdf_assets_total"]
 
-    if ocr_config and summary["ocr_enabled"]:
+    if any(item.get("status") == "needs_source_validation" for item in asset_results):
+        process_status = "needs_source_validation"
+        summary["requires_ocr"] = False
+    elif summary["errors_count"] > 0:
+        process_status = "text_extraction_partial"
+        summary["requires_ocr"] = summary["pages_without_text"] > 0
+    elif ocr_config and summary["ocr_enabled"]:
         if summary["pages_without_text"] == 0 and summary["pages_ocr_success"] > 0:
             process_status = "text_extracted_ocr"
             summary["requires_ocr"] = False
@@ -1504,7 +1890,11 @@ def process_norma(
         elif summary["total_text_chars"] == 0 and summary["total_pages_extracted"] > 0:
             process_status = "ocr_required"
             summary["requires_ocr"] = True
-        elif assets_with_text > 0 and (assets_without_text > 0 or summary["errors_count"] > 0):
+        elif assets_with_text > 0 and (
+            assets_without_text > 0
+            or summary["pages_without_text"] > 0
+            or summary["errors_count"] > 0
+        ):
             process_status = "text_extraction_partial"
             summary["requires_ocr"] = True
         elif all_assets_ok:
@@ -1516,7 +1906,11 @@ def process_norma(
     else:
         if summary["total_text_chars"] == 0 and summary["total_pages_extracted"] > 0:
             process_status = "ocr_required"
-        elif assets_with_text > 0 and (assets_without_text > 0 or summary["errors_count"] > 0):
+        elif assets_with_text > 0 and (
+            assets_without_text > 0
+            or summary["pages_without_text"] > 0
+            or summary["errors_count"] > 0
+        ):
             process_status = "text_extraction_partial"
         elif all_assets_ok:
             process_status = "text_extracted"
@@ -1589,6 +1983,7 @@ def main():
             "ocr_engine": ocr_config.get("engine") if ocr_config else None,
             "ocr_lang": ocr_config.get("lang") if ocr_config else None,
             "ocr_dpi": ocr_config.get("dpi") if ocr_config else None,
+            "start_page": ocr_config.get("start_page") if ocr_config else None,
             "max_pages": ocr_config.get("max_pages") if ocr_config else None,
             "ocr_dependencies_ok": (
                 ocr_config.get("dependencies_ok") if ocr_config else None

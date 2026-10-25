@@ -2797,6 +2797,13 @@ function advertenciasDelBloque(chunk: any): string[] {
 
   if (chunk.revisado_manual) return advertencias;
 
+  if (
+    chunk.ocr_used === true ||
+    String(chunk.extraction_method ?? "").toLowerCase().includes("ocr")
+  ) {
+    advertencias.push("transcripcion obtenida por OCR, no verificada por un humano");
+  }
+
   if (chunk.quality_score != null && chunk.quality_score < UMBRAL_CONTEXTO_BAJA_CALIDAD) {
     advertencias.push(
       "transcripcion de BAJA confiabilidad (posible error de OCR/lectura), no verificada por un humano",
@@ -3642,7 +3649,7 @@ async function getNormaConContenido(documentKey: string) {
 
   const { data: paginas, error: errorPaginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula, tabla_verificada, metadata")
+    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula, tabla_verificada, extraction_method, ocr_used, metadata")
     .eq("norma_id", norma.id)
     .order("page_number")
     .limit(MAX_PAGINAS_NORMA_PUNTUAL);
@@ -3671,6 +3678,8 @@ function paginaComoChunk(pagina: any, norma: any) {
     detail_url: norma.pdf_url ?? norma.source_url ?? "",
     quality_score: pagina.quality_score,
     revisado_manual: pagina.revisado_manual,
+    extraction_method: pagina.extraction_method,
+    ocr_used: pagina.ocr_used,
     has_tables: pagina.has_tables,
     tabla_verificada: pagina.tabla_verificada,
     metadata: pagina.metadata,

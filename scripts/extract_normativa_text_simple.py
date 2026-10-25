@@ -26,7 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agents.pdf_extract import extract_pdf
+from agents.pdf_extract import extract_pdf, quality_score
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 PAGE_TABLE = "digemid_norma_paginas"
 NORMAS_TABLE = "digemid_normas"
+ASSET_TABLE = "digemid_norma_assets"
 STORAGE_BUCKET = "digemid-documentos"
 DELAY_BETWEEN_DESCARGAS_SEGUNDOS = 4.0
 MAX_REINTENTOS_429 = 3
@@ -206,6 +207,73 @@ def normalize_text(text: str) -> str:
     return unicodedata.normalize("NFC", text or "").strip()
 
 
+def _fetch_legacy_pages(supabase, norma_id: str) -> list[dict]:
+    assets = (
+        supabase.table(ASSET_TABLE)
+        .select("id")
+        .eq("norma_id", norma_id)
+        .eq("asset_tipo", "pdf_original")
+        .execute()
+        .data
+        or []
+    )
+    if assets:
+        raise ValueError(
+            "La norma ya tiene pdf_original; use el escritor canónico basado en assets"
+        )
+    rows = (
+        supabase.table(PAGE_TABLE)
+        .select(
+            "id, page_number, text_raw, text_normalized, quality_score, "
+            "revisado_manual, extraction_method, source_asset_id, document_part, metadata"
+        )
+        .eq("norma_id", norma_id)
+        .execute()
+        .data
+        or []
+    )
+    if any(row.get("source_asset_id") is not None for row in rows):
+        raise ValueError(
+            "El escritor simple solo admite corpus legacy monoasset sin source_asset_id; "
+            "use extract_normativa_pdf_text_to_supabase.py"
+        )
+    if any(normalize_text(row.get("document_part")) for row in rows):
+        raise ValueError(
+            "El escritor simple no admite document_part/multiasset; "
+            "use extract_normativa_pdf_text_to_supabase.py"
+        )
+    return rows
+
+
+def _page_requires_ocr(row: dict) -> bool:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    if metadata.get("verified_blank") is True:
+        return False
+    if row.get("extraction_method") == "pending_ocr":
+        return True
+    return not bool(normalize_text(row.get("text_normalized") or ""))
+
+
+def _verify_legacy_persistence(supabase, norma_id: str, expected_numbers: list[int]) -> list[dict]:
+    rows = _fetch_legacy_pages(supabase, norma_id)
+    persisted_numbers = [
+        int(row["page_number"])
+        for row in rows
+        if row.get("page_number") is not None
+    ]
+    duplicates = sorted({number for number in persisted_numbers if persisted_numbers.count(number) > 1})
+    persisted_set = set(persisted_numbers)
+    expected_set = set(expected_numbers)
+    missing = sorted(expected_set - persisted_set)
+    unexpected = sorted(persisted_set - expected_set)
+    if duplicates or missing or unexpected or len(rows) != len(expected_numbers):
+        raise RuntimeError(
+            "Persistencia legacy no reconciliada: "
+            f"faltantes={missing}, sobrantes={unexpected}, duplicadas={duplicates}"
+        )
+    return rows
+
+
 def write_pages(supabase, norma_id: str, extracciones) -> dict:
     """Escribe páginas y devuelve estadísticas de la norma para auditoría:
     cuántas quedaron con baja calidad, cuántas usaron OCR, cuántas traen
@@ -220,8 +288,14 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         "con_formula": 0,
         "con_grafico": 0,
         "paginas_baja_calidad": [],
+        "insertadas": 0,
+        "actualizadas": 0,
+        "preservadas": 0,
+        "ocr_required": False,
+        "persistence_verified": False,
     }
 
+    prepared = []
     for page in extracciones:
         if page.quality < UMBRAL_BAJA_CALIDAD:
             stats["baja_calidad"] += 1
@@ -235,7 +309,7 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
         if page.posible_grafico:
             stats["con_grafico"] = stats.get("con_grafico", 0) + 1
 
-        payload = {
+        prepared.append({
             "norma_id": norma_id,
             "page_number": page.page_number,
             "text_raw": page.text,
@@ -255,9 +329,64 @@ def write_pages(supabase, norma_id: str, extracciones) -> dict:
                 "posible_grafico": page.posible_grafico,
                 "tables": page.tables,
             },
-        }
-        supabase.table(PAGE_TABLE).insert(payload).execute()
+        })
 
+    page_numbers = [int(payload["page_number"]) for payload in prepared]
+    expected_numbers = list(range(1, len(prepared) + 1))
+    if not prepared or page_numbers != expected_numbers:
+        raise ValueError(
+            "Extraccion incompleta antes de escribir: "
+            f"paginas preparadas={page_numbers}"
+        )
+
+    existing_rows = _fetch_legacy_pages(supabase, norma_id)
+    existing_numbers = [int(row["page_number"]) for row in existing_rows]
+    if len(existing_numbers) != len(set(existing_numbers)):
+        raise RuntimeError("El corpus legacy contiene page_number duplicados")
+    existing_by_page = {
+        int(row["page_number"]): row
+        for row in existing_rows
+        if row.get("id") and row.get("page_number") is not None
+    }
+
+    for payload in prepared:
+        existing = existing_by_page.get(payload["page_number"])
+        if not existing:
+            supabase.table(PAGE_TABLE).insert(payload).execute()
+            stats["insertadas"] += 1
+            continue
+
+        existing_text = existing.get("text_normalized") or existing.get("text_raw") or ""
+        existing_quality = existing.get("quality_score")
+        if existing_quality is None and normalize_text(existing_text):
+            existing_quality = quality_score(existing_text)
+        candidate_text = normalize_text(payload.get("text_normalized"))
+        preserve = existing.get("revisado_manual") is True or (
+            normalize_text(existing_text)
+            and (
+                not candidate_text
+                or float(existing_quality or 0.0) >= float(payload["quality_score"])
+            )
+        )
+        if preserve:
+            stats["preservadas"] += 1
+            continue
+
+        response = (
+            supabase.table(PAGE_TABLE)
+            .update(payload)
+            .eq("id", existing["id"])
+            .execute()
+        )
+        if not (response.data or []):
+            raise RuntimeError(
+                f"Update sin filas afectadas para pagina {payload['page_number']}"
+            )
+        stats["actualizadas"] += 1
+
+    persisted = _verify_legacy_persistence(supabase, norma_id, expected_numbers)
+    stats["persistence_verified"] = True
+    stats["ocr_required"] = any(_page_requires_ocr(row) for row in persisted)
     return stats
 
 
@@ -273,7 +402,7 @@ def mark_norma(
     payload = {"process_status": status, "updated_at": now}
 
     if stats is not None:
-        payload["ocr_required"] = stats["ocr_usado"]
+        payload["ocr_required"] = stats["ocr_required"]
         payload["has_tables"] = stats["con_tablas"] > 0
 
     if error_info is not None:
@@ -591,7 +720,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--document-key", default=None,
-                        help="Reprocesar SOLO esta norma (borra sus páginas y las regenera).")
+                        help="Reprocesar SOLO esta norma legacy monoasset sin borrar páginas.")
     parser.add_argument(
         "--document-keys",
         default=None,
@@ -657,17 +786,26 @@ def main():
         file_name = sanitize_file_name(document_key, norma.get("file_name"))
 
         try:
-            if args.dry_run:
-                logger.info("[dry-run] Extraería texto de %s (%s)", document_key, pdf_url)
-                procesadas += 1
-                continue
-
             local_path = temp_dir / file_name
             download_pdf(pdf_url, local_path)
 
-            # Limpia cualquier pagina parcial de un intento anterior fallido
-            # solo despues de confirmar que el PDF aun descarga correctamente.
-            supabase.table(PAGE_TABLE).delete().eq("norma_id", norma["id"]).execute()
+            # Extraer y validar el documento completo antes de cualquier
+            # escritura. Nunca se vacía primero el corpus existente.
+            extracciones = extract_pdf(str(local_path))
+            page_numbers = [page.page_number for page in extracciones]
+            if not extracciones or page_numbers != list(range(1, len(extracciones) + 1)):
+                raise ValueError(
+                    f"Extraccion incompleta de {document_key}: paginas={page_numbers}"
+                )
+
+            if args.dry_run:
+                logger.info(
+                    "[dry-run] %s validado: %s páginas físicas; sin escrituras",
+                    document_key,
+                    len(extracciones),
+                )
+                procesadas += 1
+                continue
 
             # Respaldo del PDF como evidencia durable (reusa el archivo ya descargado).
             object_path = f"normas/{document_key}/{file_name}"
@@ -679,11 +817,16 @@ def main():
             except Exception:
                 logger.exception("No se pudo respaldar el PDF de %s (se continúa con el texto).", document_key)
 
-            extracciones = extract_pdf(str(local_path))
-
             stats = write_pages(supabase, norma["id"], extracciones)
             promedio = sum(p.quality for p in extracciones) / max(1, len(extracciones))
-            estado = "text_extracted" if promedio >= UMBRAL_BAJA_CALIDAD else "text_extracted_baja_calidad"
+            if stats["ocr_required"]:
+                estado = (
+                    "text_extraction_partial"
+                    if any(normalize_text(page.text) for page in extracciones)
+                    else "ocr_required"
+                )
+            else:
+                estado = "text_extracted" if promedio >= UMBRAL_BAJA_CALIDAD else "text_extracted_baja_calidad"
             mark_norma(supabase, norma["id"], estado, stats)
             certeza = nivel_certeza_norma(promedio, stats)
 

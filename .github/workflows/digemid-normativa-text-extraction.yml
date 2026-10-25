@@ -14,7 +14,25 @@ on:
       document_key:
         description: "Document key normativo a procesar"
         required: false
-        default: "RM-554-2022-MINSA"
+        default: "LEY-29459"
+        type: string
+      enable_ocr:
+        description: "Usar OCR solo en páginas sin texto embebido suficiente"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      ocr_max_pages:
+        description: "Máximo de páginas OCR por corrida (1-100)"
+        required: true
+        default: "50"
+        type: string
+      start_page:
+        description: "Primera página física elegible para OCR"
+        required: true
+        default: "1"
         type: string
       force:
         description: "Forzar actualizacion de paginas ya existentes"
@@ -28,7 +46,10 @@ on:
 jobs:
   normativa-text-extraction:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 180
+    concurrency:
+      group: normativa-text-extraction-${{ inputs.document_key }}
+      cancel-in-progress: false
 
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -37,6 +58,12 @@ jobs:
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
+
+      - name: Instalar Tesseract OCR (español)
+        if: inputs.enable_ocr == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
 
       - name: Configurar Python
         uses: actions/setup-python@v5
@@ -68,8 +95,18 @@ jobs:
         env:
           GOOGLE_OAUTH_CLIENT_JSON_PATH: ${{ runner.temp }}/google/google_oauth_client.json
           GOOGLE_OAUTH_TOKEN_PATH: ${{ runner.temp }}/google/google_oauth_token.json
+          OCR_MAX_PAGES: ${{ inputs.ocr_max_pages }}
+          OCR_START_PAGE: ${{ inputs.start_page }}
         run: |
           set -euo pipefail
+          if ! [[ "$OCR_MAX_PAGES" =~ ^[0-9]+$ ]] || (( OCR_MAX_PAGES < 1 || OCR_MAX_PAGES > 100 )); then
+            echo "ocr_max_pages debe ser un entero entre 1 y 100" >&2
+            exit 2
+          fi
+          if ! [[ "$OCR_START_PAGE" =~ ^[0-9]+$ ]] || (( OCR_START_PAGE < 1 )); then
+            echo "start_page debe ser un entero mayor que cero" >&2
+            exit 2
+          fi
           CMD=(python scripts/extract_normativa_pdf_text_to_supabase.py --document-key "${{ inputs.document_key }}")
 
           if [[ "${{ inputs.mode }}" == "apply" ]]; then
@@ -80,6 +117,10 @@ jobs:
 
           if [[ "${{ inputs.force }}" == "true" ]]; then
             CMD+=(--force)
+          fi
+
+          if [[ "${{ inputs.enable_ocr }}" == "true" ]]; then
+            CMD+=(--ocr --ocr-lang spa --ocr-dpi 300 --start-page "$OCR_START_PAGE" --max-pages "$OCR_MAX_PAGES")
           fi
 
           printf 'Ejecutando: %q ' "${CMD[@]}"

@@ -13,6 +13,8 @@ export type ConsultaEvidence = {
   table_quality_score?: number | null;
   tabla_verificada?: boolean | null;
   revisado_manual?: boolean | null;
+  extraction_method?: string | null;
+  ocr_used?: boolean | null;
   text_content?: string | null;
   tables_markdown?: string | null;
   metadata?: Record<string, unknown> | null;

@@ -141,7 +141,7 @@ async function getNormaConContenido(
 
   const { data: paginas, error: errorPaginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula")
+    .select("page_number, text_normalized, text_raw, quality_score, revisado_manual, has_tables, posible_formula, extraction_method, ocr_used")
     .eq("norma_id", norma.id)
     .order("page_number")
     .limit(MAX_PAGINAS_NORMA_PUNTUAL);
@@ -171,6 +171,8 @@ function paginaComoChunk(pagina: any, norma: any) {
     detail_url: norma.pdf_url ?? norma.source_url ?? "",
     quality_score: pagina.quality_score,
     revisado_manual: pagina.revisado_manual,
+    extraction_method: pagina.extraction_method,
+    ocr_used: pagina.ocr_used,
     has_tables: pagina.has_tables,
     posible_formula: pagina.posible_formula,
     estado_vigencia: norma.estado_vigencia,
@@ -258,7 +260,10 @@ async function responderNormaPuntual(
 
   const { norma, paginas, relaciones } = resultado;
 
-  if (!paginas.length) {
+  const chunks = paginas.map((pagina) => paginaComoChunk(pagina, norma))
+    .filter((chunk) => typeof chunk.text_content === "string" && chunk.text_content.trim().length > 0);
+
+  if (!chunks.length) {
     return {
       answer: `Encontré ${negritaPorEstilo(config.estiloNegrita, norma.document_key)} en la base, pero su ` +
         "contenido todavía no fue extraído/revisado, así que no puedo interpretarla todavía. " +
@@ -268,18 +273,29 @@ async function responderNormaPuntual(
     };
   }
 
-  const chunks = paginas.map((pagina) => paginaComoChunk(pagina, norma));
   const systemPrompt = construirSystemPrompt(config.estiloNegrita);
   const userContent = `Contexto:\n\n${buildConsultaContext(chunks)}${formatRelacionesComoContexto(relaciones, norma)}` +
     `\n\nPregunta: ${question}`;
   const sources = consultaSources(chunks);
   const relacionesTexto = formatRelacionesParaUsuario(relaciones, norma, config.estiloNegrita);
+  const paginasOcrSinRevisar = [...new Set(chunks.filter((chunk) =>
+    chunk.revisado_manual !== true &&
+    (chunk.ocr_used === true || String(chunk.extraction_method ?? "").toLowerCase().includes("ocr"))
+  ).map((chunk) => chunk.page_number))];
+  const avisoOcr = paginasOcrSinRevisar.length
+    ? `\n\n⚠️ La evidencia de la(s) página(s) ${paginasOcrSinRevisar.join(", ")} proviene de OCR y aún no fue revisada por una persona.`
+    : "";
 
   // Si preguntan puntualmente por una tabla/cuadro/grafico, el texto ya
   // extraido (aplanado por OCR/pdfplumber) es justo el menos confiable para
   // eso: se complementa con una lectura del PDF real via un modelo con
   // vision. Es un extra opcional (nunca lanza, nunca bloquea la respuesta
   // de texto normal si falla o no hay proveedor configurado).
+  // DEUDA TÉCNICA (fuera de este PR): esta ruta compartida, usada por canales
+  // distintos de Telegram, adjunta el PDF completo a Gemini. No garantiza que
+  // visión reciba únicamente las páginas admitidas por el safety gate. La ruta
+  // Telegram no invoca esta función; una corrección segura requiere extracción
+  // física de páginas y un gate común antes de adjuntar binarios.
   const necesitaVision = preguntaPideVerificacionVisual(question);
   const verificacionVisual = necesitaVision ? await intentarVerificacionVisual(norma, question, config) : null;
   const b = (t: string) => negritaPorEstilo(config.estiloNegrita, t);
@@ -290,7 +306,7 @@ async function responderNormaPuntual(
   if (config.deepseekApiKey) {
     try {
       const interpretacion = await callDeepseek(config.deepseekApiKey, systemPrompt, userContent);
-      return { answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`, sources, sinEvidencia: false };
+      return { answer: `${interpretacion}${bloqueVisual}${relacionesTexto}${avisoOcr}`, sources, sinEvidencia: false };
     } catch (error) {
       console.error("DeepSeek falló, probando respaldo Gemini:", error);
     }
@@ -298,7 +314,7 @@ async function responderNormaPuntual(
 
   if (config.geminiApiKey) {
     const interpretacion = await callGemini(config.geminiApiKey, config.geminiModel, systemPrompt, userContent);
-    return { answer: `${interpretacion}${bloqueVisual}${relacionesTexto}`, sources, sinEvidencia: false };
+    return { answer: `${interpretacion}${bloqueVisual}${relacionesTexto}${avisoOcr}`, sources, sinEvidencia: false };
   }
 
   throw new Error("Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)");
@@ -417,6 +433,13 @@ export function advertenciasDelBloque(chunk: any): string[] {
   }
 
   if (chunk.revisado_manual) return advertencias;
+
+  if (
+    chunk.ocr_used === true ||
+    String(chunk.extraction_method ?? "").toLowerCase().includes("ocr")
+  ) {
+    advertencias.push("transcripcion obtenida por OCR, no verificada por un humano");
+  }
 
   if (chunk.quality_score != null && chunk.quality_score < UMBRAL_CONTEXTO_BAJA_CALIDAD) {
     advertencias.push(
@@ -713,6 +736,9 @@ export async function answerConsulta(
     // normal de busqueda de texto como respaldo, en vez de fallar.
   }
 
+  // DEUDA TÉCNICA (fuera de este PR): la reformulación puede invocar IA antes
+  // de recuperar evidencia. Telegram usa consulta_runtime.ts y busca primero;
+  // cambiar aquí exige coordinar también el flujo compartido de WhatsApp.
   const consultaBusqueda = await reformularConsultaParaBusqueda(question, config);
   const chunks = await searchConsultaChunks(supabase, consultaBusqueda);
 

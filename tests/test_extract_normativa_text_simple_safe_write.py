@@ -1,7 +1,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
-
-import pytest
+import unittest
 
 from scripts import extract_normativa_text_simple as simple
 
@@ -86,144 +85,144 @@ class Database:
         return Query(self, name)
 
 
-def test_rerun_updates_in_place_without_delete_or_duplicates():
-    db = Database()
-    pages = [extraction(1, "Artículo 1. Texto."), extraction(2, "Artículo 2. Texto.")]
+class TestExtractNormativaTextSimpleSafeWrite(unittest.TestCase):
+    def test_rerun_updates_in_place_without_delete_or_duplicates(self):
+        db = Database()
+        pages = [extraction(1, "Artículo 1. Texto."), extraction(2, "Artículo 2. Texto.")]
 
-    first = simple.write_pages(db, "norma-1", pages)
-    second = simple.write_pages(db, "norma-1", pages)
+        first = simple.write_pages(db, "norma-1", pages)
+        second = simple.write_pages(db, "norma-1", pages)
 
-    assert first["insertadas"] == 2
-    assert second["preservadas"] == 2
-    assert len(db.pages) == 2
-    assert "delete" not in db.actions
-    assert second["persistence_verified"] is True
+        self.assertEqual(first["insertadas"], 2)
+        self.assertEqual(second["preservadas"], 2)
+        self.assertEqual(len(db.pages), 2)
+        self.assertNotIn("delete", db.actions)
+        self.assertTrue(second["persistence_verified"])
 
+    def test_lower_quality_candidate_does_not_replace_valid_page(self):
+        existing = {
+            "id": "page-1",
+            "page_number": 1,
+            "text_raw": "Artículo 1. Texto confiable.",
+            "text_normalized": "Artículo 1. Texto confiable.",
+            "quality_score": 0.95,
+            "revisado_manual": False,
+            "extraction_method": "pymupdf",
+        }
+        db = Database([existing])
 
-def test_lower_quality_candidate_does_not_replace_valid_page():
-    existing = {
-        "id": "page-1",
-        "page_number": 1,
-        "text_raw": "Artículo 1. Texto confiable.",
-        "text_normalized": "Artículo 1. Texto confiable.",
-        "quality_score": 0.95,
-        "revisado_manual": False,
-        "extraction_method": "pymupdf",
-    }
-    db = Database([existing])
+        stats = simple.write_pages(db, "norma-1", [extraction(1, "ruido", quality=0.1)])
 
-    stats = simple.write_pages(db, "norma-1", [extraction(1, "ruido", quality=0.1)])
+        self.assertEqual(stats["preservadas"], 1)
+        self.assertEqual(db.pages[0]["text_normalized"], existing["text_normalized"])
+        self.assertEqual(db.actions, [])
 
-    assert stats["preservadas"] == 1
-    assert db.pages[0]["text_normalized"] == existing["text_normalized"]
-    assert db.actions == []
+    def test_non_contiguous_preparation_fails_before_writes(self):
+        db = Database()
 
+        with self.assertRaisesRegex(ValueError, "incompleta"):
+            simple.write_pages(db, "norma-1", [extraction(2, "Artículo 2.")])
 
-def test_non_contiguous_preparation_fails_before_writes():
-    db = Database()
+        self.assertEqual(db.actions, [])
 
-    try:
-        simple.write_pages(db, "norma-1", [extraction(2, "Artículo 2.")])
-    except ValueError as error:
-        assert "incompleta" in str(error)
-    else:
-        raise AssertionError("Debió rechazar páginas no contiguas")
+    def test_partial_persistence_is_not_reported_as_complete(self):
+        db = Database(fail_insert_page=2)
+        pages = [extraction(1, "Artículo 1."), extraction(2, "Artículo 2.")]
 
-    assert db.actions == []
+        with self.assertRaisesRegex(RuntimeError, "fallo de insert"):
+            simple.write_pages(db, "norma-1", pages)
 
+        self.assertEqual([row["page_number"] for row in db.pages], [1])
 
-def test_partial_persistence_is_not_reported_as_complete():
-    db = Database(fail_insert_page=2)
-    pages = [extraction(1, "Artículo 1."), extraction(2, "Artículo 2.")]
+    def test_unexpected_stale_page_fails_reconciliation(self):
+        stale = {
+            "id": "page-3",
+            "page_number": 3,
+            "text_raw": "Página obsoleta",
+            "text_normalized": "Página obsoleta",
+            "quality_score": 0.8,
+            "revisado_manual": False,
+            "extraction_method": "pymupdf",
+            "source_asset_id": None,
+            "document_part": None,
+        }
+        db = Database([stale])
 
-    with pytest.raises(RuntimeError, match="fallo de insert"):
-        simple.write_pages(db, "norma-1", pages)
+        with self.assertRaisesRegex(RuntimeError, r"sobrantes=\[3\]"):
+            simple.write_pages(db, "norma-1", [extraction(1, "Artículo 1.")])
 
-    assert [row["page_number"] for row in db.pages] == [1]
+    def test_null_quality_good_text_is_preserved_conservatively(self):
+        existing = {
+            "id": "page-1",
+            "page_number": 1,
+            "text_raw": "Artículo 1. Texto normativo completo y coherente para evaluación.",
+            "text_normalized": "Artículo 1. Texto normativo completo y coherente para evaluación.",
+            "quality_score": None,
+            "revisado_manual": False,
+            "extraction_method": "pymupdf",
+            "source_asset_id": None,
+            "document_part": None,
+        }
+        db = Database([existing])
 
+        stats = simple.write_pages(db, "norma-1", [extraction(1, "ruido", quality=0.1)])
 
-def test_unexpected_stale_page_fails_reconciliation():
-    stale = {
-        "id": "page-3",
-        "page_number": 3,
-        "text_raw": "Página obsoleta",
-        "text_normalized": "Página obsoleta",
-        "quality_score": 0.8,
-        "revisado_manual": False,
-        "extraction_method": "pymupdf",
-        "source_asset_id": None,
-        "document_part": None,
-    }
-    db = Database([stale])
+        self.assertEqual(stats["preservadas"], 1)
+        self.assertEqual(db.pages[0]["text_normalized"], existing["text_normalized"])
 
-    with pytest.raises(RuntimeError, match=r"sobrantes=\[3\]"):
-        simple.write_pages(db, "norma-1", [extraction(1, "Artículo 1.")])
+    def test_update_that_affects_no_rows_is_detected(self):
+        existing = {
+            "id": "page-1",
+            "page_number": 1,
+            "text_raw": "texto pobre",
+            "text_normalized": "texto pobre",
+            "quality_score": 0.1,
+            "revisado_manual": False,
+            "extraction_method": "pymupdf",
+            "source_asset_id": None,
+            "document_part": None,
+        }
+        db = Database([existing], noop_updates=True)
 
+        with self.assertRaisesRegex(RuntimeError, "sin filas afectadas"):
+            simple.write_pages(
+                db,
+                "norma-1",
+                [extraction(1, "Artículo 1. Texto de mejor calidad.", quality=0.9)],
+            )
 
-def test_null_quality_good_text_is_preserved_conservatively():
-    existing = {
-        "id": "page-1",
-        "page_number": 1,
-        "text_raw": "Artículo 1. Texto normativo completo y coherente para evaluación.",
-        "text_normalized": "Artículo 1. Texto normativo completo y coherente para evaluación.",
-        "quality_score": None,
-        "revisado_manual": False,
-        "extraction_method": "pymupdf",
-        "source_asset_id": None,
-        "document_part": None,
-    }
-    db = Database([existing])
+    def test_asset_backed_document_must_use_canonical_writer(self):
+        db = Database(assets=[{"id": 77, "asset_tipo": "pdf_original"}])
 
-    stats = simple.write_pages(db, "norma-1", [extraction(1, "ruido", quality=0.1)])
+        with self.assertRaisesRegex(ValueError, "escritor canónico"):
+            simple.write_pages(db, "norma-1", [extraction(1, "Artículo 1.")])
 
-    assert stats["preservadas"] == 1
-    assert db.pages[0]["text_normalized"] == existing["text_normalized"]
-
-
-def test_update_that_affects_no_rows_is_detected():
-    existing = {
-        "id": "page-1",
-        "page_number": 1,
-        "text_raw": "texto pobre",
-        "text_normalized": "texto pobre",
-        "quality_score": 0.1,
-        "revisado_manual": False,
-        "extraction_method": "pymupdf",
-        "source_asset_id": None,
-        "document_part": None,
-    }
-    db = Database([existing], noop_updates=True)
-
-    with pytest.raises(RuntimeError, match="sin filas afectadas"):
-        simple.write_pages(
-            db,
+    def test_ocr_required_means_pending_not_ocr_was_used(self):
+        completed = Database()
+        completed_stats = simple.write_pages(
+            completed,
             "norma-1",
-            [extraction(1, "Artículo 1. Texto de mejor calidad.", quality=0.9)],
+            [
+                extraction(
+                    1,
+                    "Artículo 1. Texto OCR útil.",
+                    method="ocr_tesseract",
+                    ocr_used=True,
+                )
+            ],
+        )
+        pending = Database()
+        pending_stats = simple.write_pages(
+            pending,
+            "norma-2",
+            [extraction(1, "", quality=0.0, method="pending_ocr")],
         )
 
-
-def test_asset_backed_document_must_use_canonical_writer():
-    db = Database(assets=[{"id": 77, "asset_tipo": "pdf_original"}])
-
-    with pytest.raises(ValueError, match="escritor canónico"):
-        simple.write_pages(db, "norma-1", [extraction(1, "Artículo 1.")])
+        self.assertTrue(completed_stats["ocr_usado"])
+        self.assertFalse(completed_stats["ocr_required"])
+        self.assertFalse(pending_stats["ocr_usado"])
+        self.assertTrue(pending_stats["ocr_required"])
 
 
-def test_ocr_required_means_pending_not_ocr_was_used():
-    completed = Database()
-    completed_stats = simple.write_pages(
-        completed,
-        "norma-1",
-        [extraction(1, "Artículo 1. Texto OCR útil.", method="ocr_tesseract", ocr_used=True)],
-    )
-    pending = Database()
-    pending_stats = simple.write_pages(
-        pending,
-        "norma-2",
-        [extraction(1, "", quality=0.0, method="pending_ocr")],
-    )
-
-    assert completed_stats["ocr_usado"] is True
-    assert completed_stats["ocr_required"] is False
-    assert pending_stats["ocr_usado"] is False
-    assert pending_stats["ocr_required"] is True
+if __name__ == "__main__":
+    unittest.main()

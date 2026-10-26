@@ -31,18 +31,17 @@ type ArticleHeading = {
   suffix: string;
 };
 
-function pageText(page: ArticlePage): string {
-  return typeof page.text_normalized === "string"
-    ? page.text_normalized
-    : typeof page.text_raw === "string"
-    ? page.text_raw
-    : "";
+function structuralPageText(page: ArticlePage): string {
+  if (typeof page.text_raw === "string" && page.text_raw.trim()) {
+    return page.text_raw;
+  }
+  return typeof page.text_normalized === "string" ? page.text_normalized : "";
 }
 
 function scanHeadings(pages: ArticlePage[]): ArticleHeading[] {
   const headings: ArticleHeading[] = [];
   for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
-    const text = pageText(pages[pageIndex]);
+    const text = structuralPageText(pages[pageIndex]);
     const pattern = new RegExp(HEADING_PATTERN.source, HEADING_PATTERN.flags);
     for (
       let match = pattern.exec(text);
@@ -213,7 +212,7 @@ export function selectArticleEvidence(
       return { status: "limit_exceeded", pages: [] };
     }
 
-    const text = pageText(ordered[index]);
+    const text = structuralPageText(ordered[index]);
     const from = index === start.pageIndex ? start.offset : 0;
     const to = boundary?.pageIndex === index ? boundary.offset : text.length;
     const literal = text.slice(from, to).trimEnd();

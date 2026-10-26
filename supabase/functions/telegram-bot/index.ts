@@ -5,6 +5,7 @@ import { resolverNormaPuntual } from "./norm_identity.ts";
 import { type ConsultaIntent, interpretConsultaIntent } from "./consulta_intent.ts";
 import {
   MAX_ARTICLE_EVIDENCE_PAGES,
+  articleSearchIdentifiers,
   selectArticleEvidence,
 } from "./consulta_article.ts";
 
@@ -3659,13 +3660,14 @@ async function getNormaConContenido(documentKey: string, intent?: ConsultaIntent
     // El valor viene de un modelo: solo se interpola un identificador simple.
     const article = intent.article.toLowerCase().replace(/[^0-9a-z]/g, "").slice(0, 12);
     if (article) {
-      // El espacio evita que el artículo 5 coincida con 15, 25, etc.
-      const headings = [
-        `%artículo ${article}%`,
-        `%articulo ${article}%`,
-        `%art1culo ${article}%`,
-        `%artlculo ${article}%`,
-      ];
+      // Los vecinos permiten traer una ventana para recuperación contextual;
+      // la decisión final se toma localmente y exige la secuencia N-1/N+1.
+      const headings = articleSearchIdentifiers(article).flatMap((identifier) => [
+        `%artículo ${identifier}%`,
+        `%articulo ${identifier}%`,
+        `%art1culo ${identifier}%`,
+        `%artlculo ${identifier}%`,
+      ]);
       const { data: matches, error: matchError } = await supabase
         .from("digemid_norma_paginas")
         .select(pageColumns)
@@ -3682,13 +3684,14 @@ async function getNormaConContenido(documentKey: string, intent?: ConsultaIntent
       if (matchError) throw matchError;
 
       for (const match of matches ?? []) {
+        const windowLimit = MAX_ARTICLE_EVIDENCE_PAGES + 3;
         let windowQuery = supabase
           .from("digemid_norma_paginas")
           .select(pageColumns)
           .eq("norma_id", norma.id)
           .gte("page_number", match.page_number)
           .order("page_number")
-          .limit(MAX_ARTICLE_EVIDENCE_PAGES + 1);
+          .limit(windowLimit);
 
         if (match.source_asset_id != null) {
           windowQuery = windowQuery.eq("source_asset_id", match.source_asset_id);
@@ -3700,6 +3703,7 @@ async function getNormaConContenido(documentKey: string, intent?: ConsultaIntent
           data ?? [],
           article,
           MAX_ARTICLE_EVIDENCE_PAGES,
+          (data?.length ?? 0) === windowLimit,
         );
         if (selection.status === "found") {
           paginas = selection.pages;
@@ -3751,6 +3755,7 @@ function paginaComoChunk(pagina: any, norma: any) {
     extraction_method: pagina.extraction_method,
     ocr_used: pagina.ocr_used,
     source_asset_id: pagina.source_asset_id,
+    article_match_method: pagina.article_match_method,
     has_tables: pagina.has_tables,
     tabla_verificada: pagina.tabla_verificada,
     metadata: pagina.metadata,

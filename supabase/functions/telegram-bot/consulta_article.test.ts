@@ -210,6 +210,71 @@ Deno.test("regresión LEY-29459: 40 / -59 / 6* recupera texto OCR literal", () =
   assert.equal(result.pages[0].extraction_method, "ocr_tesseract");
 });
 
+Deno.test("regresión LEY-29459: text_raw estructural prevalece sobre text_normalized compactado", () => {
+  const raw = [
+    "Artículo 40. Definiciones",
+    "...",
+    ": Artículo -59.- De:la Autoridad Nacional de Salud",
+    "(ANS) y: de:+la Autoridad Nacional de Productos",
+    "Farmacéuticos, Dispositivos Médicos y Productos Sanitarios",
+    "...",
+    "Artículo 6*.- De la clasificación",
+  ].join("\n");
+  const normalized =
+    "texto compactado...Artículo-59.- De:la Autoridad Nacional deSalud...Artículo6*.-De la clasificación...";
+  const result = selectArticleEvidence([
+    page(2, normalized, {
+      text_raw: raw,
+      quality_score: 0.71,
+      extraction_method: "ocr_tesseract",
+      ocr_used: true,
+      revisado_manual: false,
+      has_tables: true,
+      tabla_verificada: false,
+      metadata: { source: "production-regression" },
+    }),
+  ], "5");
+
+  assert.equal(result.status, "found");
+  assert.equal(result.match_method, "ocr_contextual_recovery");
+  assert.equal(result.pages[0].article_match_method, "ocr_contextual_recovery");
+  assert.match(
+    String(result.pages[0].text_raw),
+    /^: Artículo -59\.- De:la Autoridad Nacional de Salud/,
+  );
+  assert.doesNotMatch(String(result.pages[0].text_raw), /clasificación/);
+  assert.doesNotMatch(String(result.pages[0].text_raw), /texto compactado/);
+  assert.equal(result.pages[0].page_number, 2);
+  assert.equal(result.pages[0].source_asset_id, "asset-ley");
+  assert.equal(result.pages[0].quality_score, 0.71);
+  assert.equal(result.pages[0].extraction_method, "ocr_tesseract");
+  assert.equal(result.pages[0].ocr_used, true);
+  assert.equal(result.pages[0].revisado_manual, false);
+  assert.equal(result.pages[0].has_tables, true);
+  assert.equal(result.pages[0].tabla_verificada, false);
+  assert.deepEqual(result.pages[0].metadata, {
+    source: "production-regression",
+  });
+});
+
+Deno.test("article_lookup: text_normalized es fallback si text_raw está ausente o vacío", () => {
+  for (const raw of [null, "", "   \n\t"]) {
+    const result = selectArticleEvidence([
+      page(2, "Artículo 5.- Texto normalizado.\nArtículo 6.- Siguiente.", {
+        text_raw: raw,
+      }),
+    ], "5");
+
+    assert.equal(result.status, "found");
+    assert.equal(result.match_method, "exact");
+    assert.equal(result.pages[0].text_raw, "Artículo 5.- Texto normalizado.");
+    assert.equal(
+      result.pages[0].text_normalized,
+      "Artículo 5.- Texto normalizado.",
+    );
+  }
+});
+
 Deno.test("article_lookup: límite defensivo no entrega evidencia parcial", () => {
   const pages = Array.from(
     { length: MAX_ARTICLE_EVIDENCE_PAGES + 1 },

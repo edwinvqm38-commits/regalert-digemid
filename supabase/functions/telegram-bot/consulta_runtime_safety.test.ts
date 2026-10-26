@@ -482,6 +482,107 @@ Deno.test("evidencia OCR no revisada añade advertencia determinística", async 
   assert.equal(calls.deepseek, 1);
   assert.match(result.answer, /página\(s\) 7 proviene de OCR/);
   assert.match(result.answer, /aún no fue revisada por una persona/);
+  assert.equal(result.answer.match(/⚠️/g)?.length, 1);
+});
+
+Deno.test("recuperación OCR contextual consolida avisos equivalentes", async () => {
+  const ocr: ConsultaChunk = {
+    ...safe,
+    page_number: 2,
+    extraction_method: "tesseract_pymupdf_render",
+    ocr_used: true,
+    revisado_manual: false,
+    article_match_method: "ocr_contextual_recovery",
+  };
+  const { deps, calls } = setup([ocr], true);
+  deps.deepseek = async () => {
+    calls.deepseek++;
+    return "Respuesta sustentada\n\n⚠️ Verificar con el PDF original:\ntranscripción OCR no verificada; el número de artículo aparece deformado.";
+  };
+
+  const result = await answerConsultaRuntime(
+    "Resume el artículo 5 de la Ley 29459",
+    deps,
+  );
+
+  assert.equal(calls.deepseek, 1);
+  assert.equal(result.answer.match(/⚠️/g)?.length, 1);
+  assert.match(
+    result.answer,
+    /Texto obtenido por OCR y no revisado manualmente/,
+  );
+  assert.match(
+    result.answer,
+    /encabezado del artículo presenta una deformación OCR/,
+  );
+  assert.doesNotMatch(result.answer, /número de artículo aparece deformado/);
+});
+
+Deno.test("OCR normal consolida el aviso del modelo en uno genérico", async () => {
+  const ocr: ConsultaChunk = {
+    ...safe,
+    page_number: 7,
+    extraction_method: "ocr_tesseract",
+    ocr_used: true,
+    revisado_manual: false,
+  };
+  const { deps, calls } = setup([ocr]);
+  deps.deepseek = async () => {
+    calls.deepseek++;
+    return "Respuesta sustentada\n\n⚠️ Verificar con el PDF original: transcripción OCR no verificada.";
+  };
+
+  const result = await answerConsultaRuntime("Resume la norma.", deps);
+
+  assert.equal(result.answer.match(/⚠️/g)?.length, 1);
+  assert.match(result.answer, /página\(s\) 7 proviene de OCR/);
+  assert.doesNotMatch(result.answer, /Verificar con el PDF original/);
+});
+
+Deno.test("OCR revisado manualmente no añade advertencia genérica", async () => {
+  const reviewed: ConsultaChunk = {
+    ...safe,
+    extraction_method: "ocr_tesseract",
+    ocr_used: true,
+    revisado_manual: true,
+  };
+  const { deps } = setup([reviewed]);
+
+  const result = await answerConsultaRuntime("Resume la norma.", deps);
+
+  assert.doesNotMatch(result.answer, /proviene de OCR|no revisado manualmente/);
+  assert.doesNotMatch(result.answer, /⚠️/);
+});
+
+Deno.test("reporte conserva aviso consolidado y estado técnico OCR por página", async () => {
+  const ocr: ConsultaChunk = {
+    ...safe,
+    page_number: 2,
+    extraction_method: "ocr_tesseract",
+    ocr_used: true,
+    revisado_manual: false,
+    article_match_method: "ocr_contextual_recovery",
+  };
+  const { deps } = setup([ocr], true);
+  deps.construirReporte = (_norma, pages, _relations, answer) => {
+    const technical = pages.map((page) =>
+      page.ocr_used === true && page.revisado_manual !== true
+        ? "transcripción obtenida por OCR, no verificada por un humano"
+        : ""
+    ).join("\n");
+    return `<h2>Interpretación</h2>${answer}<h2>Contenido extraído</h2>${technical}`;
+  };
+
+  const result = await answerConsultaRuntime(
+    "Resume el artículo 5 de la Ley 29459",
+    deps,
+  );
+
+  assert.equal(result.reportHtml?.match(/Texto obtenido por OCR/g)?.length, 1);
+  assert.match(
+    result.reportHtml!,
+    /transcripción obtenida por OCR, no verificada por un humano/,
+  );
 });
 
 Deno.test("log de bloqueo solo contiene motivo e identidad de página", async () => {

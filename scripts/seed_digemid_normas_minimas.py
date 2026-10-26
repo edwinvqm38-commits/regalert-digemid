@@ -19,6 +19,7 @@ SAFE_UPDATE_FIELDS = [
     "anio",
     "titulo",
     "fecha_publicacion",
+    "fecha_promulgacion",
     "entidad_emisora",
     "fuente_oficial",
     "source_url",
@@ -63,13 +64,16 @@ def merge_raw(existing_raw, seed_raw, document_key: str):
     base = existing_raw if isinstance(existing_raw, dict) else {}
     seed = seed_raw if isinstance(seed_raw, dict) else {}
 
-    base["seed"] = {
+    seed_audit = {
         "name": "normativa_seed_minima",
         "document_key": document_key,
         "loaded_at": datetime.now(timezone.utc).isoformat(),
         "status": seed.get("seed_status", "metadata_inicial"),
         "pendiente": seed.get("pendiente"),
     }
+    if seed.get("metadata_correction") is not None:
+        seed_audit["metadata_correction"] = seed["metadata_correction"]
+    base["seed"] = seed_audit
 
     return base
 
@@ -123,6 +127,7 @@ def main():
                 "anio": record.get("anio"),
                 "titulo": record["titulo"],
                 "fecha_publicacion": record.get("fecha_publicacion"),
+                "fecha_promulgacion": record.get("fecha_promulgacion"),
                 "entidad_emisora": record.get("entidad_emisora"),
                 "fuente_oficial": record.get("fuente_oficial"),
                 "source_url": record.get("source_url"),

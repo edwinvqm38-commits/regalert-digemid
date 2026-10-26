@@ -24,13 +24,65 @@ export function hasRecoverableText(chunk: ConsultaChunk): boolean {
   return typeof chunk.text_content === "string" && chunk.text_content.trim().length > 0;
 }
 
-function unreviewedOcrPages(chunks: ConsultaChunk[]): number[] {
-  return [...new Set(chunks.filter((chunk) =>
-    chunk.revisado_manual !== true &&
+function isUnreviewedOcr(chunk: ConsultaChunk): boolean {
+  return chunk.revisado_manual !== true &&
     (chunk.ocr_used === true ||
-      String(chunk.extraction_method ?? "").toLowerCase().includes("ocr"))
-  ).map((chunk) => Number(chunk.page_number)).filter(Number.isInteger))]
+      String(chunk.extraction_method ?? "").toLowerCase().includes("ocr"));
+}
+
+function unreviewedOcrPages(chunks: ConsultaChunk[]): number[] {
+  return [
+    ...new Set(
+      chunks.filter((chunk) => isUnreviewedOcr(chunk)).map((chunk) =>
+        Number(chunk.page_number)
+      ).filter(Number.isInteger),
+    ),
+  ]
     .sort((a, b) => a - b);
+}
+
+function normalizedWarningText(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+/** El modelo puede obedecer el prompt y cerrar con un aviso OCR. El runtime
+ * es la autoridad para mostrarlo una sola vez y con texto determinístico.
+ * Solo se retira un aviso OCR final equivalente; tabla/fórmula/estructura se
+ * preservan porque representan riesgos distintos. */
+function stripTrailingEquivalentOcrWarning(answer: string): string {
+  const marker = answer.lastIndexOf("⚠️");
+  if (marker < 0) return answer.trimEnd();
+  const warning = normalizedWarningText(answer.slice(marker));
+  const isOcrEquivalent = warning.includes("ocr") ||
+    warning.includes("transcripcion no verificada") ||
+    (warning.includes("encabezado") && warning.includes("articulo") &&
+      warning.includes("deform"));
+  const hasIndependentRisk =
+    /\b(tabla|formula|estructura(?:da)?|fila|columna)\b/.test(
+      warning,
+    );
+  return isOcrEquivalent && !hasIndependentRisk
+    ? answer.slice(0, marker).trimEnd()
+    : answer.trimEnd();
+}
+
+function consolidateOcrWarning(
+  answer: string,
+  chunks: ConsultaChunk[],
+): string {
+  const ocrPages = unreviewedOcrPages(chunks);
+  if (!ocrPages.length) return answer;
+  const hasContextualRecovery = chunks.some((chunk) =>
+    isUnreviewedOcr(chunk) &&
+    chunk.article_match_method === "ocr_contextual_recovery"
+  );
+  const warning = hasContextualRecovery
+    ? "⚠️ Texto obtenido por OCR y no revisado manualmente; el encabezado del artículo presenta una deformación OCR. Verificar con el PDF oficial."
+    : `⚠️ La evidencia de la(s) página(s) ${
+      ocrPages.join(", ")
+    } proviene de OCR y aún no fue revisada por una persona.`;
+  const withoutEquivalent = stripTrailingEquivalentOcrWarning(answer);
+  return `${withoutEquivalent}\n\n${warning}`;
 }
 
 export type ConsultaRuntimeDependencies = {
@@ -279,8 +331,9 @@ export async function answerConsultaRuntime(
           "Falta configurar DEEPSEEK_API_KEY (principal) o GEMINI_API_KEY (respaldo)",
         );
       }
+      const answerWithOcrWarning = consolidateOcrWarning(answer, safeChunks);
       const response: ConsultaRespuesta = {
-        answer,
+        answer: answerWithOcrWarning,
         sources: deps.sources(safeChunks),
         blocked: false,
       };
@@ -292,18 +345,13 @@ export async function answerConsultaRuntime(
           exact.norma,
           exact.paginas.filter((page) => permittedPages.has(page.page_number)),
           relations,
-          answer,
+          answerWithOcrWarning,
         );
         response.reportFileName = `reporte_${exact.norma.document_key}.html`;
         response.answer += deps.formatRelacionesParaUsuario(
           relations,
           exact.norma,
         );
-      }
-      const ocrPages = unreviewedOcrPages(safeChunks);
-      if (ocrPages.length) {
-        response.answer +=
-          `\n\n⚠️ La evidencia de la(s) página(s) ${ocrPages.join(", ")} proviene de OCR y aún no fue revisada por una persona.`;
       }
       return response;
     },

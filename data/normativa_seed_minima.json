@@ -7,7 +7,8 @@
     "numero": "29459",
     "anio": 2009,
     "titulo": "Ley de los productos farmacéuticos, dispositivos médicos y productos sanitarios",
-    "fecha_publicacion": "2009-11-25",
+    "fecha_publicacion": "2009-11-26",
+    "fecha_promulgacion": "2009-11-25",
     "entidad_emisora": "Congreso de la República",
     "fuente_oficial": "Gob.pe",
     "source_url": "https://www.gob.pe/institucion/congreso-de-la-republica/normas-legales/2813441-29459",
@@ -20,6 +21,10 @@
     },
     "raw": {
       "seed_status": "metadata_inicial_confirmada",
+      "metadata_correction": {
+        "reason": "Fechas de promulgación y publicación corregidas desde fuente oficial",
+        "source_url": "https://www.gob.pe/institucion/congreso-de-la-republica/normas-legales/2813441-29459"
+      },
       "pendiente": "Descargar PDF oficial y extraer texto por pagina"
     }
   },

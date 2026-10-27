@@ -19,6 +19,7 @@ import {
   REVISION_LABELS,
   revisionReasons,
   summarizeRevisionPages,
+  type RevisionPage,
   type RevisionReason,
 } from "./revision_queue.ts";
 
@@ -837,18 +838,41 @@ async function enviarBandejaRevision(chatId: string) {
     return await sendMessage(chatId, `⚠️ Error al consultar la revisión documental: ${escapeHtml(error.message)}`);
   }
 
-  const porNorma = new Map<string, { documentKey: string; titulo: string; pages: Record<string, unknown>[] }>();
+  type RevisionNormaGroup = {
+    documentKey: string;
+    titulo: string;
+    pages: RevisionPage[];
+  };
+
+  const porNorma = new Map<string, RevisionNormaGroup>();
   for (const p of (paginas ?? []) as any[]) {
-    if (!hasPendingRevision(p, UMBRAL_BAJA_CALIDAD_NORMA)) continue;
+    const page: RevisionPage = {
+      page_number: Number(p.page_number),
+      quality_score: p.quality_score,
+      revisado_manual: p.revisado_manual,
+      has_tables: p.has_tables,
+      tabla_verificada: p.tabla_verificada,
+      posible_formula: p.posible_formula,
+      posible_grafico: p.posible_grafico,
+      es_formulario_anexo: p.es_formulario_anexo,
+    };
+
+    if (!hasPendingRevision(page, UMBRAL_BAJA_CALIDAD_NORMA)) continue;
+
     const normaId = String(p.norma_id ?? p.digemid_normas?.id ?? "");
     if (!normaId) continue;
-    const current = porNorma.get(normaId) ?? {
-      documentKey: p.digemid_normas?.document_key ?? "?",
-      titulo: p.digemid_normas?.titulo ?? "",
-      pages: [],
-    };
-    current.pages.push(p);
-    porNorma.set(normaId, current);
+
+    let current = porNorma.get(normaId);
+    if (!current) {
+      current = {
+        documentKey: p.digemid_normas?.document_key ?? "?",
+        titulo: p.digemid_normas?.titulo ?? "",
+        pages: [],
+      };
+      porNorma.set(normaId, current);
+    }
+
+    current.pages.push(page);
   }
 
   if (!porNorma.size) {

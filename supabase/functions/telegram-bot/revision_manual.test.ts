@@ -1,8 +1,10 @@
 import { strict as assert } from "node:assert";
 import {
+  buildRevisionId,
   countFormulaExpressions,
   parseManualReviewKind,
   parseManualReviewReason,
+  parseRevisionId,
   parseSourceAssetId,
   validateReviewedText,
 } from "./revision_manual.ts";
@@ -31,4 +33,11 @@ Deno.test("valida que una revisión de fórmula conserve expresiones", () => {
 
 Deno.test("rechaza caracteres de reemplazo", () => {
   assert.equal(validateReviewedText("texto", "abc", "ab�c").length, 1);
+});
+
+
+Deno.test("revision id is stable and parseable", () => {
+  const id = buildRevisionId("RM-1753-2002", 48, "formula");
+  assert.equal(id, "REV-RM-1753-2002-P48-FORMULA");
+  assert.equal(parseRevisionId(`# REVISION_ID: ${id}\n# NORMA: RM-1753-2002`), id);
 });

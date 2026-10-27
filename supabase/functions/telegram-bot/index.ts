@@ -837,7 +837,7 @@ async function enviarBandejaRevision(chatId: string) {
     return await sendMessage(chatId, `⚠️ Error al consultar la revisión documental: ${escapeHtml(error.message)}`);
   }
 
-  const porNorma = new Map<string, { documentKey: string; titulo: string; pages: any[] }>();
+  const porNorma = new Map<string, { documentKey: string; titulo: string; pages: Record<string, unknown>[] }>();
   for (const p of (paginas ?? []) as any[]) {
     if (!hasPendingRevision(p, UMBRAL_BAJA_CALIDAD_NORMA)) continue;
     const normaId = String(p.norma_id ?? p.digemid_normas?.id ?? "");

@@ -1339,8 +1339,6 @@ async function aplicarRevisionManualNorma(
   }
 
   let actualizadas = 0;
-  const ahora = new Date().toISOString();
-
   for (const parte of partes) {
     const match = parte.match(/^(\d+)\s*\(([^)]*)\)\s*\n([\s\S]*)$/);
     if (!match) continue;
@@ -1353,7 +1351,7 @@ async function aplicarRevisionManualNorma(
 
     let pageQuery = supabase
       .from("digemid_norma_paginas")
-      .select("id, source_asset_id, text_raw, text_normalized, has_tables, tabla_verificada")
+      .select("id, source_asset_id")
       .eq("norma_id", norma.id)
       .eq("page_number", pageNumber);
 

@@ -13,6 +13,15 @@ import {
   parseSourceAssetId,
   type ManualReviewKind,
 } from "./revision_manual.ts";
+import {
+  filterRevisionPages,
+  hasPendingRevision,
+  REVISION_LABELS,
+  revisionReasons,
+  summarizeRevisionPages,
+  type RevisionPage,
+  type RevisionReason,
+} from "./revision_queue.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -263,14 +272,9 @@ const COMANDOS_ADMIN: { command: string; description: string }[] = [
   { command: "gratis", description: "Dar acceso gratis permanente a un usuario" },
   { command: "pagosyape", description: "Sumar los pagos Yape reportados este mes" },
   { command: "saldodeepseek", description: "Consultar el saldo de la API DeepSeek" },
-  { command: "normasrevisar", description: "Normas con páginas de baja calidad" },
+  { command: "revision", description: "Bandeja guiada de revisión documental" },
   { command: "normassinpdf", description: "Normas sin PDF confirmado" },
   { command: "derogacionespendientes", description: "Revisar derogaciones/modificaciones detectadas por IA" },
-  { command: "normapdf", description: "Instrucciones para subir el PDF de una norma" },
-  { command: "normarevisar", description: "Corregir páginas de baja calidad de una norma" },
-  { command: "revisarnorma", description: "Revisar TODAS las páginas de una norma a demanda" },
-  { command: "tablasrevisar", description: "Normas con tablas sin verificar" },
-  { command: "tablarevisar", description: "Verificar las tablas de una norma" },
   { command: "normaestado", description: "Reporte de fidelidad (global o por norma)" },
   { command: "reportenormas", description: "Reporte maestro HTML de todas las normas" },
   { command: "actualizarcomandos", description: "Refrescar este menú de comandos" },
@@ -673,7 +677,7 @@ async function getPaginasBajaCalidad(documentKey: string) {
 
   const { data: paginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw, has_tables, tabla_verificada")
+    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, ocr_used, posible_formula, posible_grafico, es_formulario_anexo, revisado_manual, text_normalized, text_raw, has_tables, tabla_verificada")
     .eq("norma_id", norma.id)
     .lt("quality_score", UMBRAL_BAJA_CALIDAD_NORMA)
     .eq("revisado_manual", false)
@@ -697,7 +701,7 @@ async function getPaginasConTablas(documentKey: string) {
 
   const { data: paginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw, has_tables, tabla_verificada")
+    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, ocr_used, posible_formula, posible_grafico, es_formulario_anexo, revisado_manual, text_normalized, text_raw, has_tables, tabla_verificada")
     .eq("norma_id", norma.id)
     .eq("has_tables", true)
     .eq("tabla_verificada", false)
@@ -724,11 +728,240 @@ async function getTodasLasPaginas(documentKey: string) {
 
   const { data: paginas } = await supabase
     .from("digemid_norma_paginas")
-    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, posible_formula, text_normalized, text_raw, has_tables, tabla_verificada")
+    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, ocr_used, posible_formula, posible_grafico, es_formulario_anexo, revisado_manual, text_normalized, text_raw, has_tables, tabla_verificada")
     .eq("norma_id", norma.id)
     .order("page_number");
 
   return { norma, paginas: paginas ?? [] };
+}
+
+
+const REVISION_REASON_EMOJI: Record<RevisionReason, string> = {
+  texto: "📝",
+  tabla: "📊",
+  formula: "🧮",
+  grafico: "🖼️",
+  anexo: "📑",
+};
+
+async function getRevisionNormaById(normaId: string) {
+  const { data: norma } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, pdf_url")
+    .eq("id", normaId)
+    .maybeSingle();
+
+  if (!norma) return null;
+
+  const { data: paginas, error } = await supabase
+    .from("digemid_norma_paginas")
+    .select("id, page_number, source_asset_id, quality_score, extraction_method, ocr_confidence, ocr_used, posible_formula, posible_grafico, es_formulario_anexo, revisado_manual, text_normalized, text_raw, has_tables, tabla_verificada")
+    .eq("norma_id", norma.id)
+    .order("page_number");
+
+  if (error) throw error;
+  return { norma, paginas: paginas ?? [] };
+}
+
+function paginasPorMotivo(paginas: any[], reason: RevisionReason): number[] {
+  return filterRevisionPages(paginas, reason, UMBRAL_BAJA_CALIDAD_NORMA)
+    .map((p) => Number(p.page_number))
+    .filter((n) => Number.isFinite(n));
+}
+
+function formatPaginasCompactas(nums: number[]): string {
+  if (!nums.length) return "—";
+  const shown = nums.slice(0, 12).join(", ");
+  return nums.length > 12 ? `${shown}… (+${nums.length - 12})` : shown;
+}
+
+async function enviarDetalleRevisionNorma(chatId: string, normaId: string) {
+  const resultado = await getRevisionNormaById(normaId);
+  if (!resultado) {
+    return await sendMessage(chatId, "⚠️ No encontré esa norma.");
+  }
+
+  const { norma, paginas } = resultado;
+  const resumen = summarizeRevisionPages(paginas, UMBRAL_BAJA_CALIDAD_NORMA);
+  const pendientes = Object.values(resumen).reduce((a, b) => a + b, 0);
+
+  if (!pendientes) {
+    return await sendMessage(
+      chatId,
+      `✅ <b>${escapeHtml(norma.document_key)}</b> no tiene revisiones pendientes detectadas.`,
+      { inline_keyboard: [[{ text: "⬅️ Volver a revisión", callback_data: "rev:home" }]] },
+    );
+  }
+
+  const lineas = [
+    `📚 <b>${escapeHtml(norma.document_key)}</b>`,
+    norma.titulo ? escapeHtml(norma.titulo) : "",
+    "",
+    "El sistema detectó estas páginas para revisar:",
+  ].filter(Boolean);
+
+  for (const reason of ["texto", "tabla", "formula", "grafico", "anexo"] as RevisionReason[]) {
+    if (!resumen[reason]) continue;
+    lineas.push(
+      `${REVISION_REASON_EMOJI[reason]} <b>${REVISION_LABELS[reason]}</b>: ${resumen[reason]} página(s) — ${formatPaginasCompactas(paginasPorMotivo(paginas, reason))}`,
+    );
+  }
+
+  lineas.push(
+    "",
+    "Toca solo lo que quieras revisar. El bot enviará el PDF oficial y una plantilla con esas páginas.",
+  );
+
+  const botones: { text: string; callback_data: string }[][] = [];
+  for (const reason of ["texto", "tabla", "formula", "grafico", "anexo"] as RevisionReason[]) {
+    if (!resumen[reason]) continue;
+    botones.push([{
+      text: `${REVISION_REASON_EMOJI[reason]} Revisar ${REVISION_LABELS[reason]} (${resumen[reason]})`,
+      callback_data: `rev:t:${reason}:${norma.id}`,
+    }]);
+  }
+  botones.push([{ text: "📚 Revisar documento completo", callback_data: `rev:all:${norma.id}` }]);
+  botones.push([{ text: "⬅️ Volver", callback_data: "rev:home" }]);
+
+  return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
+}
+
+async function enviarBandejaRevision(chatId: string) {
+  const { data: paginas, error } = await supabase
+    .from("digemid_norma_paginas")
+    .select("norma_id, page_number, quality_score, revisado_manual, has_tables, tabla_verificada, posible_formula, posible_grafico, es_formulario_anexo, digemid_normas(id, document_key, titulo)")
+    .order("norma_id")
+    .order("page_number")
+    .limit(1000);
+
+  if (error) {
+    return await sendMessage(chatId, `⚠️ Error al consultar la revisión documental: ${escapeHtml(error.message)}`);
+  }
+
+  type RevisionNormaGroup = {
+    documentKey: string;
+    titulo: string;
+    pages: RevisionPage[];
+  };
+
+  const porNorma = new Map<string, RevisionNormaGroup>();
+  for (const p of (paginas ?? []) as any[]) {
+    const page: RevisionPage = {
+      page_number: Number(p.page_number),
+      quality_score: p.quality_score,
+      revisado_manual: p.revisado_manual,
+      has_tables: p.has_tables,
+      tabla_verificada: p.tabla_verificada,
+      posible_formula: p.posible_formula,
+      posible_grafico: p.posible_grafico,
+      es_formulario_anexo: p.es_formulario_anexo,
+    };
+
+    if (!hasPendingRevision(page, UMBRAL_BAJA_CALIDAD_NORMA)) continue;
+
+    const normaId = String(p.norma_id ?? p.digemid_normas?.id ?? "");
+    if (!normaId) continue;
+
+    let current = porNorma.get(normaId);
+    if (!current) {
+      current = {
+        documentKey: p.digemid_normas?.document_key ?? "?",
+        titulo: p.digemid_normas?.titulo ?? "",
+        pages: [],
+      };
+      porNorma.set(normaId, current);
+    }
+
+    current.pages.push(page);
+  }
+
+  if (!porNorma.size) {
+    return await sendMessage(
+      chatId,
+      "✅ <b>Revisión documental al día.</b>\n\nNo hay páginas detectadas como pendientes de texto, tablas, fórmulas, gráficos o anexos.",
+    );
+  }
+
+  const lineas = [
+    "📚 <b>Revisión documental</b>",
+    "",
+    "Toca una norma. El bot te dirá exactamente qué páginas necesitan revisión y por qué.",
+    "",
+    `Normas pendientes: <b>${porNorma.size}</b>`,
+  ];
+
+  const botones = [...porNorma.entries()].slice(0, 30).map(([normaId, info]) => {
+    const resumen = summarizeRevisionPages(info.pages, UMBRAL_BAJA_CALIDAD_NORMA);
+    const totalRazones = Object.values(resumen).reduce((a, b) => a + b, 0);
+    return [{
+      text: `${info.documentKey} — ${totalRazones} pendiente(s)`,
+      callback_data: `rev:n:${normaId}`,
+    }];
+  });
+
+  return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
+}
+
+async function enviarRevisionPorMotivo(
+  chatId: string,
+  normaId: string,
+  reason: RevisionReason,
+) {
+  const resultado = await getRevisionNormaById(normaId);
+  if (!resultado) return await sendMessage(chatId, "⚠️ No encontré esa norma.");
+
+  const { norma, paginas } = resultado;
+  if (reason === "tabla") {
+    return await enviarRevisionTablas(chatId, norma.document_key);
+  }
+
+  const seleccionadas = filterRevisionPages(
+    paginas,
+    reason,
+    UMBRAL_BAJA_CALIDAD_NORMA,
+  );
+
+  if (!seleccionadas.length) {
+    return await sendMessage(
+      chatId,
+      `✅ Ya no hay páginas pendientes por <b>${escapeHtml(REVISION_LABELS[reason])}</b> en ${escapeHtml(norma.document_key)}.`,
+    );
+  }
+
+  const html = construirReporteHtmlRevision(norma, seleccionadas);
+  await enviarDocumentoTexto(
+    chatId,
+    html,
+    `revision_${reason}_${norma.document_key}.html`,
+    "text/html",
+    `${REVISION_REASON_EMOJI[reason]} Revisión ${REVISION_LABELS[reason]} — ${norma.document_key} (${seleccionadas.length} página(s))`,
+  );
+
+  if (norma.pdf_url) {
+    await telegram("sendDocument", {
+      chat_id: chatId,
+      document: norma.pdf_url,
+      caption: `📄 PDF oficial — ${norma.document_key}`,
+    });
+  }
+
+  const plantilla = construirPlantillaTxtRevision(
+    norma.document_key,
+    seleccionadas,
+    "contenido",
+  );
+  await enviarDocumentoTexto(
+    chatId,
+    plantilla,
+    `revision_${reason}_${norma.document_key}.txt`,
+    "text/plain",
+    `✏️ Revisa únicamente las páginas indicadas por ${REVISION_LABELS[reason]}. Compara siempre contra el PDF oficial; corrige la transcripción sin resumir ni interpretar y reenvía este .txt al bot.`,
+  );
+
+  return await sendMessage(
+    chatId,
+    "✅ <b>¿Qué haces ahora?</b>\n1. Abre el PDF oficial.\n2. Revisa solo las páginas de la plantilla.\n3. Corrige únicamente la transcripción.\n4. Reenvía el archivo .txt a este chat.\n\nEl bot conservará el OCR original y registrará tu revisión en el historial.",
+  );
 }
 
 /** Parte una fila Markdown "| a | b |" en sus celdas, sin partir por un
@@ -4779,6 +5012,13 @@ async function handleCommand(
     }
   }
 
+  if (trimmed === "/revision") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+    return await enviarBandejaRevision(chatId);
+  }
+
   if (trimmed === "/normasrevisar") {
     if (!isAdmin(chatId)) {
       return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
@@ -5513,6 +5753,35 @@ async function handleCallback(update: TelegramUpdate) {
     if (!tieneAccesoActivo(estado)) {
       return await sendMessage(chatId, ACCESO_REQUERIDO_TEXTO, trialKeyboard());
     }
+  }
+
+  if (data === "rev:home") {
+    if (!isAdmin(chatId)) return;
+    return await enviarBandejaRevision(chatId);
+  }
+
+  if (data.startsWith("rev:n:")) {
+    if (!isAdmin(chatId)) return;
+    return await enviarDetalleRevisionNorma(chatId, data.slice("rev:n:".length));
+  }
+
+  if (data.startsWith("rev:all:")) {
+    if (!isAdmin(chatId)) return;
+    const normaId = data.slice("rev:all:".length);
+    const resultado = await getRevisionNormaById(normaId);
+    if (!resultado) return await sendMessage(chatId, "⚠️ No encontré esa norma.");
+    return await enviarRevisionCompleta(chatId, resultado.norma.document_key);
+  }
+
+  if (data.startsWith("rev:t:")) {
+    if (!isAdmin(chatId)) return;
+    const parts = data.split(":");
+    const reason = parts[2] as RevisionReason;
+    const normaId = parts.slice(3).join(":");
+    if (!["texto", "tabla", "formula", "grafico", "anexo"].includes(reason)) {
+      return await sendMessage(chatId, "⚠️ Tipo de revisión no reconocido.");
+    }
+    return await enviarRevisionPorMotivo(chatId, normaId, reason);
   }
 
   if (data.startsWith("normarevisar:")) {

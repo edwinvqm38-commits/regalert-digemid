@@ -10,7 +10,9 @@ import {
 } from "./consulta_article.ts";
 import {
   parseManualReviewKind,
+  parseManualReviewReason,
   parseSourceAssetId,
+  validateReviewedText,
   type ManualReviewKind,
 } from "./revision_manual.ts";
 import {
@@ -1011,6 +1013,7 @@ async function enviarRevisionPorMotivo(
     norma.document_key,
     seleccionadas,
     tipoRevision,
+    reason,
   );
 
   await enviarDocumentoTexto(
@@ -1428,17 +1431,19 @@ function construirPlantillaTxtRevision(
   documentKey: string,
   paginas: any[],
   tipoRevision: ManualReviewKind,
+  motivoRevision?: RevisionReason,
 ): string {
   const encabezado = [
     `# NORMA: ${documentKey}`,
     `# TIPO_REVISION: ${tipoRevision}`,
+    motivoRevision ? `# MOTIVO_REVISION: ${motivoRevision}` : null,
     "# Instrucciones: corrige el texto de cada pagina comparando con el PDF adjunto.",
     "# No modifiques ni borres las lineas que empiezan con \"### PAGINA\".",
     "# Las tablas se muestran como \"Etiqueta: valor\" por fila (no como columnas con |).",
     "# Edita solo lo que va despues de los \":\" -- no cambies las etiquetas ni las lineas \"=====\".",
     "# Cuando termines, reenvia este mismo archivo (como documento, no como texto) a este chat.",
     "",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const bloques = paginas.map((p) => {
     const motivo = [
@@ -1615,19 +1620,27 @@ async function enviarRevisionCompleta(chatId: string, documentKey: string) {
   }
 }
 
-/** Parsea la plantilla .txt devuelta por un admin y aplica la correccion.
- * Mantiene text_raw inmutable y registra cada revision en historial append-only. */
+/** Parsea la plantilla .txt devuelta por un admin, valida su estructura,
+ * aplica la correccion y vuelve a evaluar las paginas revisadas. */
 async function aplicarRevisionManualNorma(
   contenido: string,
   reviewerChatId: string,
-): Promise<{ ok: boolean; mensaje: string; documentKey?: string; paginasActualizadas?: number }> {
+): Promise<{
+  ok: boolean;
+  mensaje: string;
+  documentKey?: string;
+  paginasActualizadas?: number;
+  paginasRevisadas?: number[];
+  pendientes?: string[];
+}> {
   const matchNorma = contenido.match(/^#\s*NORMA:\s*(.+)$/m);
   if (!matchNorma) {
-    return { ok: false, mensaje: "No encontré la línea \"# NORMA: ...\" en el archivo. Usa la plantilla generada por /normarevisar sin borrar esa línea." };
+    return { ok: false, mensaje: "No encontré la línea \"# NORMA: ...\". Usa la plantilla original sin borrar sus encabezados." };
   }
 
   const documentKey = matchNorma[1].trim();
   const tipoRevision = parseManualReviewKind(contenido);
+  const motivoRevision = parseManualReviewReason(contenido);
 
   const { data: norma } = await supabase
     .from("digemid_normas")
@@ -1645,6 +1658,10 @@ async function aplicarRevisionManualNorma(
   }
 
   let actualizadas = 0;
+  const revisadas: number[] = [];
+  const paginaIds: string[] = [];
+  const observaciones: string[] = [];
+
   for (const parte of partes) {
     const match = parte.match(/^(\d+)\s*\(([^)]*)\)\s*\n([\s\S]*)$/);
     if (!match) continue;
@@ -1653,61 +1670,94 @@ async function aplicarRevisionManualNorma(
     const descriptor = match[2];
     const sourceAssetId = parseSourceAssetId(descriptor);
     const textoCorregido = reconstruirTablasDesdeTextoEditable(match[3].trim().normalize("NFC"));
-    if (!textoCorregido) continue;
-
-    let pageQuery = supabase
-      .from("digemid_norma_paginas")
-      .select("id, source_asset_id")
-      .eq("norma_id", norma.id)
-      .eq("page_number", pageNumber);
-
-    if (sourceAssetId != null) {
-      pageQuery = pageQuery.eq("source_asset_id", sourceAssetId);
-    }
-
-    const { data: candidatas, error: pageError } = await pageQuery;
-    if (pageError) {
-      console.error("REVISION_MANUAL_PAGE_LOOKUP_ERROR:", pageError);
+    if (!textoCorregido) {
+      observaciones.push(`pág. ${pageNumber}: texto vacío`);
       continue;
     }
 
-    // Plantillas legacy no llevaban source_asset_id: solo se aceptan si la
-    // pagina es inequívoca para evitar corregir el asset equivocado.
-    if (!candidatas || candidatas.length !== 1) {
-      console.warn("REVISION_MANUAL_PAGE_AMBIGUOUS", {
-        document_key: documentKey,
-        page_number: pageNumber,
-        source_asset_id: sourceAssetId,
-        candidates: candidatas?.length ?? 0,
-      });
+    let pageQuery = supabase
+      .from("digemid_norma_paginas")
+      .select("id, source_asset_id, text_raw, text_normalized")
+      .eq("norma_id", norma.id)
+      .eq("page_number", pageNumber);
+
+    if (sourceAssetId != null) pageQuery = pageQuery.eq("source_asset_id", sourceAssetId);
+
+    const { data: candidatas, error: pageError } = await pageQuery;
+    if (pageError || !candidatas || candidatas.length !== 1) {
+      observaciones.push(`pág. ${pageNumber}: no pude identificar una única página fuente`);
       continue;
     }
 
     const pagina = candidatas[0];
+    const textoAnterior = pagina.text_normalized ?? pagina.text_raw ?? "";
+    const issues = validateReviewedText(motivoRevision, textoAnterior, textoCorregido);
+    if (issues.length) {
+      observaciones.push(`pág. ${pageNumber}: ${issues.join("; ")}`);
+      continue;
+    }
 
-    const { error: applyError } = await supabase.rpc(
-      "apply_digemid_norma_revision",
-      {
-        p_pagina_id: pagina.id,
-        p_texto_revisado: textoCorregido,
-        p_tipo_revision: tipoRevision,
-        p_revisor_id: reviewerChatId,
-        p_metadata: {
-          document_key: documentKey,
-          template_source_asset_id: sourceAssetId,
-        },
+    const { error: applyError } = await supabase.rpc("apply_digemid_norma_revision", {
+      p_pagina_id: pagina.id,
+      p_texto_revisado: textoCorregido,
+      p_tipo_revision: tipoRevision,
+      p_revisor_id: reviewerChatId,
+      p_metadata: {
+        document_key: documentKey,
+        template_source_asset_id: sourceAssetId,
+        motivo_revision: motivoRevision,
       },
-    );
+    });
 
     if (applyError) {
-      console.error("REVISION_MANUAL_APPLY_ERROR:", applyError);
+      observaciones.push(`pág. ${pageNumber}: error al guardar la revisión`);
       continue;
     }
 
     actualizadas += 1;
+    revisadas.push(pageNumber);
+    paginaIds.push(pagina.id);
   }
 
-  return { ok: true, mensaje: "ok", documentKey, paginasActualizadas: actualizadas };
+  if (!actualizadas) {
+    return {
+      ok: false,
+      mensaje: observaciones.length
+        ? `La revisión sigue observada: ${observaciones.join(" | ")}`
+        : "No se pudo aplicar ninguna página revisada.",
+      documentKey,
+      paginasActualizadas: 0,
+      paginasRevisadas: revisadas,
+    };
+  }
+
+  const pendientes: string[] = [];
+  if (paginaIds.length) {
+    const { data: estados } = await supabase
+      .from("digemid_norma_paginas")
+      .select("page_number, quality_score, revisado_manual, has_tables, tabla_verificada, posible_formula, posible_grafico, es_formulario_anexo")
+      .in("id", paginaIds);
+
+    for (const p of estados ?? []) {
+      const razones = revisionReasons(p as RevisionPage, UMBRAL_BAJA_CALIDAD_NORMA);
+      if (razones.length) {
+        pendientes.push(
+          `pág. ${p.page_number}: ${razones.map((r) => REVISION_LABELS[r]).join(", ")}`,
+        );
+      }
+    }
+  }
+
+  pendientes.push(...observaciones);
+
+  return {
+    ok: true,
+    mensaje: "ok",
+    documentKey,
+    paginasActualizadas: actualizadas,
+    paginasRevisadas: revisadas,
+    pendientes,
+  };
 }
 
 const NORMATIVA_STORAGE_BUCKET = "digemid-documentos";
@@ -6391,12 +6441,23 @@ serve(async (req: Request) => {
         const resultado = await aplicarRevisionManualNorma(contenido, chatId);
 
         if (!resultado.ok) {
-          await sendMessage(chatId, `⚠️ ${resultado.mensaje}`);
+          await sendMessage(chatId, `⚠️ <b>Sigue observado</b>\n\n${escapeHtml(resultado.mensaje)}`);
+        } else if (resultado.pendientes?.length) {
+          await sendMessage(
+            chatId,
+            `⚠️ <b>Revisión aplicada, pero aún hay observaciones</b>\n\n` +
+              `Norma: <b>${escapeHtml(resultado.documentKey ?? "")}</b>\n` +
+              `Página(s) procesada(s): ${escapeHtml((resultado.paginasRevisadas ?? []).join(", "))}\n\n` +
+              resultado.pendientes.map((p) => `• ${escapeHtml(p)}`).join("\n"),
+          );
         } else {
           await sendMessage(
             chatId,
-            `✅ Norma <b>${escapeHtml(resultado.documentKey ?? "")}</b> actualizada: ` +
-              `<b>${resultado.paginasActualizadas}</b> página(s) corregida(s).`,
+            `✅ <b>Revisión aceptada por el sistema</b>\n\n` +
+              `Norma: <b>${escapeHtml(resultado.documentKey ?? "")}</b>\n` +
+              `Página(s): ${escapeHtml((resultado.paginasRevisadas ?? []).join(", "))}\n` +
+              `Estado: sin observaciones automáticas pendientes para esta revisión.\n\n` +
+              `ℹ️ Esto confirma consistencia estructural y registro; la fidelidad final sigue referida al PDF oficial.`,
           );
         }
       } catch (error) {

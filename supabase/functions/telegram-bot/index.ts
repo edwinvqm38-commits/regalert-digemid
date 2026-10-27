@@ -9,7 +9,6 @@ import {
   selectArticleEvidence,
 } from "./consulta_article.ts";
 import {
-  buildManualReviewPageUpdate,
   parseManualReviewKind,
   parseSourceAssetId,
   type ManualReviewKind,
@@ -1382,37 +1381,26 @@ async function aplicarRevisionManualNorma(
 
     const pagina = candidatas[0];
 
-    const { error: auditError } = await supabase
-      .from("digemid_norma_revisiones")
-      .insert({
-        norma_id: norma.id,
-        pagina_id: pagina.id,
-        page_number: pageNumber,
-        source_asset_id: pagina.source_asset_id,
-        tipo_revision: tipoRevision,
-        texto_raw_original: pagina.text_raw,
-        texto_normalizado_anterior: pagina.text_normalized,
-        texto_revisado: textoCorregido,
-        revisor_tipo: "telegram_admin",
-        revisor_id: reviewerChatId,
-        metadata: {
+    const { error: applyError } = await supabase.rpc(
+      "apply_digemid_norma_revision",
+      {
+        p_pagina_id: pagina.id,
+        p_texto_revisado: textoCorregido,
+        p_tipo_revision: tipoRevision,
+        p_revisor_id: reviewerChatId,
+        p_metadata: {
           document_key: documentKey,
           template_source_asset_id: sourceAssetId,
         },
-      });
+      },
+    );
 
-    if (auditError) {
-      console.error("REVISION_MANUAL_AUDIT_ERROR:", auditError);
+    if (applyError) {
+      console.error("REVISION_MANUAL_APPLY_ERROR:", applyError);
       continue;
     }
 
-    const update = buildManualReviewPageUpdate(textoCorregido, tipoRevision, ahora);
-    const { error: updateError } = await supabase
-      .from("digemid_norma_paginas")
-      .update(update)
-      .eq("id", pagina.id);
-
-    if (!updateError) actualizadas += 1;
+    actualizadas += 1;
   }
 
   return { ok: true, mensaje: "ok", documentKey, paginasActualizadas: actualizadas };

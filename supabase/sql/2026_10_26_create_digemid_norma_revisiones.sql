@@ -3,10 +3,10 @@
 -- cada corrección aplicada a text_normalized con trazabilidad suficiente.
 create table if not exists public.digemid_norma_revisiones (
   id uuid primary key default gen_random_uuid(),
-  norma_id uuid not null references public.digemid_normas(id) on delete cascade,
-  pagina_id uuid not null references public.digemid_norma_paginas(id) on delete cascade,
+  norma_id uuid not null references public.digemid_normas(id) on delete restrict,
+  pagina_id uuid not null references public.digemid_norma_paginas(id) on delete restrict,
   page_number integer not null check (page_number > 0),
-  source_asset_id bigint null references public.digemid_norma_assets(id) on delete set null,
+  source_asset_id bigint null references public.digemid_norma_assets(id) on delete restrict,
   tipo_revision text not null check (tipo_revision in ('contenido','contenido_completo','tabla')),
   texto_raw_original text null,
   texto_normalizado_anterior text null,

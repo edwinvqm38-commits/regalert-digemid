@@ -22,6 +22,7 @@ import {
   type RevisionPage,
   type RevisionReason,
 } from "./revision_queue.ts";
+import { extraerPaginasPdf } from "./revision_pdf.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -664,6 +665,65 @@ async function enviarDocumentoTexto(
   }
 }
 
+
+async function enviarDocumentoBytes(
+  chatId: string,
+  bytes: Uint8Array,
+  nombreArchivo: string,
+  mimeType: string,
+  caption?: string,
+): Promise<void> {
+  const formData = new FormData();
+  formData.append("chat_id", chatId);
+  if (caption) formData.append("caption", caption);
+  formData.append(
+    "document",
+    new Blob([bytes.buffer as ArrayBuffer], { type: mimeType }),
+    nombreArchivo,
+  );
+
+  const response = await fetch(`${TELEGRAM_API}/sendDocument`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new Error(`Telegram sendDocument error ${response.status}: ${await response.text()}`);
+  }
+}
+
+function nombrePaginasRevision(pageNumbers: number[]): string {
+  const sorted = [...new Set(pageNumbers)].sort((a, b) => a - b);
+  if (sorted.length <= 6) return sorted.join("_");
+  return `${sorted.slice(0, 6).join("_")}_y_${sorted.length - 6}_mas`;
+}
+
+async function enviarMiniPdfRevision(
+  chatId: string,
+  pdfUrl: string,
+  documentKey: string,
+  reason: RevisionReason,
+  pageNumbers: number[],
+): Promise<void> {
+  const response = await fetch(pdfUrl);
+  if (!response.ok) {
+    throw new Error(`No pude descargar el PDF oficial (${response.status}).`);
+  }
+
+  const originalBytes = new Uint8Array(await response.arrayBuffer());
+  const miniPdf = await extraerPaginasPdf(originalBytes, pageNumbers);
+  const paginas = [...new Set(pageNumbers)].sort((a, b) => a - b);
+  const paginaLabel = paginas.length === 1 ? "página original" : "páginas originales";
+
+  await enviarDocumentoBytes(
+    chatId,
+    miniPdf,
+    `revision_${reason}_${documentKey}_p${nombrePaginasRevision(paginas)}.pdf`,
+    "application/pdf",
+    `📄 PDF de revisión — ${documentKey}\n${paginaLabel}: ${paginas.join(", ")}`,
+  );
+}
+
 const UMBRAL_BAJA_CALIDAD_NORMA = 0.5;
 
 async function getPaginasBajaCalidad(documentKey: string) {
@@ -809,7 +869,7 @@ async function enviarDetalleRevisionNorma(chatId: string, normaId: string) {
 
   lineas.push(
     "",
-    "Toca solo lo que quieras revisar. El bot enviará el PDF oficial y una plantilla con esas páginas.",
+    "Toca solo lo que quieras revisar. El bot generará un PDF reducido con únicamente las páginas observadas y una plantilla editable.",
   );
 
   const botones: { text: string; callback_data: string }[][] = [];
@@ -911,10 +971,6 @@ async function enviarRevisionPorMotivo(
   if (!resultado) return await sendMessage(chatId, "⚠️ No encontré esa norma.");
 
   const { norma, paginas } = resultado;
-  if (reason === "tabla") {
-    return await enviarRevisionTablas(chatId, norma.document_key);
-  }
-
   const seleccionadas = filterRevisionPages(
     paginas,
     reason,
@@ -928,39 +984,66 @@ async function enviarRevisionPorMotivo(
     );
   }
 
-  const html = construirReporteHtmlRevision(norma, seleccionadas);
-  await enviarDocumentoTexto(
-    chatId,
-    html,
-    `revision_${reason}_${norma.document_key}.html`,
-    "text/html",
-    `${REVISION_REASON_EMOJI[reason]} Revisión ${REVISION_LABELS[reason]} — ${norma.document_key} (${seleccionadas.length} página(s))`,
-  );
+  const pageNumbers = seleccionadas
+    .map((p: any) => Number(p.page_number))
+    .filter((n: number) => Number.isInteger(n) && n > 0);
 
-  if (norma.pdf_url) {
+  if (!norma.pdf_url) {
+    return await sendMessage(
+      chatId,
+      `⚠️ <b>${escapeHtml(norma.document_key)}</b> no tiene PDF oficial disponible. No iniciaré una revisión sin el documento fuente.`,
+    );
+  }
+
+  try {
+    await enviarMiniPdfRevision(
+      chatId,
+      norma.pdf_url,
+      norma.document_key,
+      reason,
+      pageNumbers,
+    );
+  } catch (error) {
+    console.error("REVISION_MINI_PDF_ERROR:", error);
+    await sendMessage(
+      chatId,
+      "⚠️ No pude generar el PDF reducido. Te envío el PDF oficial completo como respaldo; revisa solo las páginas indicadas en la plantilla.",
+    );
     await telegram("sendDocument", {
       chat_id: chatId,
       document: norma.pdf_url,
-      caption: `📄 PDF oficial — ${norma.document_key}`,
+      caption: `📄 PDF oficial completo — ${norma.document_key}`,
     });
   }
 
+  const tipoRevision: ManualReviewKind = reason === "tabla" ? "tabla" : "contenido";
   const plantilla = construirPlantillaTxtRevision(
     norma.document_key,
     seleccionadas,
-    "contenido",
+    tipoRevision,
   );
+
   await enviarDocumentoTexto(
     chatId,
     plantilla,
     `revision_${reason}_${norma.document_key}.txt`,
     "text/plain",
-    `✏️ Revisa únicamente las páginas indicadas por ${REVISION_LABELS[reason]}. Compara siempre contra el PDF oficial; corrige la transcripción sin resumir ni interpretar y reenvía este .txt al bot.`,
+    `✏️ Plantilla de revisión — ${REVISION_LABELS[reason]}. Páginas originales: ${pageNumbers.join(", ")}.`,
   );
+
+  const instruccionEspecial = reason === "tabla"
+    ? "En ChatGPT pide reconstruir fielmente filas y columnas; no deducir valores ausentes."
+    : reason === "formula"
+    ? "En ChatGPT pide conservar exactamente símbolos, operadores, agrupaciones, subíndices y superíndices; no simplificar la fórmula."
+    : reason === "grafico"
+    ? "En ChatGPT pide transcribir textos, rótulos, leyendas y relaciones visibles sin inventar datos que no aparezcan en el gráfico."
+    : reason === "anexo"
+    ? "En ChatGPT pide conservar campos, casillas, títulos, instrucciones y estructura del anexo/formulario."
+    : "En ChatGPT pide corregir únicamente la transcripción, sin resumir ni interpretar.";
 
   return await sendMessage(
     chatId,
-    "✅ <b>¿Qué haces ahora?</b>\n1. Abre el PDF oficial.\n2. Revisa solo las páginas de la plantilla.\n3. Corrige únicamente la transcripción.\n4. Reenvía el archivo .txt a este chat.\n\nEl bot conservará el OCR original y registrará tu revisión en el historial.",
+    `✅ <b>Paquete de revisión preparado</b>\n\n1. Descarga el PDF reducido.\n2. Súbelo a ChatGPT junto con el .txt.\n3. ${instruccionEspecial}\n4. Reenvía al bot el .txt corregido.\n\nEl OCR original queda intacto y la corrección se registra en el historial.`,
   );
 }
 

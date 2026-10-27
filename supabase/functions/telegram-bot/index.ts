@@ -4727,7 +4727,10 @@ function normaDetailButtons(
     rows.push([{ text: "📄 Ver PDF", url: publicPdfUrl }]);
   }
 
-  if (norma.source_url) {
+  // Cuando existe una copia archivada en Drive, ese es el acceso operativo.
+  // La URL oficial histórica se conserva en metadata para trazabilidad, pero
+  // no se muestra como botón porque en normativa antigua puede estar rota.
+  if (!norma.drive_file_url && norma.source_url) {
     rows.push([{ text: "🔗 Fuente oficial", url: norma.source_url }]);
   }
 

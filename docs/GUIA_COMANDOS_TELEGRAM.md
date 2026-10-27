@@ -1,6 +1,6 @@
 # Guía de comandos y revisión documental — RegAlert DIGEMID
 
-> Documento operativo del MVP.  
+> Documento operativo del MVP.
 > Principio: **primero conservar el documento oficial, luego extraer texto fiel, después estructurar lo necesario y finalmente consultar con IA con trazabilidad.**
 
 ## 1. Comandos de uso frecuente

@@ -9,8 +9,10 @@ import {
   selectArticleEvidence,
 } from "./consulta_article.ts";
 import {
+  buildRevisionId,
   parseManualReviewKind,
   parseManualReviewReason,
+  parseRevisionId,
   parseSourceAssetId,
   validateReviewedText,
   type ManualReviewKind,
@@ -959,6 +961,107 @@ async function enviarBandejaRevision(chatId: string) {
   return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
 }
 
+function instruccionRevisionPorMotivo(reason: RevisionReason): string {
+  if (reason === "tabla") {
+    return "Reconstruye fielmente encabezados, filas, columnas, celdas y notas visibles. No completes valores ausentes ni deduzcas datos.";
+  }
+  if (reason === "formula") {
+    return "Conserva exactamente símbolos, operadores, agrupaciones, fracciones, subíndices y superíndices. No simplifiques ni interpretes la fórmula.";
+  }
+  if (reason === "grafico") {
+    return "Transcribe títulos, ejes, rótulos, leyendas, valores y relaciones visibles. No inventes ni deduzcas información que no aparezca en el gráfico.";
+  }
+  if (reason === "anexo") {
+    return "Conserva títulos, campos, casillas, instrucciones, firmas, fechas y estructura visible del anexo o formulario.";
+  }
+  return "Corrige únicamente la transcripción comparando con el PDF. No resumas, no interpretes y no agregues contenido.";
+}
+
+async function enviarPaqueteRevisionPagina(
+  chatId: string,
+  normaId: string,
+  reason: RevisionReason,
+  pageNumber: number,
+) {
+  const resultado = await getRevisionNormaById(normaId);
+  if (!resultado) return await sendMessage(chatId, "⚠️ No encontré esa norma.");
+
+  const { norma, paginas } = resultado;
+  const candidatas = filterRevisionPages(
+    paginas,
+    reason,
+    UMBRAL_BAJA_CALIDAD_NORMA,
+  );
+  const pagina = candidatas.find((p: any) => Number(p.page_number) === pageNumber);
+
+  if (!pagina) {
+    return await sendMessage(
+      chatId,
+      `✅ La página ${pageNumber} ya no está pendiente por <b>${escapeHtml(REVISION_LABELS[reason])}</b>.`,
+      { inline_keyboard: [[{ text: "⬅️ Volver a la norma", callback_data: `rev:n:${normaId}` }]] },
+    );
+  }
+
+  if (!norma.pdf_url) {
+    return await sendMessage(
+      chatId,
+      `⚠️ <b>${escapeHtml(norma.document_key)}</b> no tiene PDF fuente disponible. No iniciaré la revisión sin el documento.`,
+    );
+  }
+
+  const revisionId = buildRevisionId(norma.document_key, pageNumber, reason);
+
+  try {
+    const pdfOriginal = await descargarPdfRevision(norma.pdf_url);
+    await enviarDocumentoBytes(
+      chatId,
+      pdfOriginal,
+      `${norma.document_key}__oficial.pdf`,
+      "application/pdf",
+      `📄 PDF oficial completo — ${norma.document_key}\nRevisar únicamente página: ${pageNumber}\nREVISION_ID: ${revisionId}`,
+    );
+  } catch (error) {
+    console.error("REVISION_ORIGINAL_PDF_ERROR:", error);
+    return await sendMessage(
+      chatId,
+      "⚠️ No pude obtener el PDF fuente. No iniciaré la revisión sin el documento original archivado.",
+    );
+  }
+
+  const tipoRevision: ManualReviewKind = reason === "tabla" ? "tabla" : "contenido";
+  const plantilla = construirPlantillaTxtRevision(
+    norma.document_key,
+    [pagina],
+    tipoRevision,
+    reason,
+    revisionId,
+  );
+
+  await enviarDocumentoTexto(
+    chatId,
+    plantilla,
+    `revision_${reason}_${norma.document_key}_p${pageNumber}.txt`,
+    "text/plain",
+    `✏️ ${REVISION_LABELS[reason]} — página ${pageNumber} — ${revisionId}`,
+  );
+
+  return await sendMessage(
+    chatId,
+    `${REVISION_REASON_EMOJI[reason]} <b>Paquete de revisión</b>\n\n` +
+      `Norma: <b>${escapeHtml(norma.document_key)}</b>\n` +
+      `Página: <b>${pageNumber}</b>\n` +
+      `Tipo: <b>${escapeHtml(REVISION_LABELS[reason])}</b>\n` +
+      `ID: <code>${escapeHtml(revisionId)}</code>\n\n` +
+      `📌 <b>En ChatGPT:</b>\n${escapeHtml(instruccionRevisionPorMotivo(reason))}\n\n` +
+      "Sube el PDF y el TXT juntos. Devuelve únicamente el TXT corregido y reenvíalo a este bot. El nombre del archivo puede cambiar: RegAlert lo identifica por REVISION_ID.",
+    {
+      inline_keyboard: [[
+        { text: "⬅️ Volver a pendientes", callback_data: `rev:n:${normaId}` },
+      ]],
+    },
+  );
+}
+
 async function enviarRevisionPorMotivo(
   chatId: string,
   normaId: string,
@@ -981,63 +1084,26 @@ async function enviarRevisionPorMotivo(
     );
   }
 
-  const pageNumbers = seleccionadas
-    .map((p: any) => Number(p.page_number))
-    .filter((n: number) => Number.isInteger(n) && n > 0);
-
-  if (!norma.pdf_url) {
-    return await sendMessage(
+  if (seleccionadas.length === 1) {
+    return await enviarPaqueteRevisionPagina(
       chatId,
-      `⚠️ <b>${escapeHtml(norma.document_key)}</b> no tiene PDF oficial disponible. No iniciaré una revisión sin el documento fuente.`,
+      normaId,
+      reason,
+      Number(seleccionadas[0].page_number),
     );
   }
 
-  try {
-    const pdfOriginal = await descargarPdfRevision(norma.pdf_url);
-    await enviarDocumentoBytes(
-      chatId,
-      pdfOriginal,
-      `${norma.document_key}__oficial.pdf`,
-      "application/pdf",
-      `📄 PDF oficial completo — ${norma.document_key}\nRevisar página(s): ${pageNumbers.join(", ")}`,
-    );
-  } catch (error) {
-    console.error("REVISION_ORIGINAL_PDF_ERROR:", error);
-    return await sendMessage(
-      chatId,
-      "⚠️ No pude obtener el PDF oficial desde la fuente documental. No iniciaré la revisión sin el documento original.",
-    );
-  }
-
-  const tipoRevision: ManualReviewKind = reason === "tabla" ? "tabla" : "contenido";
-  const plantilla = construirPlantillaTxtRevision(
-    norma.document_key,
-    seleccionadas,
-    tipoRevision,
-    reason,
-  );
-
-  await enviarDocumentoTexto(
-    chatId,
-    plantilla,
-    `revision_${reason}_${norma.document_key}.txt`,
-    "text/plain",
-    `✏️ Plantilla de revisión — ${REVISION_LABELS[reason]}. Páginas originales: ${pageNumbers.join(", ")}.`,
-  );
-
-  const instruccionEspecial = reason === "tabla"
-    ? "En ChatGPT pide reconstruir fielmente filas y columnas; no deducir valores ausentes."
-    : reason === "formula"
-    ? "En ChatGPT pide conservar exactamente símbolos, operadores, agrupaciones, subíndices y superíndices; no simplificar la fórmula."
-    : reason === "grafico"
-    ? "En ChatGPT pide transcribir textos, rótulos, leyendas y relaciones visibles sin inventar datos que no aparezcan en el gráfico."
-    : reason === "anexo"
-    ? "En ChatGPT pide conservar campos, casillas, títulos, instrucciones y estructura del anexo/formulario."
-    : "En ChatGPT pide corregir únicamente la transcripción, sin resumir ni interpretar.";
+  const botones = seleccionadas.slice(0, 30).map((p: any) => [{
+    text: `${REVISION_REASON_EMOJI[reason]} Página ${p.page_number}`,
+    callback_data: `rev:p:${reason}:${normaId}:${p.page_number}`,
+  }]);
+  botones.push([{ text: "⬅️ Volver a la norma", callback_data: `rev:n:${normaId}` }]);
 
   return await sendMessage(
     chatId,
-    `✅ <b>Paquete de revisión preparado</b>\n\n1. Descarga el PDF oficial completo y el .txt.\n2. Súbelos juntos a ChatGPT.\n3. Indícale que revise únicamente la(s) página(s) ${pageNumbers.join(", ")}.\n4. ${instruccionEspecial}\n5. Reenvía al bot el .txt corregido.\n\nEl PDF oficial sigue siendo la fuente de verdad; el OCR original queda intacto y la corrección se registra en el historial.`,
+    `${REVISION_REASON_EMOJI[reason]} <b>${escapeHtml(REVISION_LABELS[reason])}</b> — ${escapeHtml(norma.document_key)}\n\n` +
+      "Selecciona una página. Cada revisión se trabaja por separado para reducir errores.",
+    { inline_keyboard: botones },
   );
 }
 
@@ -1433,8 +1499,10 @@ function construirPlantillaTxtRevision(
   paginas: any[],
   tipoRevision: ManualReviewKind,
   motivoRevision?: RevisionReason,
+  revisionId?: string,
 ): string {
   const encabezado = [
+    revisionId ? `# REVISION_ID: ${revisionId}` : null,
     `# NORMA: ${documentKey}`,
     `# TIPO_REVISION: ${tipoRevision}`,
     motivoRevision ? `# MOTIVO_REVISION: ${motivoRevision}` : null,
@@ -1633,6 +1701,8 @@ async function aplicarRevisionManualNorma(
   paginasActualizadas?: number;
   paginasRevisadas?: number[];
   pendientes?: string[];
+  normaId?: string;
+  nextRevision?: { reason: RevisionReason; pageNumber: number };
 }> {
   const matchNorma = contenido.match(/^#\s*NORMA:\s*(.+)$/m);
   if (!matchNorma) {
@@ -1642,6 +1712,7 @@ async function aplicarRevisionManualNorma(
   const documentKey = matchNorma[1].trim();
   const tipoRevision = parseManualReviewKind(contenido);
   const motivoRevision = parseManualReviewReason(contenido);
+  const revisionId = parseRevisionId(contenido);
 
   const { data: norma } = await supabase
     .from("digemid_normas")
@@ -1668,6 +1739,13 @@ async function aplicarRevisionManualNorma(
     if (!match) continue;
 
     const pageNumber = parseInt(match[1], 10);
+    if (revisionId && motivoRevision) {
+      const expectedRevisionId = buildRevisionId(documentKey, pageNumber, motivoRevision);
+      if (revisionId !== expectedRevisionId) {
+        observaciones.push(`pág. ${pageNumber}: REVISION_ID no coincide con norma/página/tipo esperado`);
+        continue;
+      }
+    }
     const descriptor = match[2];
     const sourceAssetId = parseSourceAssetId(descriptor);
     const textoCorregido = reconstruirTablasDesdeTextoEditable(match[3].trim().normalize("NFC"));
@@ -1707,6 +1785,7 @@ async function aplicarRevisionManualNorma(
         document_key: documentKey,
         template_source_asset_id: sourceAssetId,
         motivo_revision: motivoRevision,
+        revision_id: revisionId,
       },
     });
 
@@ -1751,6 +1830,21 @@ async function aplicarRevisionManualNorma(
 
   pendientes.push(...observaciones);
 
+  let nextRevision: { reason: RevisionReason; pageNumber: number } | undefined;
+  const { data: paginasNorma } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, quality_score, revisado_manual, has_tables, tabla_verificada, posible_formula, posible_grafico, es_formulario_anexo")
+    .eq("norma_id", norma.id)
+    .order("page_number");
+
+  for (const p of (paginasNorma ?? []) as RevisionPage[]) {
+    const reasons = revisionReasons(p, UMBRAL_BAJA_CALIDAD_NORMA);
+    if (reasons.length) {
+      nextRevision = { reason: reasons[0], pageNumber: Number(p.page_number) };
+      break;
+    }
+  }
+
   return {
     ok: true,
     mensaje: "ok",
@@ -1758,6 +1852,8 @@ async function aplicarRevisionManualNorma(
     paginasActualizadas: actualizadas,
     paginasRevisadas: revisadas,
     pendientes,
+    normaId: norma.id,
+    nextRevision,
   };
 }
 
@@ -6103,6 +6199,18 @@ async function handleCallback(update: TelegramUpdate) {
     return await enviarRevisionCompleta(chatId, resultado.norma.document_key);
   }
 
+  if (data.startsWith("rev:p:")) {
+    if (!isAdmin(chatId)) return;
+    const parts = data.split(":");
+    const reason = parts[2] as RevisionReason;
+    const normaId = parts[3];
+    const pageNumber = Number(parts[4]);
+    if (!["texto", "tabla", "formula", "grafico", "anexo"].includes(reason) || !normaId || !Number.isInteger(pageNumber)) {
+      return await sendMessage(chatId, "⚠️ Revisión de página no reconocida.");
+    }
+    return await enviarPaqueteRevisionPagina(chatId, normaId, reason, pageNumber);
+  }
+
   if (data.startsWith("rev:t:")) {
     if (!isAdmin(chatId)) return;
     const parts = data.split(":");
@@ -6658,13 +6766,26 @@ serve(async (req: Request) => {
               resultado.pendientes.map((p) => `• ${escapeHtml(p)}`).join("\n"),
           );
         } else {
+          const nextKeyboard = resultado.nextRevision && resultado.normaId
+            ? {
+              inline_keyboard: [[{
+                text: "➡️ Siguiente observación",
+                callback_data: `rev:p:${resultado.nextRevision.reason}:${resultado.normaId}:${resultado.nextRevision.pageNumber}`,
+              }], [{ text: "📚 Volver a revisión", callback_data: "rev:home" }]],
+            }
+            : { inline_keyboard: [[{ text: "📚 Volver a revisión", callback_data: "rev:home" }]] };
+
           await sendMessage(
             chatId,
             `✅ <b>Revisión aceptada por el sistema</b>\n\n` +
               `Norma: <b>${escapeHtml(resultado.documentKey ?? "")}</b>\n` +
               `Página(s): ${escapeHtml((resultado.paginasRevisadas ?? []).join(", "))}\n` +
-              `Estado: sin observaciones automáticas pendientes para esta revisión.\n\n` +
+              `Estado: sin observaciones automáticas pendientes para esta revisión.\n` +
+              (resultado.nextRevision
+                ? `Siguiente: ${escapeHtml(REVISION_LABELS[resultado.nextRevision.reason])} — pág. ${resultado.nextRevision.pageNumber}.\n\n`
+                : "No quedan observaciones automáticas en esta norma.\n\n") +
               `ℹ️ Esto confirma consistencia estructural y registro; la fidelidad final sigue referida al PDF oficial.`,
+            nextKeyboard,
           );
         }
       } catch (error) {

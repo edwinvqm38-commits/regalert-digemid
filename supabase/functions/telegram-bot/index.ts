@@ -23,6 +23,7 @@ import {
   type RevisionReason,
 } from "./revision_queue.ts";
 import { extraerPaginasPdf } from "./revision_pdf.ts";
+import { parseSupabaseStorageObjectUrl } from "./revision_pdf_source.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -698,6 +699,31 @@ function nombrePaginasRevision(pageNumbers: number[]): string {
   return `${sorted.slice(0, 6).join("_")}_y_${sorted.length - 6}_mas`;
 }
 
+async function descargarPdfRevision(pdfUrl: string): Promise<Uint8Array> {
+  const storageRef = parseSupabaseStorageObjectUrl(pdfUrl, SUPABASE_URL);
+
+  if (storageRef) {
+    const { data, error } = await supabase.storage
+      .from(storageRef.bucket)
+      .download(storageRef.path);
+
+    if (error || !data) {
+      throw new Error(
+        `No pude descargar el PDF desde Storage: ${error?.message ?? "sin datos"}`,
+      );
+    }
+
+    return new Uint8Array(await data.arrayBuffer());
+  }
+
+  const response = await fetch(pdfUrl);
+  if (!response.ok) {
+    throw new Error(`No pude descargar el PDF oficial (${response.status}).`);
+  }
+
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 async function enviarMiniPdfRevision(
   chatId: string,
   pdfUrl: string,
@@ -705,12 +731,7 @@ async function enviarMiniPdfRevision(
   reason: RevisionReason,
   pageNumbers: number[],
 ): Promise<void> {
-  const response = await fetch(pdfUrl);
-  if (!response.ok) {
-    throw new Error(`No pude descargar el PDF oficial (${response.status}).`);
-  }
-
-  const originalBytes = new Uint8Array(await response.arrayBuffer());
+  const originalBytes = await descargarPdfRevision(pdfUrl);
   const miniPdf = await extraerPaginasPdf(originalBytes, pageNumbers);
   const paginas = [...new Set(pageNumbers)].sort((a, b) => a - b);
   const paginaLabel = paginas.length === 1 ? "página original" : "páginas originales";

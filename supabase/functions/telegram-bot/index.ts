@@ -22,7 +22,6 @@ import {
   type RevisionPage,
   type RevisionReason,
 } from "./revision_queue.ts";
-import { extraerPaginasPdf } from "./revision_pdf.ts";
 import { parseSupabaseStorageObjectUrl } from "./revision_pdf_source.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -693,12 +692,6 @@ async function enviarDocumentoBytes(
   }
 }
 
-function nombrePaginasRevision(pageNumbers: number[]): string {
-  const sorted = [...new Set(pageNumbers)].sort((a, b) => a - b);
-  if (sorted.length <= 6) return sorted.join("_");
-  return `${sorted.slice(0, 6).join("_")}_y_${sorted.length - 6}_mas`;
-}
-
 async function descargarPdfRevision(pdfUrl: string): Promise<Uint8Array> {
   const storageRef = parseSupabaseStorageObjectUrl(pdfUrl, SUPABASE_URL);
 
@@ -724,26 +717,6 @@ async function descargarPdfRevision(pdfUrl: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-async function enviarMiniPdfRevision(
-  chatId: string,
-  pdfUrl: string,
-  documentKey: string,
-  reason: RevisionReason,
-  pageNumbers: number[],
-): Promise<void> {
-  const originalBytes = await descargarPdfRevision(pdfUrl);
-  const miniPdf = await extraerPaginasPdf(originalBytes, pageNumbers);
-  const paginas = [...new Set(pageNumbers)].sort((a, b) => a - b);
-  const paginaLabel = paginas.length === 1 ? "página original" : "páginas originales";
-
-  await enviarDocumentoBytes(
-    chatId,
-    miniPdf,
-    `revision_${reason}_${documentKey}_p${nombrePaginasRevision(paginas)}.pdf`,
-    "application/pdf",
-    `📄 PDF de revisión — ${documentKey}\n${paginaLabel}: ${paginas.join(", ")}`,
-  );
-}
 
 const UMBRAL_BAJA_CALIDAD_NORMA = 0.5;
 
@@ -890,7 +863,7 @@ async function enviarDetalleRevisionNorma(chatId: string, normaId: string) {
 
   lineas.push(
     "",
-    "Toca solo lo que quieras revisar. El bot generará un PDF reducido con únicamente las páginas observadas y una plantilla editable.",
+    "Toca solo lo que quieras revisar. El bot enviará el PDF oficial completo y una plantilla editable indicando exactamente qué páginas revisar.",
   );
 
   const botones: { text: string; callback_data: string }[][] = [];
@@ -1017,24 +990,20 @@ async function enviarRevisionPorMotivo(
   }
 
   try {
-    await enviarMiniPdfRevision(
+    const pdfOriginal = await descargarPdfRevision(norma.pdf_url);
+    await enviarDocumentoBytes(
       chatId,
-      norma.pdf_url,
-      norma.document_key,
-      reason,
-      pageNumbers,
+      pdfOriginal,
+      `${norma.document_key}__oficial.pdf`,
+      "application/pdf",
+      `📄 PDF oficial completo — ${norma.document_key}\nRevisar página(s): ${pageNumbers.join(", ")}`,
     );
   } catch (error) {
-    console.error("REVISION_MINI_PDF_ERROR:", error);
-    await sendMessage(
+    console.error("REVISION_ORIGINAL_PDF_ERROR:", error);
+    return await sendMessage(
       chatId,
-      "⚠️ No pude generar el PDF reducido. Te envío el PDF oficial completo como respaldo; revisa solo las páginas indicadas en la plantilla.",
+      "⚠️ No pude obtener el PDF oficial desde la fuente documental. No iniciaré la revisión sin el documento original.",
     );
-    await telegram("sendDocument", {
-      chat_id: chatId,
-      document: norma.pdf_url,
-      caption: `📄 PDF oficial completo — ${norma.document_key}`,
-    });
   }
 
   const tipoRevision: ManualReviewKind = reason === "tabla" ? "tabla" : "contenido";
@@ -1064,7 +1033,7 @@ async function enviarRevisionPorMotivo(
 
   return await sendMessage(
     chatId,
-    `✅ <b>Paquete de revisión preparado</b>\n\n1. Descarga el PDF reducido.\n2. Súbelo a ChatGPT junto con el .txt.\n3. ${instruccionEspecial}\n4. Reenvía al bot el .txt corregido.\n\nEl OCR original queda intacto y la corrección se registra en el historial.`,
+    `✅ <b>Paquete de revisión preparado</b>\n\n1. Descarga el PDF oficial completo y el .txt.\n2. Súbelos juntos a ChatGPT.\n3. Indícale que revise únicamente la(s) página(s) ${pageNumbers.join(", ")}.\n4. ${instruccionEspecial}\n5. Reenvía al bot el .txt corregido.\n\nEl PDF oficial sigue siendo la fuente de verdad; el OCR original queda intacto y la corrección se registra en el historial.`,
   );
 }
 

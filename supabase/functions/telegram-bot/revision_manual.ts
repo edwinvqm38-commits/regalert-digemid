@@ -2,6 +2,21 @@ import type { RevisionReason } from "./revision_queue.ts";
 
 export type ManualReviewKind = "contenido" | "contenido_completo" | "tabla";
 
+export function buildRevisionId(
+  documentKey: string,
+  pageNumber: number,
+  reason: RevisionReason,
+): string {
+  const safeKey = documentKey.trim().toUpperCase().replace(/[^A-Z0-9-]+/g, "-");
+  return `REV-${safeKey}-P${pageNumber}-${reason.toUpperCase()}`;
+}
+
+export function parseRevisionId(contenido: string): string | null {
+  const match = contenido.match(/^#\s*REVISION_ID:\s*(\S+)\s*$/mi);
+  return match?.[1]?.trim() || null;
+}
+
+
 export function parseManualReviewKind(contenido: string): ManualReviewKind {
   const match = contenido.match(/^#\s*TIPO_REVISION:\s*(\S+)\s*$/mi);
   const value = match?.[1]?.trim().toLowerCase();

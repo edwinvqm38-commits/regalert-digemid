@@ -253,6 +253,7 @@ const COMANDOS_USUARIO: { command: string; description: string }[] = [
   { command: "mes", description: "Alertas publicadas este mes" },
   { command: "recientes", description: "Alertas registradas recientemente" },
   { command: "normas", description: "Últimas leyes, reglamentos y decretos" },
+  { command: "norma", description: "Ver ficha y estado de una norma" },
   { command: "buscar", description: "Buscar alertas por palabra clave" },
   { command: "consulta", description: "Preguntar con IA citando la norma/alerta fuente" },
   { command: "suscribirme", description: "Solicitar activar un plan pagado" },
@@ -2547,6 +2548,9 @@ function helpText(esAdmin = false) {
     "<b>/detalle 50-2026</b>",
     "Consulta una alerta por número o código.",
     "",
+    "<b>/norma RM-1753-2002</b>",
+    "Muestra la ficha de una norma y su estado documental.",
+    "",
     "📌 <b>Opciones del menú</b>",
     "",
     "<b>🆕 Últimas 5</b>",
@@ -4573,6 +4577,104 @@ async function getAlertDetail(alertNumber: string) {
   return data;
 }
 
+
+async function getNormaDetail(documentKey: string) {
+  const key = documentKey.trim().toUpperCase();
+
+  const { data: norma, error } = await supabase
+    .from("digemid_normas")
+    .select("id, document_key, titulo, tipo_norma, numero, anio, fecha_publicacion, fecha_promulgacion, entidad_emisora, fuente_oficial, source_url, pdf_url, file_storage_path, process_status, estado_vigencia")
+    .eq("document_key", key)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!norma) return null;
+
+  const { data: paginas, error: pageError } = await supabase
+    .from("digemid_norma_paginas")
+    .select("page_number, quality_score, revisado_manual, has_tables, tabla_verificada, posible_formula, posible_grafico, es_formulario_anexo")
+    .eq("norma_id", norma.id)
+    .order("page_number");
+
+  if (pageError) throw pageError;
+
+  const pages = (paginas ?? []) as RevisionPage[];
+  const pendingPages = pages.filter((p) =>
+    hasPendingRevision(p, UMBRAL_BAJA_CALIDAD_NORMA)
+  );
+  const summary = summarizeRevisionPages(
+    pendingPages,
+    UMBRAL_BAJA_CALIDAD_NORMA,
+  );
+
+  return {
+    norma,
+    totalPages: pages.length,
+    reviewedPages: pages.filter((p) => p.revisado_manual === true).length,
+    pendingPages: pendingPages.length,
+    summary,
+  };
+}
+
+function formatNormaDetail(detail: Awaited<ReturnType<typeof getNormaDetail>>): string {
+  if (!detail) return "";
+
+  const { norma, totalPages, reviewedPages, pendingPages, summary } = detail;
+  const fecha = norma.fecha_publicacion ?? norma.fecha_promulgacion ?? "Sin fecha";
+  const vigencia = norma.estado_vigencia ?? "sin confirmar";
+
+  const lines = [
+    `📚 <b>${escapeHtml(norma.document_key)}</b>`,
+    escapeHtml(norma.titulo ?? "Sin título"),
+    "",
+    `📅 <b>Fecha:</b> ${escapeHtml(fecha)}`,
+    `🏛️ <b>Entidad:</b> ${escapeHtml(norma.entidad_emisora ?? "No registrada")}`,
+    `⚖️ <b>Vigencia:</b> ${escapeHtml(vigencia)}`,
+    "",
+    "📋 <b>Estado documental</b>",
+    `• PDF: ${norma.pdf_url || norma.file_storage_path ? "✅ disponible" : "⚠️ no disponible"}`,
+    `• Páginas registradas: <b>${totalPages}</b>`,
+    `• Revisadas manualmente: <b>${reviewedPages}</b>`,
+    `• Con revisión pendiente: <b>${pendingPages}</b>`,
+  ];
+
+  if (pendingPages > 0) {
+    if (summary.texto) lines.push(`  📝 Texto/OCR: ${summary.texto}`);
+    if (summary.tabla) lines.push(`  📊 Tablas: ${summary.tabla}`);
+    if (summary.formula) lines.push(`  🧮 Fórmulas: ${summary.formula}`);
+    if (summary.grafico) lines.push(`  🖼️ Gráficos: ${summary.grafico}`);
+    if (summary.anexo) lines.push(`  📑 Anexos/formularios: ${summary.anexo}`);
+  } else if (totalPages > 0) {
+    lines.push("  ✅ Sin observaciones automáticas pendientes.");
+  }
+
+  lines.push(
+    "",
+    `💬 Para consultarla: <code>/consulta [pregunta] ${escapeHtml(norma.document_key)}</code>`,
+  );
+
+  return lines.join("\n");
+}
+
+function normaDetailButtons(
+  detail: NonNullable<Awaited<ReturnType<typeof getNormaDetail>>>,
+  esAdmin: boolean,
+) {
+  const rows: any[][] = [];
+  const { norma, pendingPages } = detail;
+
+  if (norma.source_url) {
+    rows.push([{ text: "🔗 Fuente oficial", url: norma.source_url }]);
+  }
+
+  if (esAdmin && pendingPages > 0) {
+    rows.push([{ text: "🧪 Revisar pendientes", callback_data: `rev:n:${norma.id}` }]);
+  }
+
+  rows.push([{ text: "⬅️ Volver al menú", callback_data: "menu:principal" }]);
+  return { inline_keyboard: rows };
+}
+
 async function handleCommand(
   chatId: string,
   userId: string | undefined,
@@ -4595,6 +4697,7 @@ async function handleCommand(
   const requiereAcceso =
     COMANDOS_CON_ACCESO_EXACTO.includes(trimmed) ||
     trimmed.startsWith("/detalle") ||
+    trimmed.startsWith("/norma ") ||
     trimmed.startsWith("/buscar") ||
     trimmed.startsWith("/consulta");
 
@@ -4731,6 +4834,43 @@ async function handleCommand(
       mainMenu(),
     );
     return;
+  }
+
+  if (trimmed === "/norma" || trimmed.startsWith("/norma ")) {
+    const documentKey = trimmed.replace(/^\/norma\b/i, "").trim();
+
+    if (!documentKey) {
+      return await sendMessage(
+        chatId,
+        "📚 Escribe el código de la norma.\n\nEjemplo:\n<code>/norma RM-1753-2002</code>",
+        mainMenu(),
+      );
+    }
+
+    const detail = await getNormaDetail(documentKey);
+
+    await logConsulta({
+      chatId,
+      userId,
+      command: "/norma",
+      queryText: documentKey,
+      resultCount: detail ? 1 : 0,
+      status: "ok",
+    });
+
+    if (!detail) {
+      return await sendMessage(
+        chatId,
+        `📭 No encontré la norma <b>${escapeHtml(documentKey)}</b>.`,
+        mainMenu(),
+      );
+    }
+
+    return await sendMessage(
+      chatId,
+      formatNormaDetail(detail),
+      normaDetailButtons(detail, isAdmin(chatId)),
+    );
   }
 
   if (trimmed === "/hoy") {

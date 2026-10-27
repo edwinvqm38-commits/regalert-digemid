@@ -279,6 +279,7 @@ const COMANDOS_ADMIN: { command: string; description: string }[] = [
   { command: "pagosyape", description: "Sumar los pagos Yape reportados este mes" },
   { command: "saldodeepseek", description: "Consultar el saldo de la API DeepSeek" },
   { command: "revision", description: "Bandeja guiada de revisión documental" },
+  { command: "guia", description: "Guía rápida de comandos y revisión" },
   { command: "normassinpdf", description: "Normas sin PDF confirmado" },
   { command: "derogacionespendientes", description: "Revisar derogaciones/modificaciones detectadas por IA" },
   { command: "normaestado", description: "Reporte de fidelidad (global o por norma)" },
@@ -2726,8 +2727,14 @@ function helpText(esAdmin = false) {
     "<b>/saldodeepseek</b>",
     "Consulta al instante el saldo de la API de DeepSeek y proyecta días restantes.",
     "",
+    "<b>/revision</b>",
+    "Abre la bandeja guiada: norma → tipo de observación → página → paquete PDF + TXT.",
+    "",
+    "<b>/guia</b>",
+    "Muestra el flujo corto de revisión y abre la wiki completa.",
+    "",
     "<b>/normasrevisar</b>",
-    "Lista las normas con páginas de baja confiabilidad pendientes de revisión.",
+    "Comando técnico legado para listar páginas de baja confiabilidad.",
     "",
     "<b>/normassinpdf</b>",
     "Lista las normas sin PDF confirmado, con botón para subirlo a mano una por una.",
@@ -4951,6 +4958,34 @@ async function handleCommand(
     await logConsulta({ chatId, userId, command: "/ayuda", status: "ok" });
 
     return await sendMessage(chatId, helpText(isAdmin(chatId)), mainMenu());
+  }
+
+  if (trimmed === "/guia") {
+    if (!isAdmin(chatId)) {
+      return await sendMessage(chatId, "⛔ Comando solo disponible para administradores.");
+    }
+
+    return await sendMessage(
+      chatId,
+      "📘 <b>Guía rápida RegAlert</b>\n\n" +
+        "<b>Revisión documental:</b>\n" +
+        "1. /revision\n" +
+        "2. Elige la norma.\n" +
+        "3. Elige Texto, Tabla, Fórmula, Gráfico o Anexo.\n" +
+        "4. Elige una página.\n" +
+        "5. Sube PDF + TXT a ChatGPT.\n" +
+        "6. Reenvía solo el TXT corregido al bot.\n" +
+        "7. Usa «➡️ Siguiente observación» hasta terminar.\n\n" +
+        "<b>Consulta:</b> /norma, /consulta, /normaestado\n" +
+        "<b>Alertas:</b> /ultimas, /hoy, /semana, /recientes, /mes, /buscar, /detalle\n\n" +
+        "La wiki completa explica cada comando y qué hacer con tablas, fórmulas, gráficos y anexos.",
+      {
+        inline_keyboard: [[{
+          text: "📖 Abrir wiki completa",
+          url: "https://github.com/edwinvqm38-commits/regalert-digemid/blob/main/docs/GUIA_COMANDOS_TELEGRAM.md",
+        }], [{ text: "🧪 Abrir revisión", callback_data: "rev:home" }]],
+      },
+    );
   }
 
   if (trimmed === "/alertas") {

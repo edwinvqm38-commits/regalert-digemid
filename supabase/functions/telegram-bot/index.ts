@@ -4578,25 +4578,63 @@ async function getAlertDetail(alertNumber: string) {
 }
 
 
+function extraerPdfPublicoNorma(raw: any): string | null {
+  const candidatos: unknown[] = [
+    raw?.source_pdf,
+    raw?.official_pdf_url,
+    raw?.pdf_url,
+  ];
+
+  const correcciones = raw?.metadata_corrections;
+  if (correcciones && typeof correcciones === "object") {
+    for (const value of Object.values(correcciones)) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as Record<string, unknown>;
+      candidatos.push(item.source_pdf, item.official_pdf_url, item.pdf_url);
+    }
+  }
+
+  for (const candidato of candidatos) {
+    if (typeof candidato !== "string" || !/^https?:\/\//i.test(candidato)) continue;
+    // Las URLs firmadas de nuestro Storage caducan; no se usan como enlace
+    // permanente de la ficha /norma.
+    if (parseSupabaseStorageObjectUrl(candidato, SUPABASE_URL)) continue;
+    return candidato;
+  }
+
+  return null;
+}
+
 async function getNormaDetail(documentKey: string) {
   const key = documentKey.trim().toUpperCase();
 
   const { data: norma, error } = await supabase
     .from("digemid_normas")
-    .select("id, document_key, titulo, tipo_norma, numero, anio, fecha_publicacion, fecha_promulgacion, entidad_emisora, fuente_oficial, source_url, pdf_url, file_storage_path, process_status, estado_vigencia")
+    .select("id, document_key, titulo, tipo_norma, numero, anio, fecha_publicacion, fecha_promulgacion, entidad_emisora, fuente_oficial, source_url, pdf_url, drive_file_url, file_storage_path, process_status, estado_vigencia, raw")
     .eq("document_key", key)
     .maybeSingle();
 
   if (error) throw error;
   if (!norma) return null;
 
-  const { data: paginas, error: pageError } = await supabase
-    .from("digemid_norma_paginas")
-    .select("page_number, quality_score, revisado_manual, has_tables, tabla_verificada, posible_formula, posible_grafico, es_formulario_anexo")
-    .eq("norma_id", norma.id)
-    .order("page_number");
+  const [{ data: paginas, error: pageError }, { data: relaciones, error: relationError }] =
+    await Promise.all([
+      supabase
+        .from("digemid_norma_paginas")
+        .select("page_number, quality_score, revisado_manual, has_tables, tabla_verificada, posible_formula, posible_grafico, es_formulario_anexo")
+        .eq("norma_id", norma.id)
+        .order("page_number"),
+      supabase
+        .from("digemid_norma_relaciones")
+        .select("norma_origen_document_key, tipo_relacion, estado, effective_date")
+        .eq("norma_afectada_id", norma.id)
+        .eq("estado", "confirmada")
+        .eq("tipo_relacion", "deroga")
+        .order("resuelto_en", { ascending: false }),
+    ]);
 
   if (pageError) throw pageError;
+  if (relationError) throw relationError;
 
   const pages = (paginas ?? []) as RevisionPage[];
   const pendingPages = pages.filter((p) =>
@@ -4607,19 +4645,31 @@ async function getNormaDetail(documentKey: string) {
     UMBRAL_BAJA_CALIDAD_NORMA,
   );
 
+  const derogadaPor = (relaciones ?? [])[0] ?? null;
+  const publicPdfUrl = norma.drive_file_url || extraerPdfPublicoNorma(norma.raw);
+
   return {
     norma,
     totalPages: pages.length,
     reviewedPages: pages.filter((p) => p.revisado_manual === true).length,
     pendingPages: pendingPages.length,
     summary,
+    derogadaPor,
+    publicPdfUrl,
   };
 }
 
 function formatNormaDetail(detail: Awaited<ReturnType<typeof getNormaDetail>>): string {
   if (!detail) return "";
 
-  const { norma, totalPages, reviewedPages, pendingPages, summary } = detail;
+  const {
+    norma,
+    totalPages,
+    reviewedPages,
+    pendingPages,
+    summary,
+    derogadaPor,
+  } = detail;
   const fecha = norma.fecha_publicacion ?? norma.fecha_promulgacion ?? "Sin fecha";
   const vigencia = norma.estado_vigencia ?? "sin confirmar";
 
@@ -4627,16 +4677,26 @@ function formatNormaDetail(detail: Awaited<ReturnType<typeof getNormaDetail>>): 
     `📚 <b>${escapeHtml(norma.document_key)}</b>`,
     escapeHtml(norma.titulo ?? "Sin título"),
     "",
-    `📅 <b>Fecha:</b> ${escapeHtml(fecha)}`,
+    `📅 <b>Publicación:</b> ${escapeHtml(fecha)}`,
     `🏛️ <b>Entidad:</b> ${escapeHtml(norma.entidad_emisora ?? "No registrada")}`,
     `⚖️ <b>Vigencia:</b> ${escapeHtml(vigencia)}`,
-    "",
-    "📋 <b>Estado documental</b>",
-    `• PDF: ${norma.pdf_url || norma.file_storage_path ? "✅ disponible" : "⚠️ no disponible"}`,
-    `• Páginas registradas: <b>${totalPages}</b>`,
-    `• Revisadas manualmente: <b>${reviewedPages}</b>`,
-    `• Con revisión pendiente: <b>${pendingPages}</b>`,
   ];
+
+  if (vigencia === "derogada" && derogadaPor?.norma_origen_document_key) {
+    lines.push(
+      `↳ Derogada por <b>${escapeHtml(derogadaPor.norma_origen_document_key)}</b>` +
+        (derogadaPor.effective_date ? ` — ${escapeHtml(derogadaPor.effective_date)}` : ""),
+    );
+  }
+
+  lines.push(
+    "",
+    "📋 <b>Documento</b>",
+    `• PDF: ${detail.publicPdfUrl ? "✅ disponible" : norma.file_storage_path ? "📦 archivado" : "⚠️ no disponible"}`,
+    `• Páginas: <b>${totalPages}</b>`,
+    `• Revisadas: <b>${reviewedPages}</b>`,
+    `• Pendientes: <b>${pendingPages}</b>`,
+  );
 
   if (pendingPages > 0) {
     if (summary.texto) lines.push(`  📝 Texto/OCR: ${summary.texto}`);
@@ -4650,7 +4710,7 @@ function formatNormaDetail(detail: Awaited<ReturnType<typeof getNormaDetail>>): 
 
   lines.push(
     "",
-    `💬 Para consultarla: <code>/consulta [pregunta] ${escapeHtml(norma.document_key)}</code>`,
+    `💬 <code>/consulta [pregunta] ${escapeHtml(norma.document_key)}</code>`,
   );
 
   return lines.join("\n");
@@ -4661,7 +4721,11 @@ function normaDetailButtons(
   esAdmin: boolean,
 ) {
   const rows: any[][] = [];
-  const { norma, pendingPages } = detail;
+  const { norma, pendingPages, publicPdfUrl } = detail;
+
+  if (publicPdfUrl) {
+    rows.push([{ text: "📄 Ver PDF", url: publicPdfUrl }]);
+  }
 
   if (norma.source_url) {
     rows.push([{ text: "🔗 Fuente oficial", url: norma.source_url }]);

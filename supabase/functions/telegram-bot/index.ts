@@ -724,6 +724,34 @@ async function descargarPdfRevision(pdfUrl: string): Promise<Uint8Array> {
 }
 
 
+async function descargarPdfRevisionNorma(norma: {
+  pdf_url?: string | null;
+  file_storage_path?: string | null;
+}): Promise<Uint8Array> {
+  if (norma.file_storage_path) {
+    const { data, error } = await supabase.storage
+      .from(NORMATIVA_STORAGE_BUCKET)
+      .download(norma.file_storage_path);
+
+    if (!error && data) {
+      return new Uint8Array(await data.arrayBuffer());
+    }
+
+    console.warn(
+      "REVISION_STORAGE_FALLBACK:",
+      norma.file_storage_path,
+      error?.message ?? "sin datos",
+    );
+  }
+
+  if (norma.pdf_url) {
+    return await descargarPdfRevision(norma.pdf_url);
+  }
+
+  throw new Error("La norma no tiene PDF archivado ni URL de respaldo.");
+}
+
+
 const UMBRAL_BAJA_CALIDAD_NORMA = 0.5;
 
 async function getPaginasBajaCalidad(documentKey: string) {
@@ -807,7 +835,7 @@ const REVISION_REASON_EMOJI: Record<RevisionReason, string> = {
 async function getRevisionNormaById(normaId: string) {
   const { data: norma } = await supabase
     .from("digemid_normas")
-    .select("id, document_key, titulo, pdf_url")
+    .select("id, document_key, titulo, pdf_url, file_storage_path, drive_file_url")
     .eq("id", normaId)
     .maybeSingle();
 
@@ -869,7 +897,7 @@ async function enviarDetalleRevisionNorma(chatId: string, normaId: string) {
 
   lineas.push(
     "",
-    "Toca solo lo que quieras revisar. El bot enviará el PDF oficial completo y una plantilla editable indicando exactamente qué páginas revisar.",
+    "Toca el tipo de observación y luego una página. El bot enviará el PDF archivado completo y un TXT únicamente para esa página.",
   );
 
   const botones: { text: string; callback_data: string }[][] = [];
@@ -880,7 +908,6 @@ async function enviarDetalleRevisionNorma(chatId: string, normaId: string) {
       callback_data: `rev:t:${reason}:${norma.id}`,
     }]);
   }
-  botones.push([{ text: "📚 Revisar documento completo", callback_data: `rev:all:${norma.id}` }]);
   botones.push([{ text: "⬅️ Volver", callback_data: "rev:home" }]);
 
   return await sendMessage(chatId, lineas.join("\n"), { inline_keyboard: botones });
@@ -1003,17 +1030,17 @@ async function enviarPaqueteRevisionPagina(
     );
   }
 
-  if (!norma.pdf_url) {
+  if (!norma.file_storage_path && !norma.pdf_url) {
     return await sendMessage(
       chatId,
-      `⚠️ <b>${escapeHtml(norma.document_key)}</b> no tiene PDF fuente disponible. No iniciaré la revisión sin el documento.`,
+      `⚠️ <b>${escapeHtml(norma.document_key)}</b> no tiene PDF archivado ni URL de respaldo. No iniciaré la revisión sin el documento.`,
     );
   }
 
   const revisionId = buildRevisionId(norma.document_key, pageNumber, reason);
 
   try {
-    const pdfOriginal = await descargarPdfRevision(norma.pdf_url);
+    const pdfOriginal = await descargarPdfRevisionNorma(norma);
     await enviarDocumentoBytes(
       chatId,
       pdfOriginal,

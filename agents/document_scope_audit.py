@@ -140,6 +140,10 @@ START_PATTERN = re.compile(
     r"^\s*(?:DECRETA|SE\s+RESUELVE|CONSIDERANDO|ANEXO\s+N[°ºoO�]?)\b",
     re.IGNORECASE | re.MULTILINE,
 )
+ANNEX_HEADING_PATTERN = re.compile(
+    r"^\s*[¿?«\"]?ANEXO(?:\s+N[°ºoO�]?\s*\d+)?\b",
+    re.IGNORECASE,
+)
 
 
 def normalize(value: str) -> str:
@@ -294,6 +298,16 @@ def _column_index(
     return 0 if center < 0.5 else 1
 
 
+def _reading_position(
+    bbox: tuple[float, float, float, float], page: ScopePage, detected_columns: int
+) -> tuple[int, float, float]:
+    return (
+        _column_index(bbox, page, detected_columns),
+        bbox[1],
+        bbox[0],
+    )
+
+
 def _ordered_blocks(page: ScopePage, detected_columns: int) -> list[ScopeBlock]:
     return sorted(
         page.blocks,
@@ -352,6 +366,45 @@ def _split_heading_reference(
     return None
 
 
+def _split_references_in_block(text: str) -> list[NormReference]:
+    """Extrae pares tipo/identificador sin perder su contexto dentro del bloque."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    references: list[NormReference] = []
+    for index in range(len(lines) - 1):
+        reference = _split_heading_reference(
+            lines[index], lines[index + 1].rstrip(" ,.;:")
+        )
+        if reference is None:
+            continue
+        preceding = " ".join(lines[:index])
+        heading = index == 0 and not CITATION_PREFIX.search(preceding)
+        references.append(
+            NormReference(
+                raw=f"{lines[index]} {lines[index + 1]}",
+                identity=reference.identity,
+                heading=heading,
+            )
+        )
+    return references
+
+
+def _explicit_expected_annex_blocks(
+    page: ScopePage, expected: NormIdentity
+) -> list[ScopeBlock]:
+    annex_blocks: list[ScopeBlock] = []
+    for block in page.blocks:
+        compact = " ".join(line.strip() for line in block.text.splitlines())
+        if not ANNEX_HEADING_PATTERN.match(compact):
+            continue
+        references = extract_norm_references(compact)
+        references.extend(_split_references_in_block(block.text))
+        if any(
+            _same_identity(reference.identity, expected) for reference in references
+        ):
+            annex_blocks.append(block)
+    return annex_blocks
+
+
 def _citation_linked_to_previous(
     ordered: list[ScopeBlock], index: int, page: ScopePage, detected_columns: int
 ) -> bool:
@@ -403,7 +456,19 @@ def _collect_heading_occurrences(
             consumed.add(index + 1)
             continue
 
-        for reference in extract_norm_references(block.text):
+        references = extract_norm_references(block.text)
+        references.extend(_split_references_in_block(block.text))
+        seen_references: set[tuple[str, int, int, str | None]] = set()
+        for reference in references:
+            identity_key = (
+                reference.identity.type_code,
+                reference.identity.number,
+                reference.identity.year,
+                reference.identity.sector,
+            )
+            if identity_key in seen_references:
+                continue
+            seen_references.add(identity_key)
             if not reference.heading or _citation_linked_to_previous(
                 ordered, index, page, detected_columns
             ):
@@ -658,32 +723,53 @@ def audit_page_scope(
             reference.heading and not _same_identity(reference.identity, expected)
             for reference in refs
         )
-        table_position = (
-            _column_index(table.bbox, page, detected_columns),
-            table.bbox[1],
-        )
+        table_position = _reading_position(table.bbox, page, detected_columns)
         above_expected_start = (
             expected_start_position is not None
-            and table_position < expected_start_position
+            and table_position[:2] < expected_start_position
         )
-        follows_foreign_heading = any(
-            heading_block.bbox[3] <= table.bbox[1]
-            and min(heading_block.bbox[2], table.bbox[2])
-            > max(heading_block.bbox[0], table.bbox[0])
-            for heading_block in [
-                occurrence.blocks[-1] for occurrence in foreign_headings
-            ]
-            + [block for block, _ in foreign_ministries]
+        disposition_markers = [
+            (
+                _reading_position(occurrence.blocks[-1].bbox, page, detected_columns),
+                _same_identity(occurrence.reference.identity, expected),
+            )
+            for occurrence in heading_occurrences
+        ]
+        disposition_markers.extend(
+            (
+                _reading_position(block.bbox, page, detected_columns),
+                False,
+            )
+            for block, _ in foreign_ministries
+        )
+        preceding_markers = [
+            marker for marker in disposition_markers if marker[0] <= table_position
+        ]
+        active_marker = max(
+            preceding_markers, default=None, key=lambda marker: marker[0]
+        )
+        follows_foreign_heading = active_marker is not None and not active_marker[1]
+        spans_columns = (
+            detected_columns == 2
+            and table.bbox[0] < page.width * 0.47
+            and table.bbox[2] > page.width * 0.53
         )
         fragmented = _fragmented_cells(table)
-        suspicious = has_foreign_ref or above_expected_start or follows_foreign_heading
+        suspicious = (
+            has_foreign_ref
+            or above_expected_start
+            or follows_foreign_heading
+            or spans_columns
+        )
         reasons: list[str] = []
         if has_foreign_ref:
             reasons.append("foreign_norm_heading_in_table")
         if above_expected_start:
             reasons.append("table_precedes_expected_document_start")
         if follows_foreign_heading:
-            reasons.append("table_follows_foreign_heading")
+            reasons.append("table_belongs_to_active_foreign_disposition")
+        if spans_columns:
+            reasons.append("table_reading_order_ambiguous_across_columns")
         if fragmented:
             reasons.append("possible_fragmented_cells")
             signals.append(
@@ -727,20 +813,17 @@ def audit_page_scope(
             )
         )
 
-    explicit_expected_annex = any(
-        "ANEXO" in normalize(block.text)
-        and any(
-            _same_identity(ref.identity, expected)
-            for ref in extract_norm_references(block.text)
-        )
-        for block in page.blocks
-    )
+    explicit_expected_annex_blocks = _explicit_expected_annex_blocks(page, expected)
+    explicit_expected_annex = bool(explicit_expected_annex_blocks)
     if explicit_expected_annex:
         signals.append(
             _signal(
                 "annex_explicitly_bound_to_expected_norm",
                 "El encabezado del anexo identifica expresamente la norma esperada.",
                 "high",
+                _normalized_bbox(
+                    explicit_expected_annex_blocks[0].bbox, page.width, page.height
+                ),
             )
         )
 

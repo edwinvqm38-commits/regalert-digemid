@@ -332,6 +332,212 @@ class DocumentScopeAuditTest(unittest.TestCase):
             "foreign_norm_heading", {signal["code"] for signal in result["signals"]}
         )
 
+    def test_heading_split_inside_one_block_detects_new_disposition(self):
+        page = ScopePage(
+            page_number=2,
+            width=600,
+            height=800,
+            blocks=[
+                block("Artículo 4.- Final de la norma anterior.", 30, 30, 570, 100),
+                block(
+                    "RESOLUCIÓN MINISTERIAL\nN° 889-2024/MINSA",
+                    80,
+                    300,
+                    520,
+                    350,
+                ),
+            ],
+        )
+
+        result = audit_page_scope(
+            page,
+            parse_document_key("RM-888-2024-MINSA"),
+            previous_expected_evidence=True,
+        )
+
+        self.assertEqual(result["classification"], MIXED_PENDING_REVIEW)
+        foreign = [
+            signal
+            for signal in result["signals"]
+            if signal["code"] == "foreign_norm_heading"
+        ]
+        self.assertEqual(len(foreign), 1)
+        self.assertIn("889-2024/MINSA", foreign[0]["evidence"])
+        self.assertEqual(foreign[0]["bbox"]["y0"], 0.375)
+
+    def test_split_legal_citation_inside_block_is_not_a_heading(self):
+        page = ScopePage(
+            page_number=1,
+            width=600,
+            height=800,
+            blocks=[
+                block(
+                    "De conformidad con\nDECRETO SUPREMO\nN° 101-2024-SA,",
+                    30,
+                    100,
+                    570,
+                    180,
+                )
+            ],
+        )
+
+        result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+        self.assertEqual(result["classification"], SCOPE_UNKNOWN)
+        self.assertNotIn(
+            "expected_norm_heading", {signal["code"] for signal in result["signals"]}
+        )
+        self.assertIn(
+            "legal_citations_not_treated_as_foreign",
+            {signal["code"] for signal in result["signals"]},
+        )
+
+    def test_split_heading_does_not_join_distant_or_cross_column_blocks(self):
+        cases = {
+            "distant": [
+                block("DECRETO SUPREMO", 30, 30, 270, 50),
+                block("N° 101-2024-SA", 30, 200, 270, 220),
+            ],
+            "cross_column": [
+                block("DECRETO SUPREMO", 30, 30, 270, 50),
+                block("N° 101-2024-SA", 330, 52, 570, 72),
+            ],
+        }
+
+        for name, blocks in cases.items():
+            with self.subTest(name=name):
+                page = ScopePage(
+                    page_number=1,
+                    width=600,
+                    height=800,
+                    blocks=blocks,
+                )
+                result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+                self.assertEqual(result["classification"], SCOPE_UNKNOWN)
+                self.assertNotIn(
+                    "expected_norm_heading",
+                    {signal["code"] for signal in result["signals"]},
+                )
+
+    def test_table_uses_latest_active_disposition(self):
+        page = ScopePage(
+            page_number=1,
+            width=600,
+            height=800,
+            blocks=[
+                block("DECRETO SUPREMO N° 100-2024-SA", 30, 30, 570, 65),
+                block("Contenido de DS-100", 30, 80, 570, 150),
+                block("DECRETO SUPREMO N° 101-2024-SA", 30, 300, 570, 335),
+                block("Contenido de DS-101", 30, 350, 570, 420),
+            ],
+            tables=[
+                table(180, 260, [["Tabla", "DS-100"]]),
+                table(450, 600, [["Tabla", "DS-101"]]),
+            ],
+        )
+
+        result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+        self.assertEqual(result["classification"], MIXED_PENDING_REVIEW)
+        self.assertTrue(result["tables"][0]["suspicious_scope"])
+        self.assertIn(
+            "table_belongs_to_active_foreign_disposition",
+            result["tables"][0]["reasons"],
+        )
+        self.assertFalse(result["tables"][1]["suspicious_scope"])
+
+    def test_two_column_table_follows_heading_in_its_reading_flow(self):
+        page = ScopePage(
+            page_number=1,
+            width=600,
+            height=800,
+            blocks=[
+                block("DECRETO SUPREMO N° 100-2024-SA", 20, 30, 280, 65),
+                block("Contenido anterior", 20, 80, 280, 180),
+                block("DECRETO SUPREMO N° 101-2024-SA", 320, 30, 580, 65),
+                block("Contenido objetivo", 320, 80, 580, 180),
+            ],
+            tables=[
+                table(220, 350, [["Tabla", "objetivo"]], x0=320, x1=580),
+            ],
+        )
+
+        result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+        self.assertEqual(result["layout"]["detected_columns"], 2)
+        self.assertFalse(result["tables"][0]["suspicious_scope"])
+
+    def test_table_crossing_columns_remains_pending_when_order_is_ambiguous(self):
+        page = ScopePage(
+            page_number=1,
+            width=600,
+            height=800,
+            blocks=[
+                block("DECRETO SUPREMO N° 101-2024-SA", 20, 30, 280, 65),
+                block("Artículo 1.- Columna izquierda.", 20, 80, 280, 180),
+                block("Artículo 2.- Columna derecha.", 320, 80, 580, 180),
+            ],
+            tables=[table(220, 400, [["Tabla", "ancha"]], x0=20, x1=580)],
+        )
+
+        result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+        self.assertEqual(result["classification"], MIXED_PENDING_REVIEW)
+        self.assertIn(
+            "table_reading_order_ambiguous_across_columns",
+            result["tables"][0]["reasons"],
+        )
+
+    def test_annex_citation_does_not_verify_page_scope(self):
+        page = ScopePage(
+            page_number=4,
+            width=600,
+            height=800,
+            blocks=[
+                block(
+                    "De conformidad con el Anexo del Decreto Supremo\n"
+                    "N° 101-2024-SA, se establecen los siguientes requisitos.",
+                    30,
+                    100,
+                    570,
+                    200,
+                )
+            ],
+        )
+
+        result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+        self.assertEqual(result["classification"], SCOPE_UNKNOWN)
+        self.assertNotIn(
+            "annex_explicitly_bound_to_expected_norm",
+            {signal["code"] for signal in result["signals"]},
+        )
+
+    def test_true_annex_heading_still_verifies_expected_scope(self):
+        page = ScopePage(
+            page_number=4,
+            width=600,
+            height=800,
+            blocks=[
+                block(
+                    "ANEXO N° 2 DEL DECRETO SUPREMO N° 101-2024-SA\nRequisitos",
+                    30,
+                    30,
+                    570,
+                    100,
+                )
+            ],
+        )
+
+        result = audit("DS-101-2024-SA", [page])["pages"][0]
+
+        self.assertEqual(result["classification"], SCOPE_VERIFIED)
+        self.assertIn(
+            "annex_explicitly_bound_to_expected_norm",
+            {signal["code"] for signal in result["signals"]},
+        )
+
     def test_minister_signatures_do_not_change_document_scope(self):
         pages = [
             ScopePage(

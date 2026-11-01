@@ -66,14 +66,28 @@ columna derecha de una tabla anterior situada arriba en otra columna.
 PyMuPDF puede separar un encabezado en dos bloques, por ejemplo
 `RESOLUCIÓN MINISTERIAL` y `N° 260-2019/MINSA`. El auditor une únicamente
 bloques próximos, alineados en la misma columna y con la forma
-tipo-normativo + identificador. También tolera el carácter sustituto `�` que
-aparece en algunos PDF en lugar de `Ó`, `°` o `º`. La evidencia y las
-coordenadas originales no se reescriben.
+tipo-normativo + identificador. La misma composición se aplica cuando ambas
+partes están en líneas consecutivas de un único bloque PyMuPDF. No se unen
+líneas alejadas ni bloques de columnas distintas. También tolera el carácter
+sustituto `�` que aparece en algunos PDF en lugar de `Ó`, `°` o `º`. La
+evidencia y las coordenadas originales no se reescriben.
 
 Una referencia que sigue inmediatamente a conectores como `aprobado por`,
 `modificado por` o `regulado por` se conserva como cita jurídica. No inicia
 otra disposición por el solo hecho de aparecer centrada o en una línea
 separada.
+
+Para cada tabla se determina la última disposición activa antes de su posición
+en el flujo de lectura. Un encabezado ajeno anterior no contamina una tabla si
+un encabezado posterior de la norma objetivo ya tomó el flujo. Las tablas que
+preceden el inicio objetivo siguen marcadas y una tabla que cruza columnas se
+mantiene pendiente por ambigüedad espacial.
+
+La palabra `ANEXO` no verifica por sí sola la pertenencia. La vinculación
+explícita exige que el bloque tenga forma de encabezado de anexo y que allí se
+identifique la norma esperada. Frases como “De conformidad con el Anexo del
+Decreto Supremo...” permanecen como citas; sin encabezado propio ni continuidad
+física demostrada, la página queda `scope_unknown`.
 
 ### Continuidad física
 

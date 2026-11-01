@@ -1,46 +1,173 @@
-name: Set Telegram Webhook
+name: Prepare Telegram Webhook
 
 on:
+  workflow_call:
+    secrets:
+      SUPABASE_ACCESS_TOKEN:
+        required: true
+      SUPABASE_PROJECT_REF:
+        required: true
+      TELEGRAM_BOT_TOKEN:
+        required: true
+      TELEGRAM_WEBHOOK_SECRET:
+        required: true
   workflow_dispatch:
 
 jobs:
-  set-webhook:
+  prepare-webhook:
     runs-on: ubuntu-latest
-
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
 
     steps:
-      - name: Validar secrets requeridos
+      - name: Validar credenciales y secreto
+        id: validate
+        shell: bash
         run: |
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "Falta el secret TELEGRAM_BOT_TOKEN"
+          set -euo pipefail
+          for variable in SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET; do
+            if [ -z "${!variable:-}" ]; then
+              echo "Falta el secret requerido: ${variable}"
+              exit 1
+            fi
+          done
+
+          if [[ ! "$TELEGRAM_WEBHOOK_SECRET" =~ ^[A-Za-z0-9_-]{1,256}$ ]]; then
+            echo "TELEGRAM_WEBHOOK_SECRET no cumple el formato admitido por Telegram"
             exit 1
           fi
 
-          if [ -z "$SUPABASE_PROJECT_REF" ]; then
-            echo "Falta el secret SUPABASE_PROJECT_REF"
+          if [[ ! "$SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]; then
+            echo "SUPABASE_PROJECT_REF no tiene el formato esperado"
             exit 1
           fi
 
-          echo "Secrets requeridos encontrados."
+      - name: Configurar Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
 
-      - name: Configurar webhook de Telegram
+      - name: Sincronizar secreto en Supabase
+        id: sync-secret
+        shell: bash
         run: |
+          set -euo pipefail
+          supabase secrets set \
+            "TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET}" \
+            --project-ref "$SUPABASE_PROJECT_REF"
+          echo "Secreto de webhook sincronizado en Supabase."
+
+      - name: Capturar configuración actual del webhook
+        id: snapshot-webhook
+        shell: bash
+        run: |
+          set -euo pipefail
           WEBHOOK_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-bot"
+          TELEGRAM_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
 
-          echo "Configurando webhook hacia:"
-          echo "$WEBHOOK_URL"
+          curl --fail-with-body --silent --show-error \
+            "${TELEGRAM_API}/getWebhookInfo" > "$RUNNER_TEMP/webhook-before.json"
+          jq -e '.ok == true and (.result | type == "object")' \
+            "$RUNNER_TEMP/webhook-before.json" > /dev/null
 
-          RESPONSE=$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
-            -H "Content-Type: application/json" \
-            -d "{\"url\":\"${WEBHOOK_URL}\"}")
+          jq -c '.result.allowed_updates // null' \
+            "$RUNNER_TEMP/webhook-before.json" > "$RUNNER_TEMP/allowed-updates-before.json"
+          jq -c '.result.max_connections // null' \
+            "$RUNNER_TEMP/webhook-before.json" > "$RUNNER_TEMP/max-connections-before.json"
+          jq -r '.result.last_error_date // 0' \
+            "$RUNNER_TEMP/webhook-before.json" > "$RUNNER_TEMP/last-error-date-before.txt"
+          jq -r '.result.pending_update_count // 0' \
+            "$RUNNER_TEMP/webhook-before.json" > "$RUNNER_TEMP/pending-before.txt"
 
-          echo "$RESPONSE"
+          printf '%s' "$WEBHOOK_URL" > "$RUNNER_TEMP/expected-webhook-url.txt"
+          echo "Configuración anterior capturada sin exponer credenciales."
 
-          echo "$RESPONSE" | grep -q '"ok":true'
-
-      - name: Verificar webhook configurado
+      - name: Configurar webhook autenticado
+        id: configure-webhook
+        shell: bash
         run: |
-          curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+          set -euo pipefail
+          WEBHOOK_URL=$(cat "$RUNNER_TEMP/expected-webhook-url.txt")
+          ALLOWED_UPDATES=$(cat "$RUNNER_TEMP/allowed-updates-before.json")
+          MAX_CONNECTIONS=$(cat "$RUNNER_TEMP/max-connections-before.json")
+          date +%s > "$RUNNER_TEMP/webhook-operation-started-at.txt"
+
+          PAYLOAD=$(jq -n \
+            --arg url "$WEBHOOK_URL" \
+            --arg secret_token "$TELEGRAM_WEBHOOK_SECRET" \
+            --argjson allowed_updates "$ALLOWED_UPDATES" \
+            --argjson max_connections "$MAX_CONNECTIONS" \
+            '{url: $url, secret_token: $secret_token}
+             + (if $allowed_updates == null then {} else {allowed_updates: $allowed_updates} end)
+             + (if $max_connections == null then {} else {max_connections: $max_connections} end)')
+
+          if jq -e 'has("drop_pending_updates")' <<< "$PAYLOAD" > /dev/null; then
+            echo "El payload no puede descartar updates pendientes."
+            exit 1
+          fi
+
+          curl --fail-with-body --silent --show-error -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" > "$RUNNER_TEMP/set-webhook-response.json"
+
+          jq -e '.ok == true and .result == true' \
+            "$RUNNER_TEMP/set-webhook-response.json" > /dev/null
+          echo "Telegram aceptó la configuración autenticada."
+
+      - name: Verificar configuración efectiva
+        id: verify-webhook
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_URL=$(cat "$RUNNER_TEMP/expected-webhook-url.txt")
+          EXPECTED_ALLOWED=$(cat "$RUNNER_TEMP/allowed-updates-before.json")
+          EXPECTED_MAX=$(cat "$RUNNER_TEMP/max-connections-before.json")
+          BEFORE_ERROR_DATE=$(cat "$RUNNER_TEMP/last-error-date-before.txt")
+          OPERATION_STARTED_AT=$(cat "$RUNNER_TEMP/webhook-operation-started-at.txt")
+
+          curl --fail-with-body --silent --show-error \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo" \
+            > "$RUNNER_TEMP/webhook-after.json"
+          jq -e '.ok == true and (.result | type == "object")' \
+            "$RUNNER_TEMP/webhook-after.json" > /dev/null
+
+          ACTUAL_URL=$(jq -r '.result.url // ""' "$RUNNER_TEMP/webhook-after.json")
+          if [ "$ACTUAL_URL" != "$EXPECTED_URL" ]; then
+            echo "La URL efectiva del webhook no coincide con la esperada."
+            exit 1
+          fi
+
+          if [ "$EXPECTED_ALLOWED" != "null" ]; then
+            ACTUAL_ALLOWED=$(jq -c '.result.allowed_updates // null' "$RUNNER_TEMP/webhook-after.json")
+            if [ "$ACTUAL_ALLOWED" != "$EXPECTED_ALLOWED" ]; then
+              echo "allowed_updates cambió durante la configuración."
+              exit 1
+            fi
+          fi
+
+          if [ "$EXPECTED_MAX" != "null" ]; then
+            ACTUAL_MAX=$(jq -c '.result.max_connections // null' "$RUNNER_TEMP/webhook-after.json")
+            if [ "$ACTUAL_MAX" != "$EXPECTED_MAX" ]; then
+              echo "max_connections cambió durante la configuración."
+              exit 1
+            fi
+          fi
+
+          AFTER_ERROR_DATE=$(jq -r '.result.last_error_date // 0' "$RUNNER_TEMP/webhook-after.json")
+          if [ "$AFTER_ERROR_DATE" -gt "$BEFORE_ERROR_DATE" ] && \
+             [ "$AFTER_ERROR_DATE" -ge "$OPERATION_STARTED_AT" ]; then
+            echo "Telegram registró un error nuevo durante esta operación."
+            jq -r '.result.last_error_message // "Error sin detalle"' \
+              "$RUNNER_TEMP/webhook-after.json"
+            exit 1
+          fi
+
+          BEFORE_PENDING=$(cat "$RUNNER_TEMP/pending-before.txt")
+          AFTER_PENDING=$(jq -r '.result.pending_update_count // 0' "$RUNNER_TEMP/webhook-after.json")
+          echo "Webhook verificado; updates pendientes antes=${BEFORE_PENDING}, después=${AFTER_PENDING}."
+          echo "No se envió drop_pending_updates; una reducción puede deberse a entregas normales."
+          echo "El secret_token no es visible en getWebhookInfo y se valida con una entrega real posterior."

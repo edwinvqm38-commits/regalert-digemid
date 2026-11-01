@@ -458,6 +458,7 @@ def _collect_heading_occurrences(
 
         references = extract_norm_references(block.text)
         references.extend(_split_references_in_block(block.text))
+        references.sort(key=lambda reference: reference.heading, reverse=True)
         seen_references: set[tuple[str, int, int, str | None]] = set()
         for reference in references:
             identity_key = (

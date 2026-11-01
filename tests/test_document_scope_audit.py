@@ -365,6 +365,146 @@ class DocumentScopeAuditTest(unittest.TestCase):
         self.assertIn("889-2024/MINSA", foreign[0]["evidence"])
         self.assertEqual(foreign[0]["bbox"]["y0"], 0.375)
 
+    def test_split_heading_wins_over_same_identity_citation_in_block(self):
+        page = ScopePage(
+            page_number=2,
+            width=600,
+            height=800,
+            blocks=[
+                block(
+                    "RESOLUCIÓN MINISTERIAL\n"
+                    "N° 889-2024/MINSA\n"
+                    "De conformidad con la Resolución Ministerial "
+                    "N° 889-2024/MINSA, corresponde resolver.",
+                    80,
+                    300,
+                    520,
+                    400,
+                ),
+            ],
+        )
+
+        result = audit_page_scope(
+            page,
+            parse_document_key("RM-888-2024-MINSA"),
+            previous_expected_evidence=True,
+        )
+
+        self.assertEqual(result["classification"], MIXED_PENDING_REVIEW)
+        foreign = [
+            signal
+            for signal in result["signals"]
+            if signal["code"] == "foreign_norm_heading"
+        ]
+        self.assertEqual(len(foreign), 1)
+        self.assertIn("889-2024/MINSA", foreign[0]["evidence"])
+
+    def test_heading_priority_generalizes_across_supported_norm_types(self):
+        synthetic_cases = (
+            {
+                "name": "ministerial_resolution_split",
+                "heading": "RESOLUCIÓN MINISTERIAL\nN° 271-2091/MINSA",
+                "citation": "Resolución Ministerial N° 271-2091/MINSA",
+                "article": "la",
+                "expected": "RM-270-2091-MINSA",
+                "evidence": "271-2091/MINSA",
+            },
+            {
+                "name": "supreme_decree_complete",
+                "heading": "DECRETO SUPREMO N° 314-2092-SA",
+                "citation": "Decreto Supremo N° 314-2092-SA",
+                "article": "el",
+                "expected": "DS-313-2092-SA",
+                "evidence": "314-2092-SA",
+            },
+            {
+                "name": "supreme_resolution_split",
+                "heading": "RESOLUCIÓN SUPREMA\nN° 431-2093-RE",
+                "citation": "Resolución Suprema N° 431-2093-RE",
+                "article": "la",
+                "expected": "RS-430-2093-RE",
+                "evidence": "431-2093-RE",
+            },
+            {
+                "name": "legislative_decree_split",
+                "heading": "DECRETO LEGISLATIVO\nN° 517-2094",
+                "citation": "Decreto Legislativo N° 517-2094",
+                "article": "el",
+                "expected": "DL-516-2094",
+                "evidence": "517-2094",
+            },
+            {
+                "name": "law_complete",
+                "heading": "LEY N° 624-2095",
+                "citation": "Ley N° 624-2095",
+                "article": "la",
+                "expected": "LEY-623-2095",
+                "evidence": "624-2095",
+            },
+        )
+
+        for case in synthetic_cases:
+            with self.subTest(case=case["name"], evidence="heading_and_citations"):
+                page = ScopePage(
+                    page_number=2,
+                    width=600,
+                    height=800,
+                    blocks=[
+                        block(
+                            f"{case['heading']}\n"
+                            f"De conformidad con {case['article']} "
+                            f"{case['citation']}, se dispone.\n"
+                            f"Según {case['article']} {case['citation']}, "
+                            "corresponde continuar.",
+                            60,
+                            200,
+                            540,
+                            360,
+                        )
+                    ],
+                )
+
+                result = audit_page_scope(
+                    page,
+                    parse_document_key(case["expected"]),
+                    previous_expected_evidence=True,
+                )
+
+                self.assertEqual(result["classification"], MIXED_PENDING_REVIEW)
+                foreign = [
+                    signal
+                    for signal in result["signals"]
+                    if signal["code"] == "foreign_norm_heading"
+                ]
+                self.assertEqual(len(foreign), 1)
+                self.assertIn(case["evidence"], foreign[0]["evidence"])
+
+            with self.subTest(case=case["name"], evidence="isolated_citation"):
+                citation_only = ScopePage(
+                    page_number=1,
+                    width=600,
+                    height=800,
+                    blocks=[
+                        block(
+                            f"De conformidad con {case['article']} "
+                            f"{case['citation']}, "
+                            "se establecen requisitos.",
+                            30,
+                            100,
+                            570,
+                            180,
+                        )
+                    ],
+                )
+
+                result = audit(case["expected"], [citation_only])["pages"][0]
+
+                self.assertEqual(result["classification"], SCOPE_UNKNOWN)
+                self.assertNotIn(
+                    "expected_norm_heading",
+                    {signal["code"] for signal in result["signals"]},
+                )
+
     def test_split_legal_citation_inside_block_is_not_a_heading(self):
         page = ScopePage(
             page_number=1,

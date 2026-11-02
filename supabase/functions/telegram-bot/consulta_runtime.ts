@@ -8,6 +8,10 @@ import {
   type ConsultaIntent,
   deterministicConsultaIntent,
 } from "./consulta_intent.ts";
+import {
+  detectConsultaTheme,
+  thematicGuidance,
+} from "./consulta_retrieval.ts";
 
 // Orquestación exclusiva de Telegram, sin credenciales ni arranque del webhook.
 // Las reglas siguen teniendo una sola autoridad: consulta_safety/revision_safety.
@@ -87,7 +91,11 @@ function consolidateOcrWarning(
 
 export type ConsultaRuntimeDependencies = {
   interpretIntent?: (question: string) => Promise<ConsultaIntent>;
-  searchChunks: (question: string) => Promise<ConsultaChunk[]>;
+  searchChunks: (
+    query: string,
+    intent?: ConsultaIntent,
+    originalQuestion?: string,
+  ) => Promise<ConsultaChunk[]>;
   suggestSimilarAlerts: (question: string) => Promise<any[]>;
   resolverNormaPuntual: (
     question: string,
@@ -249,6 +257,8 @@ export async function answerConsultaRuntime(
     sources: [],
   });
   if (resolution.status === "not_found") return notFound();
+  const theme = detectConsultaTheme(question) ??
+    detectConsultaTheme(intent.search_query ?? "");
   let exact = null;
   if (resolution.status === "resolved") {
     try {
@@ -265,7 +275,11 @@ export async function answerConsultaRuntime(
   const chunks = (
     (exact
       ? exact.paginas.map((page) => deps.paginaComoChunk(page, exact.norma))
-      : await deps.searchChunks(intent.search_query || question)).map(normalizeConsultaEvidence)
+      : await deps.searchChunks(
+        intent.search_query || question,
+        intent,
+        question,
+      )).map(normalizeConsultaEvidence)
   ).filter(hasRecoverableText);
 
   if (!chunks.length) {
@@ -280,6 +294,15 @@ export async function answerConsultaRuntime(
           documentKey: exact.norma.document_key,
           url: exact.norma.pdf_url ?? exact.norma.source_url ?? "",
         }],
+      };
+    }
+    // Una ausencia en las páginas extraídas no demuestra que no exista una
+    // norma temática: hay documentos registrados aún sin texto consultable.
+    if (theme) {
+      return {
+        answer:
+          "La recuperación no encontró evidencia documental temática suficiente entre las páginas actualmente extraídas. Esto no permite concluir que no exista normativa aplicable; revisa también los documentos oficiales pendientes de extracción.",
+        sources: [],
       };
     }
     const suggestions = await deps.suggestSimilarAlerts(question);
@@ -309,7 +332,8 @@ export async function answerConsultaRuntime(
         ? exact.relaciones
         : [];
       const context = deps.buildContext(safeChunks);
-      const userContent = `Contexto:\n\n${context}${
+      const thematicCriteria = theme ? `${thematicGuidance(theme)}\n\n` : "";
+      const userContent = `${thematicCriteria}Contexto:\n\n${context}${
         exact ? deps.formatRelacionesComoContexto(relations, exact.norma) : ""
       }\n\nPregunta: ${question}`;
       let answer: string | undefined;

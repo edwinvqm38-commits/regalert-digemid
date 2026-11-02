@@ -34,6 +34,7 @@ jobs:
 
       - name: Ejecutar pruebas de seguridad y runtime con Deno
         run: |
+          deno test supabase/functions/telegram-bot/consulta_routing.test.ts
           deno test supabase/functions/telegram-bot/consulta_safety.test.ts
           deno test supabase/functions/telegram-bot/revision_safety.test.ts
           deno test supabase/functions/telegram-bot/consulta_runtime_safety.test.ts

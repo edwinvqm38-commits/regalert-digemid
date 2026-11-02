@@ -9,6 +9,7 @@ import {
 
 const themes: [string, string][] = [
   ["¿Hay nueva normativa que afecte los POES de una botica?", "poes"],
+  ["¿Qué norma exige un POE en la farmacia?", "poes"],
   ["Normas sobre almacenamiento de medicamentos", "almacenamiento"],
   ["Obligaciones de dispensación en farmacias", "dispensacion"],
   ["Cambios de farmacovigilancia", "farmacovigilancia"],
@@ -67,7 +68,24 @@ Deno.test("ranking descarta coincidencias OR sin ancla y prioriza boticas", () =
   ]);
 });
 
-Deno.test("clasifica proyectos sin convertirlos en disposiciones aprobadas", () => {
+Deno.test("ranking POE prioriza plurales del ámbito farmacéutico", () => {
+  const ranked = rankThematicEvidence("poes", [
+    {
+      document_key: "GENERAL-POE",
+      page_number: 1,
+      text_content: "Se requiere un POE para las actividades internas.",
+    },
+    {
+      document_key: "BOTICAS-POE",
+      page_number: 1,
+      text_content:
+        "Las boticas y farmacias mantienen un POE en sus establecimientos farmacéuticos.",
+    },
+  ]);
+  assert.equal(ranked[0].document_key, "BOTICAS-POE");
+});
+
+Deno.test("palabras de estado son indicios de página, no estado documental", () => {
   const [project, approved] = rankThematicEvidence("farmacovigilancia", [
     {
       document_key: "PROYECTO",
@@ -83,22 +101,44 @@ Deno.test("clasifica proyectos sin convertirlos en disposiciones aprobadas", () 
   ]).sort((a, b) =>
     String(b.document_key).localeCompare(String(a.document_key))
   );
-  assert.equal(project.normative_status, "project");
-  assert.equal(approved.normative_status, "approved");
+  assert.equal(project.document_status_indicator, "project_language");
+  assert.equal(approved.document_status_indicator, "approval_language");
+  for (const evidence of [project, approved]) {
+    assert.equal(evidence.normative_status, undefined);
+    const metadata = formatEvidenceChronology(evidence) ?? "";
+    assert.match(metadata, /Indicio textual:/);
+    assert.match(metadata, /Estado documental: por verificar/);
+    assert.doesNotMatch(metadata, /Estado: (proyecto|aprobada)/);
+  }
 });
 
 Deno.test("fecha ausente no se sustituye por fecha de registro", () => {
+  const thematic = { thematic_relevance: 20 };
   assert.match(
-    formatEvidenceChronology({ published_date: null }),
+    formatEvidenceChronology({ ...thematic, published_date: null }) ?? "",
     /sin fecha oficial/,
   );
   assert.doesNotMatch(
-    formatEvidenceChronology({ published_date: null }),
+    formatEvidenceChronology({ ...thematic, published_date: null }) ?? "",
     /registro/,
   );
   assert.match(
-    formatEvidenceChronology({ published_date: "2026-10-20" }),
+    formatEvidenceChronology({
+      ...thematic,
+      published_date: "2026-10-20",
+    }) ?? "",
     /Fecha oficial: 2026-10-20/,
+  );
+});
+
+Deno.test("alerta general no recibe clasificación de estado normativo", () => {
+  assert.equal(
+    formatEvidenceChronology({
+      document_key: "ALERTA-42-2026",
+      published_date: "2026-10-20",
+      text_content: "Se aprueba una medida sanitaria.",
+    }),
+    null,
   );
 });
 

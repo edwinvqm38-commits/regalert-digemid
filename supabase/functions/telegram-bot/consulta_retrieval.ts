@@ -21,6 +21,7 @@ export type ThematicRetrievalPlan = {
 
 const THEME_QUERIES: Record<ConsultaTheme, string[]> = {
   poes: [
+    "POE",
     "POES",
     "procedimientos operativos estandarizados",
     "POES establecimiento farmacéutico botica farmacia",
@@ -54,7 +55,7 @@ function candidateText(candidate: RetrievalCandidate): string {
 export function detectConsultaTheme(value: string): ConsultaTheme | null {
   const text = plain(value);
   if (
-    /\bpoes\b/.test(text) ||
+    /\bpoes?\b/.test(text) ||
     /\bprocedimientos?\s+operativos?\s+estandarizados?\b/.test(text)
   ) return "poes";
   if (/\bfarmacovigilancia\b/.test(text)) return "farmacovigilancia";
@@ -83,21 +84,23 @@ export function buildThematicRetrievalPlan(
 
 function hasThemeAnchor(theme: ConsultaTheme, text: string): boolean {
   if (theme === "poes") {
-    return /\bpoes\b/.test(text) ||
+    return /\bpoes?\b/.test(text) ||
       /\bprocedimientos?\s+operativos?\s+estandarizados?\b/.test(text);
   }
   return new RegExp(`\\b${theme}\\b`).test(text);
 }
 
-function statusFromEvidence(text: string): "project" | "approved" | "unknown" {
+function statusIndicatorFromPage(
+  text: string,
+): "project_language" | "approval_language" | "none" {
   if (
     /\b(proyecto(?:s)?|propuesta(?:s)?|prepublica(?:cion|do|da)|consulta publica)\b/
       .test(text)
-  ) return "project";
+  ) return "project_language";
   if (
     /\b(aprueba|aprobar|aprobado|aprobada|decreta|se resuelve)\b/.test(text)
-  ) return "approved";
-  return "unknown";
+  ) return "approval_language";
+  return "none";
 }
 
 function relevanceScore(
@@ -109,7 +112,7 @@ function relevanceScore(
 
   let score = 20;
   if (theme === "poes") {
-    if (/\bpoes\b/.test(text)) score += 12;
+    if (/\bpoes?\b/.test(text)) score += 12;
     if (/\bprocedimientos?\s+operativos?\s+estandarizados?\b/.test(text)) {
       score += 16;
     }
@@ -119,7 +122,9 @@ function relevanceScore(
     score += Math.min(occurrences, 4) * 4;
   }
 
-  if (/\b(botica|farmacia|establecimiento farmac[eé]utico)\b/.test(text)) {
+  if (
+    /\b(boticas?|farmacias?|establecimientos? farmac[eé]uticos?)\b/.test(text)
+  ) {
     score += 10;
   }
   if (
@@ -130,7 +135,7 @@ function relevanceScore(
     score += 5;
   }
   if (/\b(digemid|minsa|autoridad sanitaria)\b/.test(text)) score += 2;
-  if (statusFromEvidence(text) === "project") score -= 1;
+  if (statusIndicatorFromPage(text) === "project_language") score -= 1;
   return score;
 }
 
@@ -170,7 +175,9 @@ export function rankThematicEvidence(
     selected.push({
       ...evidence,
       thematic_relevance: candidate._score,
-      normative_status: statusFromEvidence(candidateText(candidate)),
+      document_status_indicator: statusIndicatorFromPage(
+        candidateText(candidate),
+      ),
     });
     perDocument.set(documentKey, count + 1);
     if (selected.length >= Math.max(1, Math.min(limit, 4))) break;
@@ -180,27 +187,30 @@ export function rankThematicEvidence(
 
 export function thematicGuidance(theme: ConsultaTheme): string {
   const definition = theme === "poes"
-    ? "POES significa Procedimientos Operativos Estandarizados; no lo reduzcas a procedimientos de saneamiento."
+    ? "POE significa Procedimiento Operativo Estandarizado y POES significa Procedimientos Operativos Estandarizados; no lo reduzcas a procedimientos de saneamiento."
     : `El tema recuperado es ${theme}.`;
   return `CRITERIOS DE COBERTURA TEMATICA:\n- ${definition}\n` +
     "- La recuperación cubre únicamente páginas ya extraídas de la biblioteca; no es un inventario normativo exhaustivo.\n" +
     "- No afirmes que una norma aplica a una botica solo por mencionar el tema: explica el alcance que conste en la evidencia.\n" +
-    "- Distingue proyectos/propuestas de disposiciones aprobadas según la etiqueta de cada bloque.\n" +
+    "- Las etiquetas de proyecto o aprobación son solo indicios textuales de una página; no confirman el estado del documento completo. Indica siempre estado documental por verificar.\n" +
     "- Usa solo la fecha oficial de publicación indicada. Si falta, di que no está confirmada.\n" +
     "- No califiques una disposición como nueva, reciente o la última si la evidencia recuperada no permite una comparación cronológica suficiente.";
 }
 
 export function formatEvidenceChronology(
   candidate: RetrievalCandidate,
-): string {
+): string | null {
+  // Solo los resultados que pasaron por la recuperación temática reciben
+  // estos indicios. Las alertas y búsquedas generales conservan su contexto.
+  if (typeof candidate.thematic_relevance !== "number") return null;
   const date = typeof candidate.published_date === "string" &&
       /^\d{4}-\d{2}-\d{2}$/.test(candidate.published_date)
     ? candidate.published_date
     : "sin fecha oficial de publicación confirmada";
-  const status = candidate.normative_status === "project"
-    ? "proyecto/propuesta"
-    : candidate.normative_status === "approved"
-    ? "disposición aparentemente aprobada según el texto"
-    : "estado normativo no determinado por la evidencia";
-  return `Fecha oficial: ${date}. Estado: ${status}.`;
+  const indicator = candidate.document_status_indicator === "project_language"
+    ? "la página contiene lenguaje de proyecto/propuesta"
+    : candidate.document_status_indicator === "approval_language"
+    ? "la página contiene lenguaje de aprobación"
+    : "la página no aporta un indicio textual suficiente";
+  return `Fecha oficial: ${date}. Indicio textual: ${indicator}. Estado documental: por verificar.`;
 }

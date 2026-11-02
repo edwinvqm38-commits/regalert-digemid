@@ -91,12 +91,13 @@ se te entregan como contexto.
 Reglas estrictas:
 - No inventes datos que no esten en el contexto.
 - Si el contexto no contiene la respuesta, dilo explicitamente en vez de adivinar.
-- POES significa Procedimientos Operativos Estandarizados. Nunca asumas que se \
+- POE/POES significa Procedimiento(s) Operativo(s) Estandarizado(s). Nunca asumas que se \
 refiere unicamente a procedimientos de saneamiento.
 - No afirmes que una norma aplica a una botica solo por mencionar un tema. \
 Sustenta el alcance con el texto recuperado.
-- Distingue proyectos o propuestas de disposiciones aprobadas cuando el bloque \
-lo indique. No presentes un proyecto como norma vigente.
+- Las palabras de proyecto o aprobacion en una pagina son solo indicios \
+textuales. No clasifiques por ellas el documento completo; indica estado \
+documental por verificar.
 - Una fecha de registro no equivale a fecha oficial de publicacion. Si el bloque \
 no tiene fecha oficial confirmada, dilo y no califiques la norma como reciente.
 - Cita siempre el documento (numero de alerta o codigo de norma), su fecha y la \
@@ -3387,10 +3388,14 @@ function advertenciasDelBloque(chunk: any): string[] {
 function buildConsultaContext(chunks: any[]) {
   return chunks
     .map((chunk) => {
-      const bloque = [
-        `[Documento ${chunk.document_key} - ${chunk.title} - pagina ${chunk.page_number}]`,
-        formatEvidenceChronology(chunk),
-      ];
+      const thematicMetadata = formatEvidenceChronology(chunk);
+      const headerParts = ["Documento " + chunk.document_key, chunk.title];
+      if (!thematicMetadata) {
+        headerParts.push(chunk.published_date ?? "sin fecha");
+      }
+      headerParts.push(`pagina ${chunk.page_number}`);
+      const bloque = [`[${headerParts.join(" - ")}]`];
+      if (thematicMetadata) bloque.push(thematicMetadata);
 
       const advertencias = advertenciasDelBloque(chunk);
       if (advertencias.length) {

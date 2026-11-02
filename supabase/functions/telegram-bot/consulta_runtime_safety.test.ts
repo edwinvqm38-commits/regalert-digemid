@@ -447,6 +447,23 @@ Deno.test("sin evidencia devuelve sugerencias sin IA", async () => {
   assert.equal(calls.deepseek + calls.gemini, 0);
 });
 
+Deno.test("tema sin páginas informa cobertura insuficiente y no niega normativa", async () => {
+  const { deps, calls } = setup([]);
+  let suggestions = 0;
+  deps.suggestSimilarAlerts = async () => {
+    suggestions++;
+    return [];
+  };
+  const result = await answerConsultaRuntime(
+    "¿Hay normativa que afecte los POES de una botica?",
+    deps,
+  );
+  assert.match(result.answer, /evidencia documental temática suficiente/);
+  assert.match(result.answer, /no permite concluir que no exista normativa aplicable/);
+  assert.equal(suggestions, 0);
+  assert.equal(calls.deepseek + calls.gemini, 0);
+});
+
 Deno.test("norma exacta con filas pending_ocr vacías no invoca IA", async () => {
   const placeholder: ConsultaChunk = {
     ...safe,

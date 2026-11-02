@@ -43,7 +43,7 @@ Deno.test("consulta POES recorre intención, recuperación, seguridad, DeepSeek 
     detail_url: "https://example.invalid/norma-oficial.pdf",
     has_tables: false,
     text_content:
-      "El documento contiene disposiciones relacionadas con procedimientos de saneamiento.",
+      "La botica debe documentar sus Procedimientos Operativos Estandarizados (POES).",
   };
   const calls = { intent: 0, search: 0, deepseek: 0 };
   const deps: ConsultaRuntimeDependencies = {
@@ -78,7 +78,9 @@ Deno.test("consulta POES recorre intención, recuperación, seguridad, DeepSeek 
     construirReporte: () => "",
     deepseek: async (prompt) => {
       calls.deepseek++;
-      assert.match(prompt, /procedimientos de saneamiento/);
+      assert.match(prompt, /Procedimientos Operativos Estandarizados/);
+      assert.match(prompt, /no lo reduzcas a procedimientos de saneamiento/);
+      assert.match(prompt, /La botica debe documentar sus Procedimientos/);
       assert.match(prompt, /Pregunta: ¿Hay nueva normativa para los POES\?/);
       return "Respuesta sustentada en la evidencia recuperada.";
     },

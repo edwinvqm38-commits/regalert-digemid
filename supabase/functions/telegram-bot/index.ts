@@ -5,6 +5,11 @@ import { resolverNormaPuntual } from "./norm_identity.ts";
 import { type ConsultaIntent, interpretConsultaIntent } from "./consulta_intent.ts";
 import { esConsultaDeUltimaNormativa } from "./consulta_routing.ts";
 import {
+  buildThematicRetrievalPlan,
+  formatEvidenceChronology,
+  rankThematicEvidence,
+} from "./consulta_retrieval.ts";
+import {
   MAX_ARTICLE_EVIDENCE_PAGES,
   articleSearchIdentifiers,
   selectArticleEvidence,
@@ -86,6 +91,14 @@ se te entregan como contexto.
 Reglas estrictas:
 - No inventes datos que no esten en el contexto.
 - Si el contexto no contiene la respuesta, dilo explicitamente en vez de adivinar.
+- POES significa Procedimientos Operativos Estandarizados. Nunca asumas que se \
+refiere unicamente a procedimientos de saneamiento.
+- No afirmes que una norma aplica a una botica solo por mencionar un tema. \
+Sustenta el alcance con el texto recuperado.
+- Distingue proyectos o propuestas de disposiciones aprobadas cuando el bloque \
+lo indique. No presentes un proyecto como norma vigente.
+- Una fecha de registro no equivale a fecha oficial de publicacion. Si el bloque \
+no tiene fecha oficial confirmada, dilo y no califiques la norma como reciente.
 - Cita siempre el documento (numero de alerta o codigo de norma), su fecha y la \
 PAGINA donde esta el sustento. Cada bloque del contexto indica su document_key y \
 su numero de pagina.
@@ -3213,7 +3226,29 @@ function formatNormativaList(title: string, rows: any[]) {
   return lines.join("\n");
 }
 
-async function searchConsultaChunks(query: string, limit = 4) {
+async function searchConsultaChunks(
+  query: string,
+  _intent?: ConsultaIntent,
+  originalQuestion = query,
+  limit = 4,
+) {
+  const plan = buildThematicRetrievalPlan(originalQuestion, query);
+  if (plan) {
+    const results = await Promise.all(plan.queries.map(async (thematicQuery) => {
+      const { data, error } = await supabase.rpc("buscar_paginas_texto", {
+        query_texto: thematicQuery,
+        limite: plan.candidateLimit,
+      });
+      if (error) throw error;
+      return data ?? [];
+    }));
+    const selected = rankThematicEvidence(
+      plan.theme,
+      results.flat(),
+      Math.min(limit, plan.evidenceLimit),
+    );
+    return await hydrateConsultaChunks(supabase, selected);
+  }
   // buscar_paginas_texto filtra palabras vacias y ordena por relevancia -
   // websearch_to_tsquery exige que aparezcan todas las palabras, lo cual
   // falla con preguntas en lenguaje natural (ej. "que paso con...").
@@ -3353,7 +3388,8 @@ function buildConsultaContext(chunks: any[]) {
   return chunks
     .map((chunk) => {
       const bloque = [
-        `[Documento ${chunk.document_key} - ${chunk.title} - ${chunk.published_date} - pagina ${chunk.page_number}]`,
+        `[Documento ${chunk.document_key} - ${chunk.title} - pagina ${chunk.page_number}]`,
+        formatEvidenceChronology(chunk),
       ];
 
       const advertencias = advertenciasDelBloque(chunk);

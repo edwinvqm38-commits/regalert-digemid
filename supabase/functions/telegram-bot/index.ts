@@ -27,6 +27,7 @@ import {
   type RevisionReason,
 } from "./revision_queue.ts";
 import { parseSupabaseStorageObjectUrl } from "./revision_pdf_source.ts";
+import { createTelegramWebhookHandler } from "./webhook_handler.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 
@@ -36,6 +37,7 @@ const SUPABASE_SERVICE_ROLE_KEY =
   "";
 
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
+const TELEGRAM_WEBHOOK_SECRET = Deno.env.get("TELEGRAM_WEBHOOK_SECRET") ?? "";
 const BOT_ALLOWED_CHAT_IDS = Deno.env.get("BOT_ALLOWED_CHAT_IDS") ?? "";
 const DEEPSEEK_API_KEY = Deno.env.get("DEEPSEEK_API_KEY") ?? "";
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY") ?? "";
@@ -6664,27 +6666,31 @@ async function handleCallback(update: TelegramUpdate) {
   );
 }
 
-// Fire-and-forget: refresca el menu "/" de Telegram en cada arranque en frio
-// de la funcion (cada deploy), sin bloquear ni poder tumbar el bot si falla.
-actualizarComandosTelegram().catch((error) =>
-  console.error("SET_MY_COMMANDS_ERROR:", error)
-);
+let telegramCommandsRefreshStarted = false;
 
-serve(async (req: Request) => {
-  try {
-    if (req.method !== "POST") {
-      return new Response("RegAlert DIGEMID Telegram Bot OK", {
-        status: 200,
-      });
-    }
+// Fire-and-forget una sola vez por instancia, pero solo después de autenticar
+// la primera entrega del webhook.
+function refreshTelegramCommandsOnce(): void {
+  if (telegramCommandsRefreshStarted) return;
+  telegramCommandsRefreshStarted = true;
+  actualizarComandosTelegram().catch((error) =>
+    console.error("SET_MY_COMMANDS_ERROR:", error)
+  );
+}
 
+const telegramWebhookHandler = createTelegramWebhookHandler({
+  webhookSecret: TELEGRAM_WEBHOOK_SECRET,
+  handleAuthenticatedPost: async (authenticatedRequest) => {
+      try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !TELEGRAM_BOT_TOKEN) {
       return new Response("Faltan variables de entorno", {
         status: 500,
       });
     }
 
-    const update = (await req.json()) as TelegramUpdate;
+    refreshTelegramCommandsOnce();
+
+    const update = (await authenticatedRequest.json()) as TelegramUpdate;
     console.log("UPDATE_RECIBIDO:", JSON.stringify(update));
     console.log("TIENE_MESSAGE:", Boolean(update.message));
     console.log("TIENE_CALLBACK:", Boolean(update.callback_query));
@@ -6865,11 +6871,14 @@ serve(async (req: Request) => {
     await handleCommand(chatId, userId, text, chatType, esUsuarioNuevo);
 
     return new Response("OK", { status: 200 });
-  } catch (error) {
-    console.error(error);
+      } catch (error) {
+        console.error(error);
 
-    return new Response("Error interno", {
-      status: 500,
-    });
-  }
+        return new Response("Error interno", {
+          status: 500,
+        });
+      }
+  },
 });
+
+serve(telegramWebhookHandler);

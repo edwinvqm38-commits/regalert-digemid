@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { answerConsultaRuntime, hydrateConsultaChunks } from "./consulta_runtime.ts";
 import { resolverNormaPuntual } from "./norm_identity.ts";
 import { type ConsultaIntent, interpretConsultaIntent } from "./consulta_intent.ts";
+import { esConsultaDeUltimaNormativa } from "./consulta_routing.ts";
 import {
   MAX_ARTICLE_EVIDENCE_PAGES,
   articleSearchIdentifiers,
@@ -3291,22 +3292,6 @@ function esConsultaDeConteoAlertas(pregunta: string): boolean {
   const mencionaAlertas = /alerta/.test(texto);
 
   return preguntaCuantas && mencionaAlertas && ambitoTemporalAlertas(pregunta) !== null;
-}
-
-// Mismo problema que esConsultaDeUltimasAlertas, pero para leyes, decretos,
-// resoluciones y normativa en general: "cual es la ultima norma que subio
-// DIGEMID" tampoco lo responde una busqueda de texto (no es un dato escrito
-// en ningun documento), asi que se intercepta aqui y se resuelve con
-// getLatestNormativa(), igual que /normas.
-function esConsultaDeUltimaNormativa(pregunta: string): boolean {
-  const texto = normalizarTexto(pregunta);
-
-  const mencionaNormativa = /\b(norma|normativa|ley|decreto|resolucion)\b/.test(texto);
-  const pideRecencia = /\b(ultima|ultimas|ultimo|ultimos|reciente|recientes|nueva|nuevas|nuevo|nuevos)\b/.test(
-    texto,
-  );
-
-  return mencionaNormativa && pideRecencia;
 }
 
 const UMBRAL_CONTEXTO_BAJA_CALIDAD = 0.5;

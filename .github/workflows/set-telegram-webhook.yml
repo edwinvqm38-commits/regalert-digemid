@@ -57,7 +57,7 @@ jobs:
           set -euo pipefail
           supabase secrets set \
             "TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET}" \
-            --project-ref "$SUPABASE_PROJECT_REF"
+            --project-ref "$SUPABASE_PROJECT_REF" --yes
           echo "Secreto de webhook sincronizado en Supabase."
 
       - name: Capturar configuración actual del webhook

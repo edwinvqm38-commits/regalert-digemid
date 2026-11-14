@@ -28,8 +28,8 @@ PLANES_TEXTO = (
 )
 
 PLANES_TEXTO_PRUEBA = (
-    "👋 ¿Te acuerdas de RegAlert DIGEMID? Tu prueba gratuita ya terminó, así que "
-    "las alertas automáticas y las consultas con IA están pausadas hasta que "
+    "👋 ¿Te acuerdas de RegAlert DIGEMID? Tu prueba de consultas con IA ya terminó. "
+    "Tus alertas siguen llegando gratis; la IA queda pausada hasta que "
     "actives un plan.\n\n"
     "• <b>Básico</b> — S/29/mes (30 consultas/día)\n"
     "• <b>Consultoría</b> — S/79/mes (100 consultas/día)\n"

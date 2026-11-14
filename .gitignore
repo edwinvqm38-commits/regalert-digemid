@@ -27,3 +27,6 @@ supabase/.temp/tmp/
 .tessdata/
 exports/
 reports/
+
+# Copia temporal de pruebas del bot (la genera scripts/preparar_funcion_ensayo.sh)
+supabase/functions/telegram-bot-ensayo/

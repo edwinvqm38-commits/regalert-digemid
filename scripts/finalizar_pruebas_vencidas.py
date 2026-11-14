@@ -1,7 +1,9 @@
-"""Cierra las pruebas gratuitas que llegaron a su limite de tiempo (14 dias)
-sin haber recibido las 3 alertas que tambien terminan la prueba (eso lo
-maneja agents.agent_notify.NotifyAgent.send_individual_alerts en cada corrida
-del monitor). Corre una vez al dia via GitHub Actions.
+"""Cierra las pruebas de consultas con IA que cumplieron su plazo (5 dias).
+
+Las alertas de DIGEMID son gratis y no se cortan: este script solo marca la
+prueba como finalizada y avisa que la IA pasa a los planes de pago. El bot
+tambien verifica el plazo en cada consulta, asi que este cierre es solo el
+aviso y el registro. Corre una vez al dia via GitHub Actions.
 """
 
 import logging
@@ -20,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 USUARIOS_TABLE = "digemid_bot_usuarios"
-PRUEBA_LIMITE_DIAS = 14
+PRUEBA_LIMITE_DIAS = 5
 
 NIVEL_PRECIOS = {"basico": 29, "consultoria": 79, "empresarial": 199}
 
@@ -40,8 +42,9 @@ def get_supabase():
 
 def mensaje_prueba_terminada() -> tuple[str, dict]:
     texto = (
-        "⏰ <b>Tu prueba gratuita de RegAlert DIGEMID terminó.</b>\n\n"
-        "¿Quieres seguir recibiendo alertas automáticas y consultas con IA? Elige un plan:"
+        "⏰ <b>Terminó tu prueba de consultas con IA de RegAlert DIGEMID.</b>\n\n"
+        "Tus alertas de DIGEMID siguen llegando gratis. "
+        "Si quieres seguir usando la IA, elige un plan:"
     )
     botones = {
         "inline_keyboard": [

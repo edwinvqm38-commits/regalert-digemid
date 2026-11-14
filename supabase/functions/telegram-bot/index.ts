@@ -4587,7 +4587,7 @@ async function enviarMiPerfil(chatId: string): Promise<void> {
   } else if (usuario.prueba_estado === "finalizada") {
     lines.push("Tu prueba de IA ya terminó. Tus alertas siguen llegando gratis. Escribe /suscribirme para ver los planes de IA.");
   } else {
-    lines.push("Todavía no tienes plan ni prueba gratuita activa. Escribe /suscribirme para empezar.");
+    lines.push(`Tus alertas de DIGEMID son gratis. Escribe /suscribirme para probar la IA: ${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días.`);
   }
 
   return await sendMessage(chatId, lines.join("\n"));

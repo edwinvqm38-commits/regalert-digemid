@@ -1,0 +1,128 @@
+name: Probar bot de ensayo
+
+# Despliega UNA COPIA del bot (funcion telegram-bot-ensayo) en el mismo proyecto
+# de Supabase y conecta un bot de Telegram de PRUEBA. No toca la funcion
+# telegram-bot real ni el webhook del bot real.
+#
+# Necesita dos GitHub Secrets nuevos (Settings > Secrets and variables > Actions):
+#   TELEGRAM_BOT_TOKEN_ENSAYO       token del bot de prueba (de BotFather)
+#   TELEGRAM_WEBHOOK_SECRET_ENSAYO  clave inventada: letras, numeros, - y _
+# y reutiliza SUPABASE_ACCESS_TOKEN y SUPABASE_PROJECT_REF que ya tienes.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/alertas-gratis-prueba-ia
+    paths:
+      - ".github/workflows/probar-bot-ensayo.yml"
+      - "scripts/preparar_funcion_ensayo.sh"
+      - "supabase/functions/telegram-bot/**"
+      - "supabase/functions/_shared/**"
+
+concurrency:
+  group: probar-bot-ensayo
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  desplegar-ensayo:
+    # Solo desde la rama de pruebas: nunca desde main.
+    if: github.ref == 'refs/heads/feature/alertas-gratis-prueba-ia'
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      TELEGRAM_BOT_TOKEN_ENSAYO: ${{ secrets.TELEGRAM_BOT_TOKEN_ENSAYO }}
+      TELEGRAM_WEBHOOK_SECRET_ENSAYO: ${{ secrets.TELEGRAM_WEBHOOK_SECRET_ENSAYO }}
+      # Solo para comprobar que el token de ensayo NO es el del bot real.
+      TELEGRAM_BOT_TOKEN_REAL: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Validar secrets
+        id: validar
+        shell: bash
+        run: |
+          set -euo pipefail
+          faltan=""
+          for variable in SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF TELEGRAM_BOT_TOKEN_ENSAYO TELEGRAM_WEBHOOK_SECRET_ENSAYO; do
+            if [ -z "${!variable:-}" ]; then
+              faltan="${faltan} ${variable}"
+            fi
+          done
+
+          if [ -n "$faltan" ]; then
+            echo "::notice title=Faltan secrets::Agrega estos GitHub Secrets y vuelve a ejecutar el flujo:${faltan}"
+            echo "listo=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ ! "$TELEGRAM_WEBHOOK_SECRET_ENSAYO" =~ ^[A-Za-z0-9_-]{1,256}$ ]]; then
+            echo "::error::TELEGRAM_WEBHOOK_SECRET_ENSAYO solo admite letras, numeros, guion y guion bajo."
+            exit 1
+          fi
+
+          if [[ ! "$SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]; then
+            echo "::error::SUPABASE_PROJECT_REF no tiene el formato esperado."
+            exit 1
+          fi
+
+          if [ -n "${TELEGRAM_BOT_TOKEN_REAL:-}" ] && [ "$TELEGRAM_BOT_TOKEN_ENSAYO" = "$TELEGRAM_BOT_TOKEN_REAL" ]; then
+            echo "::error::TELEGRAM_BOT_TOKEN_ENSAYO es igual al token del bot real. Usa el token de un bot de prueba distinto."
+            exit 1
+          fi
+
+          echo "listo=true" >> "$GITHUB_OUTPUT"
+
+      - name: Configurar Supabase CLI
+        if: steps.validar.outputs.listo == 'true'
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Preparar copia de ensayo
+        if: steps.validar.outputs.listo == 'true'
+        shell: bash
+        run: bash scripts/preparar_funcion_ensayo.sh > /dev/null
+
+      - name: Cargar secrets de ensayo en Supabase
+        if: steps.validar.outputs.listo == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase secrets set \
+            "TELEGRAM_BOT_TOKEN_ENSAYO=${TELEGRAM_BOT_TOKEN_ENSAYO}" \
+            "TELEGRAM_WEBHOOK_SECRET_ENSAYO=${TELEGRAM_WEBHOOK_SECRET_ENSAYO}" \
+            --project-ref "$SUPABASE_PROJECT_REF"
+          echo "Secrets de ensayo cargados. No se cargaron claves de IA."
+
+      - name: Desplegar telegram-bot-ensayo
+        if: steps.validar.outputs.listo == 'true'
+        run: supabase functions deploy telegram-bot-ensayo --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt
+
+      - name: Conectar el bot de prueba
+        if: steps.validar.outputs.listo == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          WEBHOOK_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/functions/v1/telegram-bot-ensayo"
+          PAYLOAD=$(jq -n \
+            --arg url "$WEBHOOK_URL" \
+            --arg secret_token "$TELEGRAM_WEBHOOK_SECRET_ENSAYO" \
+            '{url: $url, secret_token: $secret_token}')
+
+          curl --fail-with-body --silent --show-error -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_ENSAYO}/setWebhook" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" > "$RUNNER_TEMP/respuesta.json"
+          jq -e '.ok == true and .result == true' "$RUNNER_TEMP/respuesta.json" > /dev/null
+
+          curl --fail-with-body --silent --show-error \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN_ENSAYO}/getWebhookInfo" > "$RUNNER_TEMP/info.json"
+          jq -e --arg url "$WEBHOOK_URL" '.ok == true and .result.url == $url' "$RUNNER_TEMP/info.json" > /dev/null
+          echo "Bot de prueba conectado a telegram-bot-ensayo. Escribele /start."

@@ -10,7 +10,8 @@ from agents.agent_utils import es_titulo_generico
 logger = logging.getLogger(__name__)
 
 PRUEBA_LIMITE_ALERTAS = 3
-PRUEBA_LIMITE_DIAS = 14
+PRUEBA_LIMITE_DIAS = 5
+TAMANO_PAGINA_USUARIOS = 1000
 
 NIVEL_PRECIOS = {"basico": 29, "consultoria": 79, "empresarial": 199}
 
@@ -321,44 +322,46 @@ class NotifyAgent:
         }
         return texto, botones
 
-    def send_individual_alerts(self, new_docs: list[dict]) -> None:
-        """Envia las alertas nuevas por privado a suscriptores pagos y usuarios en prueba activa.
+    def _usuarios_alertas_gratis(self) -> set[str]:
+        """chat_id de todas las personas registradas en el bot.
 
-        Los usuarios en prueba activa suman a su contador; al llegar a
-        PRUEBA_LIMITE_ALERTAS se cierra la prueba y se les ofrece suscribirse.
+        Las alertas de DIGEMID son gratis para todo el que se registra (por el
+        enlace del bot o por invitacion): ya no dependen de una prueba ni de un
+        plan. Solo las consultas con IA tienen prueba y planes.
+        """
+        chat_ids: set[str] = set()
+        desde = 0
+        while True:
+            filas = (
+                self.supabase.table("digemid_bot_usuarios")
+                .select("telegram_chat_id")
+                .range(desde, desde + TAMANO_PAGINA_USUARIOS - 1)
+                .execute()
+                .data
+                or []
+            )
+            chat_ids.update(str(f["telegram_chat_id"]) for f in filas if f.get("telegram_chat_id"))
+            if len(filas) < TAMANO_PAGINA_USUARIOS:
+                break
+            desde += TAMANO_PAGINA_USUARIOS
+        return chat_ids
+
+    def send_individual_alerts(self, new_docs: list[dict]) -> None:
+        """Envia las alertas nuevas por privado a todas las personas registradas en el bot.
+
+        Es gratis: no cuenta contra ninguna prueba ni se corta cuando la
+        prueba de IA termina.
         """
         if not new_docs or self.supabase is None:
             return
 
         texto = self.build_message(new_docs)
-        pagados, en_prueba = self._usuarios_elegibles_dm()
+        destinatarios = self._usuarios_alertas_gratis()
 
-        for chat_id in pagados:
+        for chat_id in destinatarios:
             self._send_to_chat(chat_id, texto)
 
-        for chat_id, alertas_previas in en_prueba.items():
-            self._send_to_chat(chat_id, texto)
-
-            nuevas_alertas = alertas_previas + len(new_docs)
-            actualizacion = {"prueba_alertas_enviadas": nuevas_alertas}
-
-            if nuevas_alertas >= PRUEBA_LIMITE_ALERTAS:
-                actualizacion["prueba_estado"] = "finalizada"
-
-            self.supabase.table("digemid_bot_usuarios").update(actualizacion).eq(
-                "telegram_chat_id", chat_id
-            ).execute()
-
-            if nuevas_alertas >= PRUEBA_LIMITE_ALERTAS:
-                texto_fin, botones_fin = self._mensaje_prueba_terminada()
-                self._send_to_chat(chat_id, texto_fin, botones_fin)
-
-        logger.info(
-            "DM enviados: %s pagados, %s en prueba (de los cuales %s finalizaron su prueba).",
-            len(pagados),
-            len(en_prueba),
-            sum(1 for cid, prev in en_prueba.items() if prev + len(new_docs) >= PRUEBA_LIMITE_ALERTAS),
-        )
+        logger.info("DM de alertas enviados a %s personas registradas.", len(destinatarios))
 
     def send_normativa_individual(self, new_docs: list[dict]) -> None:
         """DM de normativa nueva a los mismos suscriptores que las alertas.

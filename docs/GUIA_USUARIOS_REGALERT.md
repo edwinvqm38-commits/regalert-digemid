@@ -37,13 +37,14 @@ Al escribir `/start` — ya sea desde la landing page o buscando el bot
 directo en Telegram — el bot te muestra una **prueba gratuita** y los 3
 planes pagados para que elijas:
 
-- La prueba dura hasta **14 días o 3 alertas** (lo que ocurra primero).
-- Durante la prueba recibes las alertas nuevas directo a tu chat y tienes
-  5 consultas de IA al día.
-- Al terminar la prueba sin suscribirte, **las alertas automáticas y las
-  consultas con IA se pausan** hasta que elijas un plan — el bot te avisa
-  y te muestra las opciones apenas se cumple el límite. También te llega
-  algún recordatorio ocasional (no todos los días) por si quieres retomarlo.
+- Las **alertas de DIGEMID son gratis** para todos los usuarios registrados y no se cortan nunca.
+- La prueba gratuita es solo para las **consultas con IA**: **2 consultas al día durante 5 días**.
+- Recibes las alertas nuevas directo a tu chat desde que te registras, con o
+  sin prueba.
+- Al terminar la prueba sin suscribirte, **las consultas con IA se pausan**
+  hasta que elijas un plan — el bot te avisa y te muestra las opciones. Las
+  alertas automáticas siguen llegando gratis. También te llega algún
+  recordatorio ocasional (no todos los días) por si quieres retomarlo.
 - La prueba gratuita solo se puede usar **una vez por cuenta**: si ya la
   usaste, el botón de "Empezar prueba gratuita" te muestra los planes en
   vez de reiniciarla.
@@ -65,7 +66,7 @@ Planes y precios:
 
 | Plan | Precio | Consultas IA/día |
 |---|---|---|
-| Prueba gratuita | S/0 | 5 (hasta 14 días o 3 alertas) |
+| Prueba gratuita de IA | S/0 | 2 por día durante 5 días |
 | Básico | S/29/mes | 30 |
 | Consultoría | S/79/mes | 100 |
 | Empresarial | S/199/mes | Sin límite |
@@ -83,7 +84,7 @@ día siguiente. Las alertas automáticas no tienen límite mientras tu prueba
 o plan estén activos.
 
 **¿Qué pasa cuando termina mi prueba gratuita?**
-Las alertas y consultas se pausan hasta que elijas un plan con
+Las consultas con IA se pausan (las alertas siguen gratis) hasta que elijas un plan con
 `/suscribirme`. No se pierde nada de lo que ya usaste — solo se detiene el
 servicio hasta que te suscribas.
 

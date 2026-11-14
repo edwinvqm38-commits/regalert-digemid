@@ -59,6 +59,12 @@ const NIVEL_LIMITES_DIARIOS: Record<string, number | null> = {
   empresarial: null,
 };
 
+// Prueba gratuita de consultas con IA: 2 por dia durante 5 dias desde que la
+// persona la inicia. Las alertas de DIGEMID NO dependen de esta prueba: son
+// gratis para todo el que se registra en el bot.
+const PRUEBA_IA_DIAS = 5;
+const PRUEBA_IA_CONSULTAS_DIA = 2;
+
 const LIMITE_DIARIO_GLOBAL = 300;
 
 // Duracion maxima (segundos) de nota de voz por plan: una consulta hablada
@@ -433,15 +439,16 @@ function trialKeyboard(nivelInteres?: string) {
 
 const TRIAL_TEXTO =
   "🎉 <b>¡Bienvenido a RegAlert DIGEMID!</b>\n\n" +
-  "Para usar el bot necesitas elegir una opción:\n" +
-  "✅ Alertas de DIGEMID directo a tu Telegram (no solo cuando preguntas)\n" +
-  "✅ Hasta 5 consultas con IA al día, citando la norma exacta\n\n" +
-  "La <b>prueba gratuita</b> dura hasta <b>14 días o 3 alertas</b>, lo que llegue primero.\n\n" +
-  "O, si ya sabes que quieres suscribirte, elige tu plan abajo:";
+  "✅ <b>Las alertas de DIGEMID son gratis:</b> te llegan a este chat apenas se publican, y puedes ver las últimas con /ultimas.\n\n" +
+  "🤖 <b>Consultas con IA</b> (citan la norma exacta): prueba gratis con " +
+  `<b>${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días</b>. ` +
+  "Después sigues recibiendo las alertas gratis, y la IA queda en los planes de pago.\n\n" +
+  "Elige una opción:";
 
 const ACCESO_REQUERIDO_TEXTO =
-  "🔒 <b>Necesitas una prueba gratuita activa o un plan para usar esto.</b>\n\n" +
-  "La prueba gratuita dura <b>14 días o 3 alertas</b>, lo que llegue primero. Elige una opción:";
+  "🔒 <b>Las consultas con IA necesitan una prueba activa o un plan.</b>\n\n" +
+  `La prueba gratuita dura <b>${PRUEBA_IA_DIAS} días con ${PRUEBA_IA_CONSULTAS_DIA} consultas al día</b>. ` +
+  "Tus alertas de DIGEMID siguen llegando gratis. Elige una opción:";
 
 const PLANES_TEXTO_CORTO =
   "• <b>Básico</b> S/29 — 30 consultas/día\n• <b>Consultoría</b> S/79 — 100/día\n• <b>Empresarial</b> S/199 — sin límite";
@@ -3621,27 +3628,46 @@ async function getNivelUsuario(chatId: string): Promise<string> {
 type EstadoAcceso = {
   legado: boolean;
   pruebaEstado: string | null;
+  pruebaVigente: boolean; // prueba activa y dentro de sus PRUEBA_IA_DIAS
   nivelPagado: string | null; // nivel real si tiene una suscripcion pagada activa
 };
 
 async function getEstadoAcceso(chatId: string): Promise<EstadoAcceso> {
   const { data: usuario } = await supabase
     .from("digemid_bot_usuarios")
-    .select("plan_gratis_legado, prueba_estado")
+    .select("plan_gratis_legado, prueba_estado, prueba_inicio")
     .eq("telegram_chat_id", chatId)
     .maybeSingle();
 
   const nivel = await getNivelUsuario(chatId);
 
+  // El vencimiento por tiempo se verifica aqui mismo, sin esperar al proceso
+  // diario que cierra las pruebas, para que el dia 6 ya no haya consultas.
+  const inicioPrueba = usuario?.prueba_inicio ? Date.parse(usuario.prueba_inicio) : NaN;
+  const dentroDePlazo = Number.isNaN(inicioPrueba) ||
+    Date.now() - inicioPrueba < PRUEBA_IA_DIAS * 24 * 60 * 60 * 1000;
+
   return {
     legado: usuario?.plan_gratis_legado ?? false,
     pruebaEstado: usuario?.prueba_estado ?? null,
+    pruebaVigente: usuario?.prueba_estado === "activa" && dentroDePlazo,
     nivelPagado: nivel !== "gratis" ? nivel : null,
   };
 }
 
 function tieneAccesoActivo(estado: EstadoAcceso): boolean {
-  return estado.legado || estado.pruebaEstado === "activa" || Boolean(estado.nivelPagado);
+  return estado.legado || estado.pruebaVigente || Boolean(estado.nivelPagado);
+}
+
+/** Cupo diario de consultas con IA segun como tiene acceso la persona:
+ * plan pagado = el de su nivel; plan gratis heredado (casos manuales) = el
+ * cupo "gratis" de siempre; prueba nueva = PRUEBA_IA_CONSULTAS_DIA. */
+function limiteDiarioUsuario(chatId: string, estado: EstadoAcceso): number | null {
+  if (estado.nivelPagado) {
+    return NIVEL_LIMITES_DIARIOS[estado.nivelPagado] ?? NIVEL_LIMITES_DIARIOS.gratis;
+  }
+  if (estado.legado || isAdmin(chatId)) return NIVEL_LIMITES_DIARIOS.gratis;
+  return PRUEBA_IA_CONSULTAS_DIA;
 }
 
 async function consultaIaLabel(chatId: string): Promise<string> {
@@ -3651,8 +3677,7 @@ async function consultaIaLabel(chatId: string): Promise<string> {
     return "🤖 Consulta IA (activar prueba)";
   }
 
-  const nivel = estado.nivelPagado ?? "gratis";
-  const limite = NIVEL_LIMITES_DIARIOS[nivel] ?? NIVEL_LIMITES_DIARIOS.gratis;
+  const limite = limiteDiarioUsuario(chatId, estado);
 
   if (limite === null) {
     return "🤖 Consulta IA (sin límite)";
@@ -3862,7 +3887,7 @@ function formatDirectorio(
     lines.push("Nadie por ahora.");
   } else {
     for (const persona of enPruebaActiva) {
-      lines.push(`• <b>${escapeHtml(nombreDirectorio(persona))}</b> — ${persona.prueba_alertas_enviadas ?? 0}/3 alertas usadas`);
+      lines.push(`• <b>${escapeHtml(nombreDirectorio(persona))}</b> — prueba de IA activa`);
     }
   }
   lines.push("");
@@ -4558,9 +4583,9 @@ async function enviarMiPerfil(chatId: string): Promise<void> {
   if (suscripcion) {
     lines.push(`Plan activo: <b>${escapeHtml(NOMBRES_PLAN[suscripcion.nivel] ?? suscripcion.nivel)}</b> hasta ${escapeHtml(suscripcion.fecha_fin ?? "sin fecha")}.`);
   } else if (usuario.prueba_estado === "activa") {
-    lines.push(`Prueba gratuita activa: ${usuario.prueba_alertas_enviadas ?? 0}/3 alertas usadas.`);
+    lines.push(`Prueba de IA activa (${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días). Tus alertas son gratis.`);
   } else if (usuario.prueba_estado === "finalizada") {
-    lines.push("Tu prueba gratuita ya terminó. Escribe /suscribirme para ver los planes.");
+    lines.push("Tu prueba de IA ya terminó. Tus alertas siguen llegando gratis. Escribe /suscribirme para ver los planes de IA.");
   } else {
     lines.push("Todavía no tienes plan ni prueba gratuita activa. Escribe /suscribirme para empezar.");
   }
@@ -4918,13 +4943,10 @@ async function handleCommand(
     return await handleCommand(chatId, userId, "/consulta", chatType, esUsuarioNuevo);
   }
 
-  const COMANDOS_CON_ACCESO_EXACTO = ["/ultimas", "/hoy", "/semana", "/mes", "/recientes"];
-  const requiereAcceso =
-    COMANDOS_CON_ACCESO_EXACTO.includes(trimmed) ||
-    trimmed.startsWith("/detalle") ||
-    trimmed.startsWith("/norma ") ||
-    trimmed.startsWith("/buscar") ||
-    trimmed.startsWith("/consulta");
+  // Ver alertas y normativa (/ultimas, /hoy, /buscar, /detalle...) es gratis
+  // para todos. Solo las consultas con IA, que le cuestan al servicio,
+  // requieren prueba activa o plan.
+  const requiereAcceso = trimmed.startsWith("/consulta");
 
   if (requiereAcceso && !isAdmin(chatId)) {
     const estado = await getEstadoAcceso(chatId);
@@ -6125,8 +6147,10 @@ async function handleCommand(
     }
 
     try {
-      const nivel = await getNivelUsuario(chatId);
-      const limiteUsuario = NIVEL_LIMITES_DIARIOS[nivel] ?? NIVEL_LIMITES_DIARIOS.gratis;
+      const estadoAccesoConsulta = await getEstadoAcceso(chatId);
+      const nivel = estadoAccesoConsulta.nivelPagado ??
+        (estadoAccesoConsulta.legado ? "gratis" : "prueba");
+      const limiteUsuario = limiteDiarioUsuario(chatId, estadoAccesoConsulta);
 
       const [consultasHoyUsuario, consultasHoyGlobal] = await Promise.all([
         limiteUsuario === null ? Promise.resolve(0) : contarConsultasHoy(chatId),
@@ -6159,7 +6183,7 @@ async function handleCommand(
 
         return await sendMessage(
           chatId,
-          `⚠️ Alcanzaste tu límite diario de <b>${limiteUsuario}</b> consultas (plan <b>${escapeHtml(nivel)}</b>).\n\nTus alertas automáticas siguen llegando igual. Si quieres más consultas con IA:\n\n${PLANES_TEXTO_CORTO}`,
+          `⚠️ Alcanzaste tu límite diario de <b>${limiteUsuario}</b> consultas (${nivel === "prueba" ? "prueba gratuita" : `plan <b>${escapeHtml(nivel)}</b>`}).\n\nTus alertas automáticas siguen llegando igual. Si quieres más consultas con IA:\n\n${PLANES_TEXTO_CORTO}`,
           planesKeyboard(),
         );
       }
@@ -6261,15 +6285,6 @@ async function handleCallback(update: TelegramUpdate) {
   }
 
   const callbackUserId = String(callback.from?.id ?? "");
-
-  const requiereAccesoCallback = data === "menu:alertas" || data.startsWith("alertas:");
-
-  if (requiereAccesoCallback && !isAdmin(chatId)) {
-    const estado = await getEstadoAcceso(chatId);
-    if (!tieneAccesoActivo(estado)) {
-      return await sendMessage(chatId, ACCESO_REQUERIDO_TEXTO, trialKeyboard());
-    }
-  }
 
   if (data === "rev:home") {
     if (!isAdmin(chatId)) return;
@@ -6420,8 +6435,8 @@ async function handleCallback(update: TelegramUpdate) {
       // Ya tuvo una prueba (activa o finalizada): no se puede reiniciar.
       return await sendMessage(
         chatId,
-        "⚠️ Ya usaste tu prueba gratuita de RegAlert anteriormente, así que no se puede reiniciar. " +
-          "Si quieres seguir recibiendo alertas y consultas con IA, elige un plan:",
+        "⚠️ Ya usaste tu prueba de IA anteriormente, así que no se puede reiniciar. " +
+          "Tus alertas siguen llegando gratis. Si quieres consultas con IA, elige un plan:",
         planesKeyboard(),
       );
     }
@@ -6437,8 +6452,8 @@ async function handleCallback(update: TelegramUpdate) {
 
     return await sendMessage(
       chatId,
-      "✅ <b>Prueba gratuita activada.</b>\n\nLas próximas alertas de DIGEMID te llegarán aquí automáticamente. " +
-        "Escribe <code>/consulta</code> seguido de tu pregunta cuando quieras (tienes 5 consultas/día).",
+      "✅ <b>Prueba de IA activada.</b>\n\nLas alertas de DIGEMID ya te llegan aquí automáticamente, con o sin prueba. " +
+        `Escribe <code>/consulta</code> seguido de tu pregunta cuando quieras: tienes ${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días.`,
       mainMenu(),
     );
   }

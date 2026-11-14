@@ -39,7 +39,7 @@ Ya no existe una entrada "gratis para siempre" automática. Cualquiera que
 escriba `/start` — desde la landing page (`t.me/<bot>?start=plan_basico`,
 `plan_consultoria`, `plan_empresarial` o `plan_prueba`) o buscando el bot
 directo en Telegram sin ningún link — ve la misma oferta: prueba gratuita
-(14 días o 3 alertas) + los 3 planes pagados, descrita en la guía de
+(5 días, 2 consultas de IA al día; las alertas son gratis para todos) + los 3 planes pagados, descrita en la guía de
 usuarios. Solo se le vuelve a mostrar esa pantalla mientras no haya elegido
 nada; una vez que empieza su prueba o paga un plan, `/start` va directo al
 menú principal.
@@ -187,7 +187,7 @@ configuran directo en Supabase/GitHub.
 |---|---|---|
 | `digemid-monitor.yml` | Revisa DIGEMID y registra alertas nuevas, las manda al grupo y por DM a suscriptores/pruebas activas. | 3 veces al día, días hábiles |
 | `digemid-normativa-text-simple.yml` | Extrae texto de normas con alta fidelidad (OCR incluido) y respalda el PDF. | Diario |
-| `digemid-finalizar-pruebas.yml` | Cierra pruebas gratuitas vencidas por tiempo (14 días). | Diario |
+| `digemid-finalizar-pruebas.yml` | Cierra pruebas de IA vencidas por tiempo (5 días) y avisa los planes. | Diario |
 | `digemid-recordatorio-planes.yml` | Recuerda planes a invitados y a pruebas gratuitas finalizadas que no se han suscrito (cada 2 días, máx. 5 veces cada uno). | Diario |
 | `deploy-supabase-functions.yml` | Despliega el bot (Edge Function) a Supabase. | Manual, después de cada cambio en `supabase/functions/` |
 | `set-telegram-webhook.yml` | Registra el webhook de Telegram apuntando al Edge Function. | Manual, una vez por bot/token |

@@ -9,8 +9,10 @@ prueba. El bot real y su funcion `telegram-bot` no cambian.
 
 - **La base de datos es la misma.** Cualquier usuario que crees al probar queda
   en `digemid_bot_usuarios`. Los comandos de administrador del bot de prueba
-  (`/activar`, `/desactivar`, `/invitar`) actuan sobre usuarios reales, asi que
-  usalos solo con tu propia cuenta.
+  (`/activar`, `/desactivar`, `/invitar`) no estan disponibles en la copia de prueba.
+- **Nadie es administrador en el bot de prueba**: la copia lee `ADMIN_CHAT_IDS_ENSAYO`,
+  que no se define. Asi tu cuenta se comporta como un usuario normal y los
+  comandos de administrador no pueden tocar usuarios reales desde el bot de prueba.
 - **Las claves de IA NO se comparten**: la copia lee `DEEPSEEK_API_KEY_ENSAYO` y
   `GEMINI_API_KEY_ENSAYO`. Si no las defines, el bot de prueba no llama a
   ningun modelo y no genera gasto.

@@ -3,8 +3,9 @@
 # probar cambios en el mismo proyecto de Supabase, sin tocar la funcion real.
 #
 # Los secrets de Supabase son del PROYECTO, no de cada funcion. Por eso la copia
-# lee variables con sufijo _ENSAYO (token del bot, secreto del webhook y claves
-# de IA). Si no defines las claves de IA _ENSAYO, la copia no llama a ningun
+# lee variables con sufijo _ENSAYO (token del bot, secreto del webhook, claves
+# de IA y administradores). Sin ADMIN_CHAT_IDS_ENSAYO nadie es administrador en
+# el bot de prueba, asi que ni siquiera tu cuenta salta los controles de acceso. Si no defines las claves de IA _ENSAYO, la copia no llama a ningun
 # modelo y no genera gasto.
 #
 # Uso (desde la raiz del repositorio):
@@ -24,7 +25,7 @@ fi
 rm -rf "$DESTINO"
 cp -R "$ORIGEN" "$DESTINO"
 
-VARIABLES="TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET DEEPSEEK_API_KEY GEMINI_API_KEY"
+VARIABLES="TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET DEEPSEEK_API_KEY GEMINI_API_KEY ADMIN_CHAT_IDS"
 for variable in $VARIABLES; do
   for archivo in "$DESTINO"/*.ts; do
     sed -i "s/Deno.env.get(\"${variable}\")/Deno.env.get(\"${variable}_ENSAYO\")/g" "$archivo"

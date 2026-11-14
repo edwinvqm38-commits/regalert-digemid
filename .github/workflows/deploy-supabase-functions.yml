@@ -36,7 +36,7 @@ jobs:
           version: latest
 
       - name: Desplegar función whatsapp-bot
-        run: supabase functions deploy whatsapp-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt
+        run: supabase functions deploy whatsapp-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt --yes
 
   prepare-telegram:
     name: Sync secret, configure and verify Telegram
@@ -60,4 +60,4 @@ jobs:
           version: latest
 
       - name: Desplegar función telegram-bot
-        run: supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt
+        run: supabase functions deploy telegram-bot --project-ref "$SUPABASE_PROJECT_REF" --use-api --no-verify-jwt --yes

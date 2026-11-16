@@ -22,11 +22,11 @@ export function esConsultaDeUltimaNormativa(pregunta: string): boolean {
   const remainingTopic = text
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(
-      /\b(cual|cuales|que|es|son|hay|existe|existen|dame|muestra|muestrame|lista|listame|listar|quiero|quisiera|saber|ver)\b/g,
+      /\b(cual|cuales|que|es|son|hay|existe|existen|dame|muestra|muestrame|lista|listame|listar|quiero|quisiera|saber|ver|dice|dicen|ha|han)\b/g,
       " ",
     )
     .replace(
-      /\b(salio|sale|publico|publicada|publicadas|publicado|publicados|emitio|emitida|emitidas|emitido|emitidos|registro|registrada|registradas|registrado|registrados|subio|subida|subidas|subido|subidos)\b/g,
+      /\b(salio|sale|salido|salida|salidas|salidos|salieron|publico|publicaron|publicada|publicadas|publicado|publicados|emitio|emitida|emitidas|emitido|emitidos|registro|registrada|registradas|registrado|registrados|subio|subida|subidas|subido|subidos)\b/g,
       " ",
     )
     .replace(

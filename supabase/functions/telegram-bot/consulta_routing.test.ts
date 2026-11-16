@@ -13,6 +13,8 @@ for (
     "Muéstrame las nuevas normas de DIGEMID",
     "¿Qué resolución reciente publicó DIGEMID?",
     "Dame las 5 últimas leyes, reglamentos y decretos",
+    "¿Qué dice la última norma que ha salido?",
+    "que dice la ultima norma que ha salido?",
   ]
 ) {
   Deno.test(`listado cronológico conserva ruta directa: ${question}`, () => {

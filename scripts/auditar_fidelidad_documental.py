@@ -36,6 +36,7 @@ from fidelidad_legal import (  # noqa: E402
     tokens_sensibles,
     verbos_normativos,
 )
+from secuencia_articulos import analizar_secuencia  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -106,10 +107,22 @@ def auditar(normas: list[dict], paginas: list[dict], verificar_pdf: bool) -> tup
         por_norma.setdefault(p["norma_id"], []).append(p)
 
     filas: list[dict] = []
+    secuencia = {"evaluables": 0, "con_senales": 0, "normas": []}
     for norma in normas:
         pags = sorted(por_norma.get(norma["id"], []), key=lambda x: x.get("page_number") or 0)
         if not pags:
             continue
+
+        # Secuencia de articulos: senal para revision humana, no veredicto.
+        seq = analizar_secuencia([p.get("text_normalized") or p.get("text_raw") or "" for p in pags])
+        if seq.evaluable:
+            secuencia["evaluables"] += 1
+            if seq.requiere_revision:
+                secuencia["con_senales"] += 1
+                secuencia["normas"].append({
+                    "document_key": norma["document_key"],
+                    "senales": [f"pág. {sn.pagina}: {sn.tipo} - {sn.detalle}" for sn in seq.senales],
+                })
 
         almacenadas = len(pags)
         reales = paginas_reales_del_pdf(norma.get("pdf_url")) if verificar_pdf else None
@@ -172,7 +185,9 @@ def auditar(normas: list[dict], paginas: list[dict], verificar_pdf: bool) -> tup
                 "recommended_action": recomendar(estado, dispositiva),
             })
 
-    return filas, resumir(filas)
+    resumen = resumir(filas)
+    resumen["secuencia_articulos"] = secuencia
+    return filas, resumen
 
 
 def recomendar(estado: str, dispositiva: bool) -> str:
@@ -220,10 +235,45 @@ def resumir(filas: list[dict]) -> dict:
     }
 
 
+def texto_resumen_telegram(resumen: dict, max_normas: int = 12) -> str:
+    sec = resumen.get("secuencia_articulos", {})
+    lineas = [
+        "📋 Auditoría de fidelidad (solo lectura)",
+        f"Páginas: {resumen['paginas']} | Normas: {resumen['normas']}",
+        f"Aptas para consulta: {resumen['aptas_para_consulta']} | No aptas: {resumen['no_aptas_para_consulta']}",
+        f"Secuencia de artículos: {sec.get('con_senales', 0)} de {sec.get('evaluables', 0)} normas evaluables con señales",
+    ]
+    for item in sec.get("normas", [])[:max_normas]:
+        lineas.append(f"• {item['document_key']}: {item['senales'][0]}")
+    if len(sec.get("normas", [])) > max_normas:
+        lineas.append(f"… y {len(sec['normas']) - max_normas} más (ver el reporte completo)")
+    lineas.append("Orientativo: cada señal se confirma contra el PDF oficial.")
+    return "\n".join(lineas)[:3900]
+
+
+def enviar_resumen_telegram(resumen: dict) -> bool:
+    import requests
+
+    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        logger.warning("Faltan TELEGRAM_BOT_TOKEN o TELEGRAM_CHAT_ID: no se envia el resumen")
+        return False
+    r = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat, "text": texto_resumen_telegram(resumen)},
+        timeout=20,
+    )
+    if not r.ok:
+        logger.warning("Telegram respondio %s", r.status_code)
+    return r.ok
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", default="docs/reportes")
     parser.add_argument("--desde-json", default=None)
+    parser.add_argument("--avisar-telegram", action="store_true",
+                        help="Envia un resumen al chat admin (TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID)")
     parser.add_argument("--verificar-pdf", action="store_true",
                         help="Descarga cada PDF oficial para contar sus paginas reales")
     args = parser.parse_args()
@@ -249,12 +299,16 @@ def main() -> int:
     print("AUDITORIA DE FIDELIDAD — SOLO LECTURA, NADA MODIFICADO")
     print("=" * 70)
     for clave, valor in resumen.items():
-        if isinstance(valor, dict):
+        if clave == "secuencia_articulos":
+            print(f"\nsecuencia de artículos: {valor['con_senales']} de {valor['evaluables']} normas evaluables con señales")
+        elif isinstance(valor, dict):
             print(f"\n{clave}:")
             for k, v in sorted(valor.items(), key=lambda kv: -kv[1]):
                 print(f"    {v:5d}  {k}")
         else:
             print(f"{clave:32} {valor}")
+    if args.avisar_telegram:
+        enviar_resumen_telegram(resumen)
     if not args.verificar_pdf:
         print("\nNOTA: sin --verificar-pdf la COMPLETITUD de cada documento queda DESCONOCIDA.")
     return 0

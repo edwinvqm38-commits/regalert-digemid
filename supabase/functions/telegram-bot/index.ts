@@ -1,3 +1,4 @@
+import { frasePorRuta, routeConsultaConIA } from "./consulta_router_ia.ts";
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
 import { answerConsultaRuntime, hydrateConsultaChunks } from "./consulta_runtime.ts";
@@ -6022,7 +6023,34 @@ async function handleCommand(
       );
     }
 
-    const question = trimmed.replace("/consulta", "").trim();
+    const questionOriginal = trimmed.replace("/consulta", "").trim();
+    let question = questionOriginal;
+
+    // La IA interpreta la pregunta primero; si falla, siguen las reglas de siempre.
+    if (questionOriginal) {
+      const ruta = await routeConsultaConIA(questionOriginal, {
+        deepseekApiKey: DEEPSEEK_API_KEY,
+        geminiApiKey: GEMINI_API_KEY,
+        geminiModel: GEMINI_MODEL,
+      }).catch(() => null);
+
+      if (ruta?.route === "ambigua" && ruta.clarification) {
+        await logConsulta({
+          chatId,
+          userId,
+          command: "/consulta_aclaracion",
+          queryText: questionOriginal,
+          status: "aclaracion",
+        });
+        return await sendMessage(
+          chatId,
+          `🤔 ${escapeHtml(ruta.clarification)}\n\nEscríbelo de nuevo con /consulta (esta aclaración no cuenta como consulta).`,
+        );
+      }
+
+      const frase = ruta ? frasePorRuta(ruta) : null;
+      if (frase) question = frase;
+    }
 
     if (!question) {
       return await sendMessage(
@@ -6211,6 +6239,11 @@ async function handleCommand(
         filasBotones.push([{ text: "🔊 Escuchar respuesta", callback_data: `tts:${consultaId}` }]);
       }
 
+      // Respuesta bloqueada por seguridad: no dejar al usuario con las manos
+      // vacías; ofrecer las normas más recientes y una pista para precisar.
+      if (answer.includes("NO CONFIRMADO AUTOMÁTICAMENTE")) {
+        filasBotones.push([{ text: "📜 Últimas normativas", callback_data: "normativa:ultimas" }]);
+      }
       const sourceButtons = filasBotones.length ? { inline_keyboard: filasBotones } : undefined;
 
       let pie = "";
@@ -6220,6 +6253,10 @@ async function handleCommand(
         if (restantes === 0) {
           pie += `\n💡 ¿Necesitas más? Escribe <code>/suscribirme basico</code>`;
         }
+      }
+
+      if (answer.includes("NO CONFIRMADO AUTOMÁTICAMENTE")) {
+        pie += "\n\n💡 Prueba nombrando la norma o el artículo (ej. <code>Resolución Ministerial 123-2026</code>) para una respuesta verificable.";
       }
 
       await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);

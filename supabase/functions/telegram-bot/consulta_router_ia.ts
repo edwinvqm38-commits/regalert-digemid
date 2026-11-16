@@ -12,6 +12,7 @@ export type RutaConsulta =
   | "listar_alertas"
   | "contar_alertas"
   | "listar_normativa"
+  | "ultima_norma"
   | "pregunta_documental"
   | "ambigua";
 
@@ -40,7 +41,8 @@ Clasifica la pregunta del usuario. Responde SOLO JSON:
 Rutas:
 - listar_alertas: quiere ver alertas sanitarias (últimas, de hoy, de la semana, del mes).
 - contar_alertas: quiere saber CUÁNTAS alertas hay (period hoy|semana|mes).
-- listar_normativa: quiere ver las normas/leyes/decretos/resoluciones MÁS RECIENTES o recién publicadas, sin un tema concreto (ej. "qué dice la última norma que ha salido").
+- listar_normativa: quiere VER UNA LISTA de normas/leyes/decretos/resoluciones recientes (ej. "últimas normativas", "dame las 5 últimas leyes").
+- ultima_norma: pregunta por UNA sola norma, la más reciente publicada, de cualquier tipo (ley, decreto, resolución...), sin tema concreto, y quiere saber qué dice (ej. "qué dice la última norma que ha salido", "de qué trata la norma más nueva").
 - pregunta_documental: pregunta sobre el CONTENIDO de una norma, tema, medicamento, requisito o artículo concreto.
 - ambigua: no se entiende qué quiere. Escribe en clarification UNA pregunta corta en español para aclarar.
 
@@ -50,6 +52,7 @@ const ROUTES: RutaConsulta[] = [
   "listar_alertas",
   "contar_alertas",
   "listar_normativa",
+  "ultima_norma",
   "pregunta_documental",
   "ambigua",
 ];

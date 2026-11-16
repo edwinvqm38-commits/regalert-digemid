@@ -34,10 +34,17 @@ Deno.test("parse: ambigua exige aclaracion; basura se descarta", () => {
 Deno.test("router: DeepSeek responde", async () => {
   const r = await routeConsultaConIA("que dice la ultima norma que ha salido?", {
     deepseekApiKey: "k",
-    fetchImpl: (() => dsResponse('{"route":"listar_normativa"}')) as typeof fetch,
+    fetchImpl: (() => dsResponse('{"route":"ultima_norma"}')) as typeof fetch,
   });
-  assert.equal(r?.route, "listar_normativa");
-  assert.equal(esConsultaDeUltimaNormativa(frasePorRuta(r!)!), true);
+  assert.equal(r?.route, "ultima_norma");
+  assert.equal(frasePorRuta(r!), null);
+  const lista = parseRouterJson('{"route":"listar_normativa"}', "deepseek");
+  assert.equal(esConsultaDeUltimaNormativa(frasePorRuta(lista!)!), true);
+  // La pregunta reescrita sobre una norma concreta no debe caer en el listado.
+  assert.equal(
+    esConsultaDeUltimaNormativa("De que trata la Resolución Ministerial N° 614-2026/MINSA? Resume su contenido y los puntos principales."),
+    false,
+  );
 });
 
 Deno.test("router: cae a Gemini si DeepSeek falla", async () => {

@@ -6025,6 +6025,7 @@ async function handleCommand(
 
     const questionOriginal = trimmed.replace("/consulta", "").trim();
     let question = questionOriginal;
+    let encabezadoUltimaNorma = "";
 
     // La IA interpreta la pregunta primero; si falla, siguen las reglas de siempre.
     if (questionOriginal) {
@@ -6046,6 +6047,34 @@ async function handleCommand(
           chatId,
           `🤔 ${escapeHtml(ruta.clarification)}\n\nEscríbelo de nuevo con /consulta (esta aclaración no cuenta como consulta).`,
         );
+      }
+
+      if (ruta?.route === "ultima_norma") {
+        // La IA entendió "la última norma, y qué dice": se toma la más reciente
+        // registrada (de cualquier tipo) y se consulta SU contenido con IA.
+        const [ultima] = await getLatestNormativa(1);
+        if (ultima) {
+          const preguntaNorma = `De que trata la ${ultima.title}? Resume su contenido y los puntos principales.`;
+          const resolucion = await resolverNormaPuntual(supabase, preguntaNorma).catch(() => null);
+          if (resolucion?.status === "resolved") {
+            question = preguntaNorma;
+            encabezadoUltimaNorma = `📜 <b>Última norma registrada:</b> ${escapeHtml(ultima.title)}\n📅 ${escapeHtml(ultima.published_date_display ?? ultima.published_date ?? "sin fecha")}\n\n`;
+          } else {
+            await logConsulta({
+              chatId,
+              userId,
+              command: "/consulta_aclaracion",
+              queryText: questionOriginal,
+              resultCount: 1,
+              status: "ok_ultima_norma_sin_texto",
+            });
+            return await sendMessage(
+              chatId,
+              formatNormativaList("📜 <b>Última norma registrada</b>", [ultima]) +
+                "\n\n⏳ Aún no tengo su texto transcrito para resumirla con IA; puedes abrir el enlace oficial.",
+            );
+          }
+        }
       }
 
       const frase = ruta ? frasePorRuta(ruta) : null;
@@ -6259,7 +6288,7 @@ async function handleCommand(
         pie += "\n\n💡 Prueba nombrando la norma o el artículo (ej. <code>Resolución Ministerial 123-2026</code>) para una respuesta verificable.";
       }
 
-      await sendMessage(chatId, `🤖 ${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
+      await sendMessage(chatId, `🤖 ${encabezadoUltimaNorma}${formatConsultaAnswer(answer)}${pie}`, sourceButtons);
 
       // Cuando la pregunta cito una norma puntual (resolverNormaPuntual
       // dentro de answerConsulta) hay un reporte HTML con el detalle completo

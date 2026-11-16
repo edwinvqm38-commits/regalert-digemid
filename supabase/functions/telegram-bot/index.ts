@@ -439,10 +439,10 @@ function trialKeyboard(nivelInteres?: string) {
 
 const TRIAL_TEXTO =
   "🎉 <b>¡Bienvenido a RegAlert DIGEMID!</b>\n\n" +
-  "✅ <b>Las alertas de DIGEMID son gratis:</b> te llegan a este chat apenas se publican, y puedes ver las últimas con /ultimas.\n\n" +
+  "✅ <b>Las alertas de DIGEMID y la normativa nueva son gratis:</b> te llegan a este chat apenas se publican, y puedes ver las últimas con /ultimas.\n\n" +
   "🤖 <b>Consultas con IA</b> (citan la norma exacta): prueba gratis con " +
   `<b>${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días</b>. ` +
-  "Después sigues recibiendo las alertas gratis, y la IA queda en los planes de pago.\n\n" +
+  "Después sigues recibiendo alertas y normativa gratis, y la IA queda en los planes de pago.\n\n" +
   "Elige una opción:";
 
 const ACCESO_REQUERIDO_TEXTO =
@@ -4587,7 +4587,7 @@ async function enviarMiPerfil(chatId: string): Promise<void> {
   } else if (usuario.prueba_estado === "finalizada") {
     lines.push("Tu prueba de IA ya terminó. Tus alertas siguen llegando gratis. Escribe /suscribirme para ver los planes de IA.");
   } else {
-    lines.push(`Tus alertas de DIGEMID son gratis. Escribe /suscribirme para probar la IA: ${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días.`);
+    lines.push(`Tus alertas de DIGEMID y la normativa nueva son gratis. Escribe /suscribirme para probar la IA: ${PRUEBA_IA_CONSULTAS_DIA} consultas al día durante ${PRUEBA_IA_DIAS} días.`);
   }
 
   return await sendMessage(chatId, lines.join("\n"));

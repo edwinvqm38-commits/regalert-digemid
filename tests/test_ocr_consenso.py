@@ -1,6 +1,14 @@
 import warnings
 
-import pytest
+try:
+    import pytest
+
+    _skipif = pytest.mark.skipif
+except ImportError:  # el CI usa unittest y no instala pytest
+    import unittest
+
+    def _skipif(condicion, reason=""):
+        return unittest.skipIf(condicion, reason)
 
 warnings.filterwarnings("ignore")
 
@@ -23,7 +31,7 @@ def test_consenso_con_pocas_lecturas_devuelve_la_primera():
     assert elegir_por_consenso(["uno", "dos"]) == 0
 
 
-@pytest.mark.skipif(not ocr_preproceso.HAS_CV2, reason="OpenCV no instalado")
+@_skipif(not ocr_preproceso.HAS_CV2, reason="OpenCV no instalado")
 def test_estimar_angulo_detecta_pagina_inclinada():
     import cv2
     import numpy as np

@@ -77,3 +77,16 @@ def test_la_prueba_de_ia_dura_cinco_dias():
 
     assert agent_notify.PRUEBA_LIMITE_DIAS == 5
     assert finalizar_pruebas_vencidas.PRUEBA_LIMITE_DIAS == 5
+
+
+def test_normativa_nueva_llega_a_todos_los_registrados():
+    filas = [{"telegram_chat_id": str(i)} for i in range(1, 4)]
+    agente = _agente(filas)
+    enviados = []
+
+    with patch.object(agente, "_send_to_chat", side_effect=lambda c, t, *a: enviados.append(c)):
+        with patch.object(agente, "build_normativa_message", return_value="norma"):
+            agente.send_normativa_individual([{"document_key": "LEY-1"}])
+
+    assert sorted(enviados) == ["1", "2", "3"]
+    assert agente.supabase.escrituras == []

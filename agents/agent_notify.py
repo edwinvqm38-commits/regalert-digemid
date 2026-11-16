@@ -364,27 +364,19 @@ class NotifyAgent:
         logger.info("DM de alertas enviados a %s personas registradas.", len(destinatarios))
 
     def send_normativa_individual(self, new_docs: list[dict]) -> None:
-        """DM de normativa nueva a los mismos suscriptores que las alertas.
+        """DM de normativa nueva (leyes, decretos, reglamentos, resoluciones y otros
+        documentos) a todas las personas registradas en el bot.
 
-        A diferencia de send_individual_alerts, no toca prueba_alertas_enviadas
-        ni el cierre de la prueba gratuita: ese limite es del producto de
-        alertas de producto, y la normativa es un contenido distinto que no
-        debe consumir ni terminar esa prueba.
+        Es gratis, igual que las alertas: no depende de plan ni de prueba, y no
+        toca prueba_alertas_enviadas ni el cierre de la prueba de IA.
         """
         if not new_docs or self.supabase is None:
             return
 
         texto = self.build_normativa_message(new_docs)
-        pagados, en_prueba = self._usuarios_elegibles_dm()
+        destinatarios = self._usuarios_alertas_gratis()
 
-        for chat_id in pagados:
+        for chat_id in destinatarios:
             self._send_to_chat(chat_id, texto)
 
-        for chat_id in en_prueba:
-            self._send_to_chat(chat_id, texto)
-
-        logger.info(
-            "DM de normativa enviados: %s pagados, %s en prueba.",
-            len(pagados),
-            len(en_prueba),
-        )
+        logger.info("DM de normativa enviados a %s personas registradas.", len(destinatarios))

@@ -37,7 +37,7 @@ Al escribir `/start` — ya sea desde la landing page o buscando el bot
 directo en Telegram — el bot te muestra una **prueba gratuita** y los 3
 planes pagados para que elijas:
 
-- Las **alertas de DIGEMID son gratis** para todos los usuarios registrados y no se cortan nunca.
+- Las **alertas de DIGEMID y la normativa nueva** (leyes, decretos, reglamentos y otros documentos) **son gratis** para todos los usuarios registrados y no se cortan nunca.
 - La prueba gratuita es solo para las **consultas con IA**: **2 consultas al día durante 5 días**.
 - Recibes las alertas nuevas directo a tu chat desde que te registras, con o
   sin prueba.

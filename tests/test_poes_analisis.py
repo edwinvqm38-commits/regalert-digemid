@@ -58,3 +58,29 @@ class PoesAnalisisTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FormatoDistintoTest(unittest.TestCase):
+    """Otro estilo de POES: 'PO-03', 'Página 2/4', fechas en texto, índice 'CONTENIDO'."""
+
+    def test_formato_alterno(self):
+        def pag(n, k, total, extra=""):
+            return f"FARMACIA Y\nPO-{n:02d} Limpieza\nPágina {k}/{total}\n{extra} " + "contenido " * 20
+
+        paginas = [
+            "CONTENIDO\nPO-01 Recepción\nPO-02 Almacén\nPO-03 Limpieza\n" + "x" * 50,
+            pag(1, 1, 1, "Vigente hasta: 15 de marzo de 2025 según Resolución Directoral N° 993-99-DG"),
+            pag(2, 1, 2),
+            pag(2, 2, 2),
+            pag(3, 1, 3),
+        ]
+        r = analizar_poes(paginas, {}, hoy=date(2026, 11, 16))
+        self.assertEqual([p.numero for p in r.procedimientos], [1, 2, 3])
+        self.assertEqual(r.incompletos, ["POE 003: trae 1 de 3 páginas"])
+        self.assertEqual(r.indice_inconsistente, [])
+        self.assertEqual(r.vigencia_vencida, ["Vigente hasta: 15 de marzo de 2025"])
+        self.assertIn(("RD", 993, 1999), extraer_citas("\n".join(paginas)))
+
+    def test_estructura_irreconocible_se_avisa(self):
+        r = analizar_poes(["texto libre sin codigos " * 10], {}, hoy=date(2026, 1, 1))
+        self.assertTrue(r.avisos)

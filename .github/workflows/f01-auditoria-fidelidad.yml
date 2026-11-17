@@ -1,0 +1,51 @@
+name: F-01 - Auditoria de fidelidad y secuencia de articulos (SOLO LECTURA)
+
+# Manual a proposito. No escribe nada en Supabase: solo SELECT. Publica el
+# reporte como artifact y, si se pide, un resumen al chat admin de Telegram.
+on:
+  workflow_dispatch:
+    inputs:
+      avisar_telegram:
+        description: "Enviar resumen al chat admin de Telegram"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: f01-auditoria-fidelidad
+  cancel-in-progress: false
+
+jobs:
+  auditar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Auditar fidelidad
+        run: |
+          python scripts/auditar_fidelidad_documental.py --out-dir reportes \
+            ${{ inputs.avisar_telegram && '--avisar-telegram' || '' }}
+
+      - name: Publicar reporte
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditoria-fidelidad
+          path: reportes/

@@ -27,11 +27,48 @@ _MAX_ANGULO_GRADOS = 8.0
 _MIN_ANGULO_GRADOS = 0.3
 
 
-def estimar_angulo(gris) -> float:
-    """Estima la inclinacion del texto en grados (positivo = antihorario)
-    a partir del rectangulo minimo que envuelve los pixeles de tinta."""
+def estimar_angulo_proyeccion(gris) -> float:
+    """Inclinacion por perfil de proyeccion: el angulo que mas 'afila' las
+    filas de texto (maxima varianza de las sumas por fila). Aguanta ruido y
+    manchas que desvian al rectangulo minimo. Devuelve el angulo que se le pasa a enderezar() (0.0 si no hay senal)."""
     if not HAS_CV2:
         return 0.0
+    alto, ancho = gris.shape[:2]
+    escala = 800 / max(alto, ancho)
+    chica = cv2.resize(gris, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA) if escala < 1 else gris
+    chica = cv2.medianBlur(chica, 3)
+    _, tinta = cv2.threshold(chica, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    # Une letras en renglones y descarta puntos sueltos de ruido.
+    tinta = cv2.morphologyEx(tinta, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    tinta = cv2.dilate(tinta, np.ones((1, 9), np.uint8))
+    if cv2.countNonZero(tinta) < 200:
+        return 0.0
+    h, w = tinta.shape
+
+    def puntaje(angulo: float) -> float:
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), angulo, 1.0)
+        rot = cv2.warpAffine(tinta, m, (w, h), flags=cv2.INTER_NEAREST)
+        return float(np.var(rot.sum(axis=1, dtype=np.float64)))
+
+    gruesos = np.arange(-_MAX_ANGULO_GRADOS, _MAX_ANGULO_GRADOS + 0.01, 0.5)
+    mejor = max(gruesos, key=puntaje)
+    finos = np.arange(mejor - 0.5, mejor + 0.51, 0.1)
+    mejor = max(finos, key=puntaje)
+    # Sin pico claro (pagina casi vacia) no se gira.
+    if puntaje(mejor) < puntaje(0.0) * 1.02:
+        return 0.0
+    return float(mejor)  # mismo convenio que enderezar(): angulo de CORRECCION
+
+
+def estimar_angulo(gris) -> float:
+    """Estima la inclinacion del texto en grados (positivo = antihorario).
+    Primero por perfil de proyeccion (robusto a ruido); si no hay senal, cae
+    al rectangulo minimo que envuelve los pixeles de tinta."""
+    if not HAS_CV2:
+        return 0.0
+    por_proyeccion = estimar_angulo_proyeccion(gris)
+    if por_proyeccion != 0.0:
+        return por_proyeccion
     _, binaria = cv2.threshold(gris, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     coords = cv2.findNonZero(binaria)
     if coords is None or len(coords) < 200:
